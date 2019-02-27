@@ -5,6 +5,17 @@
 
 #include <stdlib.h>
 
+#ifndef UNITTEST
+#  define UNITTEST				( 0 )
+#endif
+
+#define UNITTEST_UNIQUE_ID		1
+#include "utils/utils.h"		/* include all */
+
+#define DZ_PROTEIN
+#define DZ_MAT_SIZE				( 16 )
+#include "dozeu.h"
+
 
 /* alphabets */
 enum alphabet_iupac {
@@ -35,17 +46,11 @@ enum alphabet_2bit {
 
 /* index data structure; we expect each repeat sequence is shorter than 32kbp */
 typedef struct {
-	uint32_t kbits, bbits;
-} mk_ref_conf_t;
-
-typedef struct {
-	mk_ref_conf_t conf;
-	uint32_t size, slen;		/* object size and sequence length */
+	size_t size;		/* object size and sequence length */
+	uint32_t kbits, slen;
 	uint8_t const *seq;
 	char const *name;			/* structured name? */
-	uint32_t bofs[];			/* bin offsets */
 } mk_ref_sketch_t;
-
 
 /* construct reference object */
 typedef struct {
@@ -64,7 +69,6 @@ typedef struct {
 
 typedef struct {
 	uint32_t amask, shift;
-
 	uint32_t size;
 	uint32_t branches;
 	mk_ref_kmer_pair_t kmer[256];	/* branch stack; max ambiguity = 4^4 */
@@ -163,11 +167,11 @@ mk_ref_kpos_t *mk_ref_reserve(mk_ref_kpos_v *buf, mk_ref_kpos_t *q)
 }
 
 static _force_inline
-size_t mk_ref_collect_kmer(mk_ref_conf_t const *conf, uint8_t const *seq, size_t slen, mk_ref_kpos_v *buf)
+size_t mk_ref_collect_kmer(size_t kbits, uint8_t const *seq, size_t slen, mk_ref_kpos_v *buf)
 {
 	mk_ref_work_t w = {
-		.amask = (0x01<<conf->kbits) - 0x01,
-		.shift = conf->bbits,
+		.amask = (0x01<<kbits) - 0x01,
+		.shift = kbits - 2,
 		.size = 1,
 		.branches = 0,
 		.q = mk_ref_reserve(self, kv_ptr(*buf)),
@@ -204,22 +208,44 @@ size_t mk_ref_collect_kmer(mk_ref_conf_t const *conf, uint8_t const *seq, size_t
 }
 
 
+/* rotate */
+static _force_inline
+size_t mk_ref_rotate_kmer(size_t kbits, mk_ref_kpos_t const *kpos, size_t kcnt)
+{
+	uint32_t const mask = (0x01<<kbits) - 0x01;
+
+	/* automatically vectorized? */
+	for(size_t i = 0; i < kcnt; i++) {
+		uint32_t const kmer = kpos[i].kmer;
+		kpos[i].kmer = ((kmer & mask)<<2) | (kmer>>kbits);
+	}
+	return(kcnt);
+}
+
+
 /* pack kmer-position array */
 typedef struct {
-	uint16_t cnt, prefix;
-	int16_t next[4];							/* everything within +/- 32k bins */
-	uint8_t tail[4];
+	uint32_t tail : 12;			/* pos count */
+	uint32_t plen : 4;			/* unmatching prefix length */
+	int32_t next  : 16;			/* diff to next bin */
+} mk_ref_link_t;
+
+typedef struct {
+	mk_ref_link_t link[4];
 	uint16_t pos[];
 } mk_ref_bin_t;
+
+
 _static_assert(sizeof(mk_ref_bin_t) == 16);		/* smallest bin size == 16 */
 
 #define MK_REF_ALIGN_SIZE		( sizeof(uint64_t) )
-#define MK_REF_BASE_OFS			( sizeof(mk_ref_conf_t) )
+#define MK_REF_BASE_OFS			( sizeof(mk_ref_sketch_t) )
 
 
 typedef struct {
 	uint32_t cnt, ofs;
 } mk_ref_profile_t;
+typedef struct { mk_ref_profile_t *a; size_t n, m; } mk_ref_profile_v;
 
 static _force_inline
 size_t mk_ref_build_profile(mk_ref_profile_t *p, size_t ksize, mk_ref_kpos_t const *kpos, size_t kcnt)
@@ -227,7 +253,7 @@ size_t mk_ref_build_profile(mk_ref_profile_t *p, size_t ksize, mk_ref_kpos_t con
 	_unused(ksize);
 
 	for(mk_ref_kpos_t const *k = kpos, *t = &kpos[kcnt]; k < t; k++) {
-		p[k->kmer].cnt++;
+		p[k->kmer>>2].cnt++;
 	}
 	return(kcnt);
 }
@@ -244,7 +270,7 @@ size_t mk_ref_calc_size(mk_ref_profile_t const *p, size_t ksize)
 }
 
 static _force_inline
-size_t mk_ref_pack_kpos(mk_ref_profile_t *p, size_t ksize, mk_ref_kpos_t const *kpos, size_t kcnt, uint8_t *q)
+size_t mk_ref_pack_kpos(mk_ref_profile_t *p, size_t ksize, mk_ref_kpos_t const *kpos, size_t kcnt, mk_ref_sketch_t *sk)
 {
 	_unused(ksize);
 
@@ -255,32 +281,38 @@ size_t mk_ref_pack_kpos(mk_ref_profile_t *p, size_t ksize, mk_ref_kpos_t const *
 	mk_ref_kpos_t const *k = kpos, *t = &kpos[kcnt];
 	while(k < t) {
 		/* save current offset */
-		uint32_t const kmer = k->kmer;
-		p[kmer].ofs = ofs;
+		uint32_t const kbase = k->kmer>>2;
+		p[kbase].ofs = ofs;
 
 		/* slice bin from current offset */
-		mk_ref_bin_t *bin = _add_offset(q, ofs);
+		mk_ref_bin_t *bin = _add_offset(sk, ofs);
+		_storeu_v4i32(bin, _zero_v4i32());		/* clear link */
 
 		/* pack pos array */
-		size_t i = 0;
+		size_t i = 0, j = 0;
 		do {
-			bin->pos[i++] = k++->pos;
-		} while(k < t && k->kmer == kmer);
-		bin->cnt = i;
+			uint32_t const kall = k->kmer;
+			do {
+				bin->pos[i++] = k++->pos;
+			} while(k < t && k->kmer == kall);
+
+			do {
+				bin->link[j++].tail = i;
+			} while(j < (kall & 0x03));
+		} while(k < t && (k->kmer>>2) == kbase);
 
 		/* update offset */
-		ofs += _roundup(hdr + sizeof(uint16_t) * p[kmer].cnt, MK_REF_ALIGN_SIZE);
+		ofs += _roundup(hdr + sizeof(uint16_t) * p[kbase].cnt, MK_REF_ALIGN_SIZE);
 	}
 	return(ofs);
 }
 
 typedef struct {
-	uint32_t depth;
-	uint32_t ofs;
-} mk_ref_link_t;
+	uint32_t len, ofs;
+} mk_ref_prefix_t;
 
 static _force_inline
-mk_ref_link_t mk_ref_find_link(mk_ref_profile_t const *p, uint32_t kmer)
+mk_ref_prefix_t mk_ref_find_link(mk_ref_profile_t const *p, uint32_t kmer)
 {
 	size_t const max_depth = shift>>1;
 	size_t depth = 0;
@@ -296,296 +328,96 @@ mk_ref_link_t mk_ref_find_link(mk_ref_profile_t const *p, uint32_t kmer)
 			if(p[ksub].cnt == 0) { continue; }
 
 			/* hit */
-			return((mk_ref_link_t){
-				.depth = depth,
-				.ofs   = p[ksub].ofs
+			return((mk_ref_prefix_t){
+				.len = depth,
+				.ofs = p[ksub].ofs
 			});
 		}
 	} while(++depth < max_depth);
 
 	/* never reach here?? */
-	return((mk_ref_link_t){
-		.depth = max_depth,
-		.ofs   = MK_REF_BASE_OFS
+	return((mk_ref_prefix_t){
+		.len = max_depth,
+		.ofs = MK_REF_BASE_OFS
 	})
 }
 
 static _force_inline
-size_t mk_ref_build_link(mk_ref_profile_t const *p, size_t ksize, uint8_t *q)
+size_t mk_ref_build_link(mk_ref_profile_t const *p, size_t ksize, mk_ref_sketch_t *sk)
 {
 	size_t const shift = _tzcnt_u64(ksize);
 	for(size_t i = 0; i < ksize; i++) {
 		if(p[i].cnt == 0) { continue; }
 
-		mk_ref_bin_t *bin = _add_offset(q, p[i].ofs);
+		mk_ref_bin_t *bin = _add_offset(sk, p[i].ofs);
 
 		/* find next link for each base */
-		uint16_t prefix[4] = { 0 };
 		for(size_t j = 0; j < 4; j++) {
-			mk_ref_link_t n = mk_ref_find_link(p, (i + (j<<shift))>>2);
+			mk_ref_prefix_t n = mk_ref_find_link(p, (i + (j<<shift))>>2);
 
-			/* save link */
-			prefix[j]    = n.depth;
-			bin->next[j] = n.ofs - p[i].ofs;	/* overflows; keep sign bit */
+			/* save link; preserve tail */
+			bin->link[j].plen = n.len;
+			bin->link[j].next = n.ofs - p[i].ofs;	/* overflows; keep sign bit */
 		}
-
-		/* compact prefix table */
-		uint64_t const magic = 0x0001001001001000;
-		uint64_t const pall = _loadu_u64(prefix);
-		bin->prefix = (pall * magic)>>48;
 	}
 	return(ofs);
 }
 
-
-/* matcher */
-typedef struct {
-	size_t prefix, unmatching;
-	mk_ref_bin_t const *bin;
-} mk_ref_match_t;
-
 static _force_inline
-mk_ref_match_t mk_ref_match_init(mk_ref_sketch_t const *ref)
+mk_ref_sketch_t *mk_ref_build_index(size_t kbits, mk_ref_kpos_t const *kpos, size_t kcnt, mk_ref_profile_v *buf)
 {
-	return((mk_ref_match_t){
-		.prefix     = ref->conf.kbits>>1,
-		.unmatching = 1,
-		.bin        = _add_offset(ref, MK_REF_BASE_OFS)		/* bin for AAA... */
-	});
-}
+	kv_clear(*buf);
 
-static _force_inline
-mk_ref_match_t mk_ref_match_next(mk_ref_match_t m, uint8_t next)
-{
-	/* get link to the next bin */
-	int64_t const pitch = MK_REF_ALIGN_SIZE;
-	mk_ref_bin_t const *bin = _add_offset(m.bin, pitch * m.bin->next[next]);
+	/* reserve profile buffer */
+	size_t const ksize = 0x01ULL<<kbits;
+	mk_ref_profile_t *p = kv_reserve(mk_ref_profile_t, *buf, ksize);
 
-	/* update matching state */
-	size_t const pcnt = (m.bin->prefix>>(next<<2)) & 0x0f;
-	size_t prefix = m.prefix - m.unmatching + pcnt;
+	/* count kmers */
+	mk_ref_build_profile(p, ksize, kpos, kcnt);
 
-	return((mk_ref_match_t){
-		.prefix     = prefix,
-		.unmatching = prefix != 0,
-		.bin        = bin
-	});
-}
-
-
-
-
-
-typedef struct {
-	size_t total, distinct;
-} mk_ref_cnt_t;
-
-static _force_inline
-mk_ref_cnt_t mk_ref_scan_subarr(mk_ref_conf_t const *conf, uint32_t *cnt, mk_ref_kpos_t const *p)
-{
-	uint32_t const rmask = 0 - (0x01<<conf->bbits);
-	uint32_t const kbase = p->kmer & ~rmask;
-
-	mk_ref_kpos_t const *r = p;
-	size_t n = 0;
-
-	do {
-		uint32_t krem = p->kmer & rmask;
-		mk_ref_kpos_t const *q = p;
-
-		while((++p->kmer & rmask) == krem) {}
-
-		if(cnt != NULL) { cnt[n++] = p - q; }
-	} while((p->kmer & ~rmask) == kbase);
-
-	return((mk_ref_cnt_t){
-		.total    = p - r,
-		.distinct = n
-	});
-}
-
-static _force_inline
-size_t mk_ref_subarr_size(mk_ref_conf_t const *conf, mk_ref_cnt_t c)
-{
-	_unused(conf);
-
-	size_t const size = (
-		  sizeof(uint16_t) * _roundup(c.distinct + 1, 16)
-		+ sizeof(uint32_t) *  c.distinct
-		+ sizeof(uint16_t) * (c.distinct + c.total)
-	);
-	return(size);
-}
-
-static _force_inline
-size_t mk_ref_idx_size(mk_ref_conf_t const *conf, mk_ref_kpos_t const *kpos, size_t kcnt)
-{
-	mk_ref_kpos_t const *p = kpos, *t = &kpos[kcnt];
-
-	size_t size = 0;
-	while(p < t) {
-		mk_ref_cnt_t c = mk_ref_scan_subarr(conf, NULL, p);
-		size += mk_ref_subarr_size(conf, c);
-
-		p += c.total;
-	}
-	return(size);
-}
-
-
-typedef struct {
-	uint16_t *krem, *pos;
-	uint32_t *jmp;
-	size_t bofs, fwd;
-} mk_ref_bin_t;
-
-static _force_inline
-size_t mk_ref_init_bofs(mk_ref_conf_t const *conf)
-{
-	size_t const bsize = 0x01<<conf->bbits;
-	return((sizeof(mk_ref_sketch_t) + sizeof(uint32_t) * bsize) / sizeof(uint16_t));
-}
-
-static _force_inline
-mk_ref_bin_t mk_ref_slice_bin(mk_ref_conf_t const *conf, mk_ref_sketch_t *sk, size_t bofs, mk_ref_cnt_t c)
-{
-	size_t const base = bofs + _roundup(c.distinct + 1, 16);
-	size_t const fwd  = (
-		  _roundup(c.distinct + 1, 16)
-		+ c.distinct * (sizeof(uint32_t) / sizeof(uint16_t))
-		+ (c.distinct + c.total)
-	);
-
-	uint16_t *krem = _add_offset(sk,  sizeof(uint16_t) * bofs);
-	uint32_t *jmp  = _add_offset(sk,  sizeof(uint16_t) * base);
-	uint16_t *pos  = _add_offset(jmp, sizeof(uint32_t) * c.distinct);
-	return((mk_ref_bin_t){
-		.krem = krem,
-		.jmp  = jmp,
-		.pos  = pos,
-		.bofs = base,
-		.fwd  = fwd
-	});
-}
-
-static _force_inline
-size_t mk_ref_pack_krem(mk_ref_conf_t const *conf, uint16_t *krem, uint32_t const *cnt, size_t n, mk_ref_kpos_t const *p)
-{
-	size_t const m = _roundup(n + 1, 16);
-
-	/* just pick up and save */
-	for(size_t i = 0; i < n; i++) {
-		krem[i] = p->kmer>>conf->bbits;
-		p += cnt[i];
-	}
-
-	/* fill remaining columns with unmatching pattern */
-	for(size_t i = n; i < m - 1; i++) {
-		krem[i] = 0x8000;
-	}
-
-	/* save size in negated form */
-	int16_t sn = n;
-	krem[m - 1] = -sn;
-	return(m);
-}
-
-static _force_inline
-size_t mk_ref_pack_jmp(mk_ref_conf_t const *conf, uint32_t *jmp, uint32_t const *cnt, size_t n, mk_ref_kpos_t const *p)
-{
-	_unused(conf);
-
-	/* accumulate counts */
-	for(size_t i = 0, ofs = 2 * n; i < n; i++) {
-		jmp[i] = ofs;
-		ofs += cnt[i] + 1;
-	}
-	return(2 * n);
-}
-
-static _force_inline
-size_t mk_ref_pack_pos(mk_ref_conf_t const *conf, uint16_t *pos, uint32_t const *cnt, size_t n, mk_ref_kpos_t const *p)
-{
-	_unused(conf);
-
-	uint16_t *q = pos;
-	for(size_t i = 0; i < n; i++) {
-		*q++ = cnt[i];
-		for(size_t j = 0; j < cnt[i]; j++) {
-			*q++ = p++->pos;
-		}
-	}
-	return(q - pos);
-}
-
-static _force_inline
-size_t mk_ref_pack(mk_ref_conf_t const *conf, mk_ref_sketch_t *sk, size_t size, mk_ref_kpos_t const *kpos, size_t kcnt)
-{
-	uint32_t const bsize = 0x01<<conf->bbits, bmask = bsize - 0x01;
-	uint32_t const rsize = 0x01<<(conf->kbits - conf->bbits);
-	uint32_t rcnt[rsize];
-
-	/* clear bofs array */
-	for(size_t i = 0; i < bsize; i++) {
-		sk->bofs[i] = 0;
-	}
-
-	mk_ref_kpos_t const *p = kpos, *t = &kpos[kcnt];
-	size_t bofs = mk_ref_init_bofs(conf);
-
-	/* count kmers and pack position array */
-	while(p < t) {
-		/* count subarray elements (again) */
-		mk_ref_cnt_t c = mk_ref_scan_subarr(conf, rcnt, p);
-
-		/* allocate subarrays */
-		mk_ref_bin_t b = mk_ref_slice_bin(conf, sk, bofs, c); 
-
-		/* save bin offset */
-		sk->bofs[p->kmer & bmask] = b.bofs;			/* points jmp table */
-
-		/* pack each */
-		mk_ref_pack_krem(b.krem, rcnt, c.distinct, p);
-		mk_ref_pack_jmp(b.jmp, rcnt, c.distinct, p);
-		mk_ref_pack_pos(b.pos, rcnt, c.distinct, p);
-
-		/* forward pointers */
-		p += c.total;
-		bofs += b.fwd;
-	}
-	return(size);
-}
-
-static _force_inline
-mk_ref_sketch_t *mk_ref_build_index(mk_ref_conf_t const *conf, mk_ref_kpos_t const *kpos, size_t kcnt)
-{
-	size_t size = mk_ref_idx_size(conf, kpos, kcnt);
+	/* accumulate block size */
+	size_t size = mk_ref_calc_size(p, ksize);
 	if(size > UINT32_MAX) { trap(); }
 
 	mk_ref_sketch_t *sk = (mk_ref_sketch_t *)malloc(_roundup(size, 4096));	/* use entire page */
 	if(sk == NULL) { return(NULL); }
-
-	sk->conf = *conf;
+	sk->kbits = kbits;
 	sk->size = size;
-	mk_ref_pack(conf, sk, size, kpos, kcnt);
+
+	/* pack pos array */
+	mk_ref_pack_kpos(p, ksize, kpos, kcnt, sk);
+	mk_ref_build_link(p, ksize, sk);
 
 	/* anything else? */
 	return(sk);
 }
 
+
+/* working buffer */
+typedef struct {
+	mk_ref_kpos_v kpos;
+	mk_ref_profile_v prof;
+} mk_ref_t;
+
 static _force_inline
-mk_ref_sketch_t *mk_ref_sketch(mk_ref_conf_t const *conf, char const *name, uint8_t const *seq, size_t slen, mk_ref_kpos_v *buf)
+mk_ref_sketch_t *mk_ref_sketch(mk_ref_t *self, size_t kbits, char const *name, uint8_t const *seq, size_t slen)
 {
 	/* slice kmers from sequence (ambiguous bases are expanded here) */
-	if(mk_ref_collect_kmer(conf, seq, slen, buf) == 0) {
+	if(mk_ref_collect_kmer(kbits + 2, seq, slen, &self->kpos) == 0) {		/* with additional base */
 		return(NULL);
 	}
 
+	mk_ref_kpos_t *kpos = kv_ptr(self->kpos);
+	size_t const kcnt = kv_cnt(self->kpos);
+
+	/* rotate by a base before sort */
+	mk_ref_rotate_kmer(kbits, kpos, kcnt);
+
 	/* sort kmers by position */
-	radix_sort_kmer(kv_ptr(*buf), kv_cnt(*buf));
+	radix_sort_kmer(kpos, kcnt);
 
 	/* build index */
-	mk_ref_sketch_t *sk = mk_ref_build_index(conf, kv_ptr(*buf), kv_cnt(*buf));
+	mk_ref_sketch_t *sk = mk_ref_build_index(kbits, kpos, kcnt, &self->prof);
 	if(sk == NULL) { return(NULL); }
 
 	/* save metadata (we do not copy them) */
@@ -596,130 +428,79 @@ mk_ref_sketch_t *mk_ref_sketch(mk_ref_conf_t const *conf, char const *name, uint
 }
 
 
-/*
- * reference bin layout:
- *
- * typedef struct {
- *     uint16_t krem[_roundup(n + 1, 16) - 1];
- *     uint16_t negated_cnt;
- *     uint32_t jmp[n];		<- bin points this head
- *     uint16_t subarr[];
- * } mk_ref_jmp_t;
- */
+/* matcher */
+typedef struct {
+	size_t sidx, didx;
+} mk_ref_squash_t;
 
-/* match object */
+typedef struct {
+	size_t prefix, unmatching;
+	mk_ref_bin_t const *bin;
+} mk_ref_state_t;
+
+typedef struct {
+	mk_ref_state_t state;
+	mk_ref_squash_t squash;
+} mk_ref_next_t;
+
 typedef struct {
 	uint16_t const *ptr;
 	size_t cnt;
-} mk_match_t;
+} mk_ref_match_t;
+
 
 static _force_inline
-uint16_t const *mk_ref_get_bin(mk_ref_sketch_t const *ref, uint64_t kbase)
+mk_ref_state_t mk_ref_match_init(mk_ref_sketch_t const *ref)
 {
-	/* we expect bbase will be reused when this function is called multiple times; because bbase is constant among these calls */
-	return(_add_offset(ref, sizeof(uint16_t) * ref->bofs[kbase]));
+	return((mk_ref_state_t){
+		.prefix     = ref->conf.kbits>>1,
+		.unmatching = 1,
+		.bin        = _add_offset(ref, MK_REF_BASE_OFS)	/* bin for AAA... */
+	});
 }
 
-/* match k-mer remainder */
-typedef struct {
-	size_t idx;
-	uint64_t found;
-} mk_ref_match_rem_t;
-
 static _force_inline
-mk_ref_match_rem_t mk_ref_match_rem(uint16_t const *bin, uint64_t krem)
+mk_ref_next_t mk_ref_match_next(mk_ref_state_t s, uint8_t next)
 {
-	#define _match_v16i16(a, b) ( ((v16_masku_t){ .mask = _mask_v16i16(_eq_v16i16(a, b)) }).all )
+	int64_t const pitch = MK_REF_ALIGN_SIZE;
 
-	/* broadcast kmer remainder */
-	v16i16_t const vr = _set_v16i16(krem);
+	/* get link to the next bin */
+	mk_ref_link_t const link = s.bin->link[next];
+	mk_ref_bin_t const *bin = _add_offset(s.bin, pitch * link.next);
 
-	/* extract krem table */
-	int16_t const size = bin[-1];		/* negated */
-	uint16_t const *krem = &bin[(int64_t)size];		/* sign expansion */
+	/* update matching state */
+	size_t const prefix = s.prefix - s.unmatching + link.plen;
+	size_t const sidx = bin->link[next - 1ULL].tail;
+	return((mk_ref_next_t){
+		.state = {
+			.prefix     = prefix,
+			.unmatching = prefix != 0,
+			.bin        = bin
+		},
 
-	/* bulk match; ~12clks / loop */
-	size_t const bcnt = -((int64_t)size);
-	for(size_t i = 0; i < bcnt; i += 16) {
-		/* load and compare 16 elements */
-		v16i16_t const v = _loadu_v16i16(&krem[i]);
-		uint32_t const mask = _match_v16i16(v, vr);
-
-		/* return index if found */
-		if(mask != 0) {
-			ZCNT_RESULT size_t cnt = _tzcnt_u32(mask);
-			return((mk_ref_match_rem_t){
-				.idx = i + (cnt>>1),
-				.found = 1
-			});
+		/* extract squashable subbin */
+		.squash = {
+			.src = next == 0 ? 0 : src,
+			.dst = bin->link[next].tail,
+			.cnt = bin->link[3].tail
 		}
-	}
-
-	/* not found */
-	return((mk_ref_match_rem_t){
-		.idx = 0,			/* unused */
-		.found = 0
-	});
-
-	#undef _match_v16i16
-}
-
-typedef struct {
-	uint16_t cnt;
-	uint16_t pos[];		/* unaligned */
-} mk_ref_subarr_t;
-
-static _force_inline
-mk_match_t mk_ref_slice_arr(uint16_t const *bin, size_t idx)
-{
-	uint32_t const *jmp = (uint32_t const *)bin;
-
-	/* 2byte aligned */
-	mk_ref_subarr_t const *arr = (mk_ref_subarr_t const *)&bin[jmp[idx]];
-
-	/* size is saved at the head of the subarray; extract it */
-	return((mk_match_t){
-		.ptr = arr->pos,
-		.cnt = arr->cnt
 	});
 }
 
 static _force_inline
-mk_match_t mk_ref_match(mk_ref_sketch_t const *ref, uint64_t kmer)
+mk_ref_match_t mk_ref_get_arr(mk_ref_state_t s)
 {
-	uint64_t const kmask = (0x01ULL<<ref->conf.kbits) - 0x01ULL;
-	uint64_t const bmask = (0x01ULL<<ref->conf.bbits) - 0x01ULL;
-
-	/* divide kmer into base and remainder (for first and second stage matchings, respectively) */
-	uint64_t const kbase =  kmer & bmask;
-	uint64_t const krem  = (kmer & kmask)>>ref->conf.bbits;
-
-	/* first-stage matching: naive hash table */
-	uint16_t const *bin = mk_ref_get_bin(ref, kbase);
-
-	/* match second stage: linear probing */
-	mk_ref_match_rem_t m = mk_ref_match_rem(bin, krem);
-	if(m.found == 0) {
-		/* not found */
-		return((mk_match_t){ .ptr = NULL, .cnt = 0 });		/* we expect control paths are kept isolated */
-	}
-
-	/* hit! get subarray pointer and size */
-	mk_match_t arr = mk_ref_slice_arr(bin, m.idx);	/* arr.ptr won't be NULL */
-
-	/* anything else to do? */
-	return(arr);
+	return((mk_ref_match_t){
+		.ptr = s.bin->pos,
+		.cnt = s.bin->link[3].tail
+	});
 }
 
-
-
-/* query sequence be shorter than 2Gbp */
-typedef struct {
-	char const *name;
-	uint8_t const *seq;
-	size_t slen;
-	uint32_t const *kmer;
-} mk_query_sketch_t;
+static _force_inline
+mk_ref_squash_t mk_ref_get_squash(mk_ref_state_t s)
+{
+	return(s.squash);
+}
 
 
 /* seed */
@@ -732,6 +513,12 @@ typedef struct { mk_seed_t *a; size_t n, m; } mk_seed_v;
 #define mk_seed_upos(x)			( (x).u )
 KRADIX_SORT_INIT(seed, mk_seed_t, mk_seed_upos, 4);
 
+
+typedef struct {
+	uint16_t src, dst, cnt;
+} mk_intv_t;
+_static_assert(sizeof(mk_intv_t) == 48);
+typedef struct { mk_intv_t *a; size_t n, m; } mk_intv_v;
 
 /* chain */
 typedef struct {
@@ -767,8 +554,10 @@ typedef struct {
 	} ref;
 
 	/* working buffers */
-	struct { kvec_t(uint32_t) arr; } kmer;		/* for query kmers */
-	struct { kvec_t(mk_seed_t) arr; } seed;		/* for sorting seeds */
+	struct {
+		mk_seed_v arr;		/* for sorting seeds */
+		mk_intv_v intv;
+	} seed;
 
 	/* chaining */
 	struct {
@@ -779,7 +568,7 @@ typedef struct {
 		uint32_t min_scnt, chained;
 
 		/* working buffer */
-		kvec_t(mk_chain_t) arr;
+		mk_chain_v arr;
 	} chain;
 
 	/* chain filter */
@@ -801,7 +590,7 @@ typedef struct {
 		dz_t *dz;				/* everything contained */
 
 		/* result bin */
-		kvec_t(mk_aln_t) arr;
+		mk_aln_v arr;
 	} extend;
 } mk_scan_t;
 
@@ -828,14 +617,36 @@ mk_seed_t *mk_seed_reserve(mk_seed_v *buf, mk_seed_t *q)
 }
 
 static _force_inline
-size_t mk_expand_seed(mk_ref_bin_t const *bin, v4i32_t uofs, v4i32_t vofs, uint8_t next, mk_seed_t *q)
+mk_intv_t *mk_intv_reserve(mk_intv_v *buf, mk_intv_t *q)
+{
+	/* update count */
+	kv_cnt(*buf) = q - kv_ptr(*buf);
+
+	mk_intv_t *p = kv_reserve(mk_intv_t, *buf, 64);
+	return(&p[kv_cnt(*buf)]);
+}
+
+static _force_inline
+size_t mk_save_intv(mk_ref_state_t s, mk_ref_squash_t sq, mk_intv_t *r)
+{
+	/* just copy */
+	*r = (mk_intv_t){
+		.src = sq.src,
+		.dst = sq.dst,
+		.cnt = sq.cnt
+	};
+	return(1 - s.unmatching);
+}
+
+static _force_inline
+size_t mk_expand_seed(mk_ref_state_t s, v4i32_t uofs, v4i32_t vofs, uint8_t next, mk_seed_t *q)
 {
 	v4i32_t const wmask = _set_v4i32(0x20000000);
 
-	size_t cnt = bin->cnt;
-	for(size_t i = 0; i < cnt; i += 4) {
+	mk_ref_match_t m = mk_ref_get_arr(s);
+	for(size_t i = 0; i < m.cnt; i += 4) {
 		v4i32_t const z = ({
-			__m128i const x = _mm_loadl_epi64((__m128i const *)&bin->pos[i]);	/* movq (mem), xmm */
+			__m128i const x = _mm_loadl_epi64((__m128i const *)&m.ptr[i]);	/* movq (mem), xmm */
 			__m128i const y = _mm_cvtepi16_epi32(x);	/* pmovsxwd; sign expansion */
 			((v4i32_t){ .v1 = y });
 		});
@@ -848,21 +659,21 @@ size_t mk_expand_seed(mk_ref_bin_t const *bin, v4i32_t uofs, v4i32_t vofs, uint8
 		_storeu_v4i32(&q[i],     _lo_v4i32(u, v));
 		_storeu_v4i32(&q[i + 2], _hi_v4i32(u, v));
 	}
-
-	/* squash continuing match */
-
-	return(cnt);
+	return(m.cnt);
 }
 
 static _force_inline
-size_t mk_collect_seed(mk_ref_sketch_t const *ref, uint8_t const *query, size_t qlen, mk_seed_v *seed)
+size_t mk_collect_seed(mk_ref_sketch_t const *ref, uint8_t const *query, size_t qlen, mk_seed_v *seed, mk_squash_v *intv)
 {
 	/* load coordinate constants */
 	v4i32_t const uinc = _set_v4i32(2), vinc = _set_v4i32(-1);
 	v4i32_t uofs = _set_v4i32(0x20000), vofs = _set_v4i32(0x10000);
 
+	mk_seed_t *q = mk_seed_reserve(seed, kv_ptr(*seed));
+	mk_intv_t *r = mk_intv_reserve(intv, kv_ptr(*intv));
+
 	/* initial state (of three general-purpose registers) */
-	mk_ref_match_t m = mk_ref_match_init(ref);
+	mk_ref_state_t s = mk_ref_match_init(ref);
 
 	/* for each base... */
 	for(size_t i = 0; i < qlen; i++) {
@@ -871,24 +682,51 @@ size_t mk_collect_seed(mk_ref_sketch_t const *ref, uint8_t const *query, size_t 
 		vofs = _add_v4i32(vofs, vinc);
 
 		/* update matching status for the next bin (prefetch) */
-		mk_ref_match_t n = mk_ref_match_next(m, query[i]);
+		mk_ref_state_t n = mk_ref_match_next(s, query[i]);
+		r += mk_save_intv(n.state, n.squash, r);
 
 		/* skip current bin if not matching */
 		if(!m.unmatching) {
-			q += mk_expand_seed(m.bin, uofs, vofs, q);
+			q += mk_expand_seed(s, uofs, vofs, query[i], q);
 		}
 
 		/* alias new state (we expect the next bin has already arrived) */
-		m = n;
+		s = n.state;
 
 		/* test array expansion every 32 times */
 		if((i & 0x1f) != 0) { continue; }
-
-		;
+		q = mk_seed_reserve(seed, q);
+		r = mk_intv_reserve(intv, r);
 	}
-	return;
+	return(kv_cnt(*seed));
 }
 
+static _force_inline
+size_t mk_squash_seed(mk_intv_t const *intv, size_t icnt, mk_seed_v *seed)
+{
+	/* squash succeeding match */
+	size_t idx = 0;
+	for(size_t i = 0; i < icnt; i++) {
+		mk_intv_t const *p = &intv[i];
+
+		/* determine source and destination indices */
+		size_t const src = idx + p->src;
+		size_t const dst = idx + p->dst;
+		size_t const tail = idx + p->cnt;
+
+		/* copy with ymm */
+		for(size_t i = src, j = dst; j < tail; i += 8, j += 8) {
+			v32i8_t const v = _loadu_v32i8(&q[i]);
+			_storeu_v32i8(&q[j], v);
+		}
+
+		/* update index for next iteration */
+		idx += tail - dst + src;
+	}
+
+	kv_cnt(*seed) = idx;
+	return(idx);
+}
 
 static _force_inline
 int64_t mk_chain_test_ptr(mk_seed_t const *p, mk_seed_t const *t)
@@ -1114,13 +952,13 @@ int64_t mk_filter_extend(mk_scan_t const *self, mk_filter_t r, mk_filter_t q)
 }
 
 static _force_inline
-int64_t mk_filter_extend_inward(mk_scan_t const *self, mk_ref_sketch_t const *ref, mk_query_sketch_t const *query, mk_chain_t const *chain)
+int64_t mk_filter_extend_inward(mk_scan_t const *self, mk_ref_sketch_t const *ref, uint8_t const *query, size_t qlen, mk_chain_t const *chain)
 {
 	return(0);
 }
 
 static _force_inline
-int64_t mk_filter_extend_outward(mk_scan_t const *self, mk_ref_sketch_t const *ref, mk_query_sketch_t const *query, mk_chain_t const *chain)
+int64_t mk_filter_extend_outward(mk_scan_t const *self, mk_ref_sketch_t const *ref, uint8_t const *query, size_t qlen, mk_chain_t const *chain)
 {
 	return(0);
 }
@@ -1143,7 +981,7 @@ size_t mk_filter_save_chain(mk_scan_t const *self, uint32_t rid, mk_chain_t *q, 
 }
 
 static _force_inline
-size_t mk_filter_chain(mk_scan_t const *self, mk_ref_sketch_t const *ref, mk_query_sketch_t const *query, uint32_t rid, mk_chain_t *chain, size_t ccnt)
+size_t mk_filter_chain(mk_scan_t const *self, mk_ref_sketch_t const *ref, uint8_t const *query, size_t qlen, uint32_t rid, mk_chain_t *chain, size_t ccnt)
 {
 	/* alias pointer */
 	mk_chain_t const *src = chain;
@@ -1160,8 +998,8 @@ size_t mk_filter_chain(mk_scan_t const *self, mk_ref_sketch_t const *ref, mk_que
 		/* try short extension if not heavy enough */
 		if(p->cnt < test_cnt) {
 			int64_t score = (p->uspan > uspan_thresh
-				? mk_filter_extend_inward(self, ref, query, p)		/* inward extension for long-spanning chain */
-				: mk_filter_extend_outward(self, ref, query, p)
+				? mk_filter_extend_inward(self, ref, query, qlen, p)		/* inward extension for long-spanning chain */
+				: mk_filter_extend_outward(self, ref, query, qlen, p)
 			);
 			if(score < min_score) { continue; }
 		}
@@ -1173,24 +1011,35 @@ size_t mk_filter_chain(mk_scan_t const *self, mk_ref_sketch_t const *ref, mk_que
 }
 
 static _force_inline
-size_t mk_collect_candidate(mk_scan_t *self, mk_ref_sketch_t const *ref, mk_query_sketch_t const *query, mk_chain_v *chain)
+size_t mk_collect_candidate(mk_scan_t *self, mk_ref_sketch_t const *ref, uint8_t const *query, size_t qlen, mk_chain_v *chain)
 {
 	/* enumerate seeds */
 	kv_clear(self->seed.arr);
-	if(mk_collect_seed(self, ref, query, &self->seed.arr) == 0) {
+	if(mk_collect_seed(self, ref, query, qlen, &self->seed.arr, &self->seed.intv) == 0) {
 		return(0);
 	}
 
+	mk_intv_t const *intv = kv_ptr(self->seed.intv);
+	size_t icnt = kv_cnt(self->seed.intv);
+
+	/* squash overlapping seeds */
+	if(mk_squash_seed(intv, icnt, &self->seed.arr) == 0) {
+		return(0);
+	}
+
+	mk_seed_t const *sptr = kv_ptr(self->seed.arr);
+	size_t scnt = kv_cnt(self->seed.arr);
+
 	/* sort seeds by u-coordinates for chaining */
-	radix_sort_seed(kv_ptr(self->seed.arr), kv_cnt(self->seed.arr));
+	radix_sort_seed(sptr, scnt);
 
 	/* chaining; return if no chain obtained */
 	size_t const cbase = kv_cnt(chain);		/* save chain count */
-	size_t const ccnt  = mk_chain_seed(self, kv_ptr(self->seed.arr), kv_cnt(self->seed.arr), chain);
+	size_t const ccnt  = mk_chain_seed(self, sptr, scnt, chain);
 	if(ccnt == 0) { return(0); }
 
 	/* filter (try small extension with simple score matrix) */
-	size_t const cfilt = mk_filter_chain(self, ref, query, &kv_ptr(chain)[cbase], ccnt);
+	size_t const cfilt = mk_filter_chain(self, ref, query, qlen, &kv_ptr(chain)[cbase], ccnt);
 	if(cfilt == 0) { return(0); }
 
 	/* finalize filtered chains */
@@ -1225,6 +1074,8 @@ typedef struct {
 	} path;
 } mk_aln_t;
 _static_assert(sizeof(mk_aln_t) == 64);
+
+typedef struct { mk_aln_t *a; size_t n, m; } mk_aln_v;
 
 #define mk_aln_header(a)			( &(a)->h )
 #define mk_aln_rbt_cmp(a, b)		( (a)->pos.q < (b)->pos.q )
@@ -1350,7 +1201,7 @@ mk_aln_t mk_extend_seed(mk_scan_t const *self, mk_ref_sketch_t const *ref, dz_qu
 }
 
 static _force_inline
-size_t mk_extend(mk_scan_t *self, mk_ref_sketch_t const *ref, mk_query_sketch_t const *query, mk_chain_t const *chain, size_t ccnt)
+size_t mk_extend(mk_scan_t *self, mk_ref_sketch_t const *ref, uint8_t const *query, size_t qlen, mk_chain_t const *chain, size_t ccnt)
 {
 	/* clear bin */
 	mk_extend_clear(self);
@@ -1358,8 +1209,8 @@ size_t mk_extend(mk_scan_t *self, mk_ref_sketch_t const *ref, mk_query_sketch_t 
 
 	/* build reference-side profile */
 	dz_query_t *q[2] = {
-		dz_pack_query_forward(self->extend.dz, query->seq, query->slen),
-		dz_pack_query_reverse(self->extend.dz, query->seq, query->slen)
+		dz_pack_query_forward(self->extend.dz, query, qlen),
+		dz_pack_query_reverse(self->extend.dz, query, qlen)
 	};
 
 	/* for each chain try extension */
@@ -1387,33 +1238,27 @@ size_t mk_extend(mk_scan_t *self, mk_ref_sketch_t const *ref, mk_query_sketch_t 
 }
 
 
-/* evaluate all */
+/* evaluate all; query sequence be shorter than 2Gbp */
 static _force_inline
 size_t mk_scan_mask(mk_scan_t *self, char const *name, uint8_t const *seq, size_t slen)
 {
 	mk_scan_clear(self);
 
-	/* compute k-mer array */
-	mk_query_sketch_t query = {
-		.name = name,
-		.seq  = seq,
-		.slen = slen,
-		.kmer = mk_query_sketch(self, seq, slen)
-	};
-
 	/* collect chain for each reference sequence */
 	mk_ref_sketch_t const *ref = self->ref.ptr;
 	for(size_t i = 0; i < self->ref.cnt; i++) {
-		mk_collect_candidate(self, &ref[i], &query, &self->chain.arr);
+		mk_collect_candidate(self, &ref[i], seq, slen, &self->chain.arr);
 	}
 
-	if(kv_cnt(self->chain.arr) == 0) { return(0); }
+	mk_chain_t const *cptr = kv_ptr(self->chain.arr);
+	size_t const ccnt = kv_cnt(self->chain.arr);
+	if(ccnt == 0) { return(0); }
 
 	/* sort by estimated identity */
-	radix_sort_chain(kv_ptr(self->chain.arr), kv_cnt(self->chain.arr));
+	radix_sort_chain(cptr, ccnt);
 
 	/* convert chain to alignment */
-	size_t acnt = mk_extend(self, ref, &query, kv_ptr(self->chain.arr), kv_cnt(self->chain.arr));
+	size_t acnt = mk_extend(self, ref, seq, slen, cptr, ccnt);
 	return(acnt);
 }
 
