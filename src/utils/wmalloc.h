@@ -55,8 +55,8 @@ void oom_abort(
  * @macro wrapped_malloc
  */
 #define wrapped_malloc(_x) ({ \
-	assert((_x) < 20ULL * 1024 * 1024 * 1024, "size(%zu)", (size_t)(_x)); \
 	size_t _req_size = (size_t)(_x); \
+	debugblock({ if((_req_size) >= 20ULL * 1024 * 1024 * 1024) { debug("size(%zu)", (size_t)(_req_size)); trap(); } }); \
 	void *_ptr = malloc(_req_size); \
 	if(_unlikely(_ptr == NULL)) { \
 		oom_abort(__func__, _req_size); \
@@ -74,9 +74,9 @@ void oom_abort(
  * @macro wrapped_realloc
  */
 #define wrapped_realloc(_x, _y) ({ \
-	assert((_y) < 20ULL * 1024 * 1024 * 1024, "size(%zu)", (size_t)(_y)); \
 	void *_prev_ptr = (void *)(_x); \
 	size_t _req_size = (size_t)(_y); \
+	debugblock({ if((_req_size) >= 20ULL * 1024 * 1024 * 1024) { debug("size(%zu)", (size_t)(_req_size)); trap(); } }); \
 	void *_ptr = realloc(_prev_ptr, _req_size); \
 	if(_unlikely(_ptr == NULL)) { \
 		oom_abort(__func__, _req_size); \
