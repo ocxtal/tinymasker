@@ -9,11 +9,11 @@ WFLAGS = -Wall -Wextra -Wno-unused-variable -Wno-unused-function -Wno-constant-c
 CFLAGS = -std=c99 $(OFLAGS) $(WFLAGS)
 
 
-all: masker
+all: tinymasker
 
-masker: $(SRC)/masker.c $(SRC)/dozeu.h
-	$(CC) $(CFLAGS) -o masker $(SRC)/masker.c
+tinymasker: $(SRC)/tinymasker.c $(SRC)/dozeu.h
+	$(CC) $(CFLAGS) -o tinymasker $(SRC)/tinymasker.c
 
 clean:
-	$(RM) -f masker
+	$(RM) -f tinymasker
 

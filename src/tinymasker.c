@@ -1,6 +1,6 @@
 
 /**
- * @file masker.c
+ * @file tinymasker.c
  */
 
 #include <stdlib.h>
@@ -15,6 +15,27 @@
 #define DZ_PROTEIN
 #define DZ_MAT_SIZE				( 16 )
 #include "dozeu.h"
+
+
+/* misc */
+#ifndef MK_VERSION
+#  define MK_VERSION			"tinymasker-0.0.1"
+#endif
+#define MK_ARCH_NAME			ARCH_NAME			/* SSE4.1 or AVX2 */
+
+/* version string */
+static _force_inline
+char const *mk_version(void)
+{
+	char const *prefix = "tinymasker-";
+
+	/* remove prefix */
+	uint64_t spos = mm_startswith(MK_VERSION, prefix) ? strlen(prefix) : 0;
+	return(&MK_VERSION[spos]);
+}
+
+
+unittest_config( .name = "tinymasker" );
 
 
 /* alphabets */
@@ -506,6 +527,59 @@ mk_ref_match_t mk_ref_get_arr(mk_ref_state_t s)
 }
 
 
+/* index builder */
+
+typedef struct {
+	uint32_t dummy;;
+} mk_idx_conf_t;
+
+typedef struct {
+	uint32_t dummy;
+} mk_idx_t;
+
+static _force_inline
+void mk_idx_destroy(mk_idx_t *mi)
+{
+	_unused(mi);
+
+	return;
+}
+
+static _force_inline
+mk_idx_t *mk_idx_gen(mk_idx_conf_t const *conf, pt_t *pt, char const *filename, FILE *log)
+{
+	_unused(conf);
+	_unused(pt);
+	_unused(filename);
+	_unused(log);
+
+	return(NULL);
+}
+
+
+/* index I/O */
+static _force_inline
+size_t mk_idx_dump(mk_idx_t const *idx, pg_t *pg, write_t write)
+{
+	_unused(idx);
+	_unused(pg);
+	_unused(write);
+
+	size_t const size = 0;
+	return(size);
+}
+
+static _force_inline
+mk_idx_t *mk_idx_load(pg_t *pg, read_t read)
+{
+	_unused(pg);
+	_unused(read);
+
+	mk_idx_t *mi = NULL;
+	return(mi);
+}
+
+
 /* seed */
 typedef struct {
 	uint32_t u, v;
@@ -610,6 +684,10 @@ RBT_INIT_ITER(aln, mk_aln_t, mk_aln_rbt_header,
 
 /* working buffer */
 typedef struct {
+	uint32_t dummy;
+} mk_scan_conf_t;
+
+typedef struct {
 	struct {
 		mk_ref_sketch_t const *ptr;
 		size_t cnt;
@@ -658,6 +736,25 @@ typedef struct {
 
 
 static _force_inline
+void mk_scan_init_static(mk_scan_t *self, size_t cnt, mk_scan_conf_t const *conf)
+{
+	_unused(self);
+	_unused(cnt);
+	_unused(conf);
+
+	return;
+}
+
+static _force_inline
+void mk_scan_destroy_static(mk_scan_t *self, size_t cnt)
+{
+	_unused(self);
+	_unused(cnt);
+
+	return;
+}
+
+static _force_inline
 void mk_scan_clear(mk_scan_t *self)
 {
 	kv_clear(self->seed.arr);
@@ -701,7 +798,7 @@ size_t mk_save_intv(mk_ref_state_t s, mk_ref_squash_t sq, mk_intv_t *r)
 }
 
 static _force_inline
-size_t mk_expand_seed(mk_ref_state_t s, v4i32_t uofs, v4i32_t vofs, uint8_t next, mk_seed_t *q)
+size_t mk_expand_seed(mk_ref_state_t s, v4i32_t uofs, v4i32_t vofs, mk_seed_t *q)
 {
 	v4i32_t const wmask = _set_v4i32(0x20000000);
 
@@ -749,7 +846,7 @@ size_t mk_collect_seed(mk_ref_sketch_t const *ref, uint8_t const *query, size_t 
 
 		/* skip current bin if not matching */
 		if(!s.unmatching) {
-			q += mk_expand_seed(s, uofs, vofs, query[i], q);
+			q += mk_expand_seed(s, uofs, vofs, q);
 		}
 
 		/* alias new state (we expect the next bin has already arrived) */
@@ -827,6 +924,8 @@ mk_seed_t *mk_chain_find_first(mk_scan_t const *self, mk_seed_t *p, mk_seed_t *t
 static _force_inline
 mk_seed_t *mk_chain_find_alt(mk_scan_t const *self, mk_seed_t *p, mk_seed_t *t, uint64_t lb)
 {
+	_unused(self);
+
 	/* constants */
 	uint64_t const tmask = 0x8000000080000000;	/* extract two sign bit pair */
 
@@ -944,6 +1043,7 @@ size_t mk_chain_seed(mk_scan_t const *self, mk_seed_t *seed, size_t scnt, mk_cha
 static _force_inline
 v16i8_t mk_load_forward(mk_scan_t const *self, uint8_t const *ptr)
 {
+	_unused(self);
 	return(_loadu_v16i8(ptr));
 }
 
@@ -1019,18 +1119,30 @@ int64_t mk_filter_extend(mk_scan_t const *self, mk_filter_t r, mk_filter_t q)
 static _force_inline
 int64_t mk_filter_extend_inward(mk_scan_t const *self, mk_ref_sketch_t const *ref, uint8_t const *query, size_t qlen, mk_chain_t const *chain)
 {
+	_unused(self);
+	_unused(ref);
+	_unused(query);
+	_unused(qlen);
+	_unused(chain);
 	return(0);
 }
 
 static _force_inline
 int64_t mk_filter_extend_outward(mk_scan_t const *self, mk_ref_sketch_t const *ref, uint8_t const *query, size_t qlen, mk_chain_t const *chain)
 {
+	_unused(self);
+	_unused(ref);
+	_unused(query);
+	_unused(qlen);
+	_unused(chain);
 	return(0);
 }
 
 static _force_inline
 size_t mk_filter_save_chain(mk_scan_t const *self, uint32_t rid, mk_chain_t *q, mk_chain_t const *p)
 {
+	_unused(self);
+
 	/* load */
 	v16i8_t v = _loadu_v16i8(p);
 
@@ -1118,6 +1230,8 @@ size_t mk_collect_candidate(mk_scan_t *self, mk_ref_sketch_t const *ref, uint32_
 static _force_inline
 uint64_t mk_extend_is_complete(mk_scan_t *self)
 {
+	_unused(self);
+
 	/* FIXME */
 	return(0);
 }
@@ -1146,6 +1260,8 @@ uint64_t mk_extend_is_covered(mk_scan_t *self, mk_aln_t const *caln, uint32_t we
 static _force_inline
 void mk_extend_record(mk_scan_t *self, mk_chain_t const *chain, mk_aln_t aln)
 {
+	_unused(chain);
+
 	kv_push(mk_aln_t, self->extend.arr, aln);
 	rbt_insert_aln(kv_ptr(self->extend.arr), kv_cnt(self->extend.arr) - 1);
 	return;
@@ -1162,8 +1278,10 @@ void mk_extend_clear(mk_scan_t *self)
 static _force_inline
 mk_aln_t mk_chain_as_aln(mk_scan_t const *self, mk_chain_t const *chain)
 {
-	/* FIXME */
+	_unused(self);
+	_unused(chain);
 
+	/* FIXME */
 	return((mk_aln_t){
 		.pos  = { .r = 0, .q = 0 },
 		.span = { .r = 0, .q = 0 },
@@ -1249,7 +1367,7 @@ size_t mk_extend(mk_scan_t *self, mk_ref_sketch_t const *ref, uint8_t const *que
 
 /* evaluate all; query sequence be shorter than 2Gbp */
 static _force_inline
-size_t mk_scan_mask(mk_scan_t *self, char const *name, uint8_t const *seq, size_t slen)
+size_t mk_scan_mask(mk_scan_t *self, uint8_t const *seq, size_t slen)
 {
 	mk_scan_clear(self);
 
@@ -1274,7 +1392,525 @@ size_t mk_scan_mask(mk_scan_t *self, char const *name, uint8_t const *seq, size_
 
 
 
+/* printer */
+typedef struct {
+	uint32_t dummy;
+} mk_print_conf_t;
+
+typedef struct {
+	uint32_t dummy;
+} mk_print_t;
+
+
+static _force_inline
+void mk_print_destory_static(mk_print_t *self)
+{
+	_unused(self);
+
+	return;
+}
+
+static _force_inline
+void mk_print_init_static(mk_print_t *self, mk_print_conf_t const *conf, char const *args)
+{
+	_unused(self);
+	_unused(conf);
+	_unused(args);
+
+	return;
+}
+
+
+
+
+
+/* multithreaded scan-and-mask */
+typedef struct {
+	uint32_t dummy;
+} mk_mtscan_t;
+
+static _force_inline
+mk_mtscan_t *mk_mtscan_init(mk_scan_conf_t const *conf, mk_idx_t const *mi, mk_print_t *printer, pt_t *pt)
+{
+	_unused(conf);
+	_unused(mi);
+	_unused(printer);
+	_unused(pt);
+
+	return(NULL);
+}
+
+static _force_inline
+void mk_mtscan_destroy(mk_mtscan_t *self)
+{
+	free(self);
+	return;
+}
+
+static _force_inline
+int mk_mtscan_file(mk_mtscan_t *self, char const *fn)
+{
+	_unused(self);
+	_unused(fn);
+
+	return(0);
+}
+
+
+/* return codes */
+enum main_error_codes {
+	ERROR_INTERNAL = 255,
+	ERROR_NO_ARG = 1,
+
+	ERROR_OPEN_IDX = 2,
+	ERROR_LOAD_IDX = 3,
+
+	ERROR_OPEN_RSEQ = 4,
+	ERROR_OPEN_QSEQ = 5
+};
+
+typedef struct {
+	/* index dump mode if not NULL */
+	char const *idxdump;
+
+	/* global args */
+	char const *args;
+	uint32_t verbose, help;
+	size_t nth;
+
+	/* scan-and-mask params */
+	mk_idx_conf_t index;
+	mk_scan_conf_t scan;
+	mk_print_conf_t print;
+
+	/* option parser */
+	FILE *log;
+	opt_t opt;
+} mk_conf_t;
+
+static _force_inline
+void mk_conf_init_static(mk_conf_t *conf, char const *const *argv, FILE *fp)
+{
+	_unused(conf);
+	_unused(argv);
+	_unused(fp);
+	return;
+}
+
+static _force_inline
+void mk_conf_destroy_static(mk_conf_t *conf)
+{
+	_unused(conf);
+	return;
+}
+
+
+/* determine help and verbose level */
+typedef struct {
+	FILE *fp;
+	uint64_t help, quit;
+} mk_conf_outfp_t;
+
+static _force_inline
+mk_conf_outfp_t mk_conf_get_outfp(mk_conf_t *conf)
+{
+	/* use stdout for explicit version (-v) and help (-h) options */
+	if(conf->verbose == 1 || conf->help > 0) {
+		return((mk_conf_outfp_t){
+			.fp = stdout,
+			.help = conf->help,
+			.quit = 1
+		});
+	}
+
+	/* restore default verbose level */
+	if(conf->verbose == 0) {
+		conf->verbose = 1;
+	}
+
+	/* implicit help invoked when no input file found; always redirected to stderr */
+	return((mk_conf_outfp_t){
+		.fp = conf->log,
+		.help = opt_parg_cnt(&conf->opt) == 0,
+		.quit = 0
+	});
+}
+
+/* print help */
+static _force_inline
+void mk_conf_print_help(mk_conf_t const *conf, FILE *log)
+{
+	if(conf->verbose == 0) { return; }
+
+	#define _msg_impl(_level, _fmt, ...) { logger_printf(log, _fmt "%s\n", __VA_ARGS__); }
+	#define _msg(_level, ...) { if((_level) <= conf->verbose + 1) { _msg_impl(_level, __VA_ARGS__, ""); } }
+
+	_msg(2, "\n"
+			"  tinymasker - fast repeat masking tool\n"
+			"");
+	_msg(2, "Usage:\n"
+			"  index construction:\n"
+			"    $ tinymasker -t4 -d index.tmi repeats.fa\n"
+			"  mask:\n"
+			"    $ tinymasker -t4 index.tmi contigs.fa\n"
+			"")
+	_msg(2, "General options:");
+	_msg(2, "");
+	if(conf->verbose < 2) {
+		_msg(2, "  Pass -hh to show all the options.");
+		_msg(2, "");
+	}
+
+	#undef _msg_impl
+	#undef _msg
+
+	return;
+}
+
+
+/* index construction */
+
+static _force_inline
+int main_index_error(mk_conf_t *conf, int error_code, char const *filename)
+{
+	_unused(conf);
+	switch(error_code) {
+	/* argument missing */
+	case ERROR_NO_ARG: error("argument is not enough. at least one reference file is required."); break;
+
+	/* opening files */
+	case ERROR_OPEN_IDX: error("failed to open index file `%s' in write mode. Please check file path and its permission.", filename); break;
+	case ERROR_OPEN_RSEQ: error("failed to open sequence file `%s' for building index. Please check file path and its format.", filename); break;
+	}
+	return(error_code);
+}
+
+static _force_inline
+int main_index_intl(mk_conf_t *conf, pg_t *pg, pt_t *pt)
+{
+	if(opt_parg_cnt(&conf->opt) == 0) {
+		return(main_index_error(conf, ERROR_NO_ARG, NULL));
+	}
+
+	/* iterate over index blocks */
+	kv_foreach(void *, opt_pargv(&conf->opt), {
+
+		/* generate index */
+		mk_idx_t *mi = mk_idx_gen(&conf->index, pt, *p, stderr);
+		if(mi == NULL) {
+			/* failed to open file */
+			return(main_index_error(conf, ERROR_OPEN_RSEQ, conf->idxdump));
+		}
+
+		/* dump index */
+		size_t size = mk_idx_dump(mi, pg, (write_t)pgwrite);
+
+		/* flush output for next batch */
+		pg_flush(pg);
+
+		mk_idx_destroy(mi);
+		message(conf->log, "built and dumped index for `%s', on-memory size of this chunk: %.1f MB", (char const *)*p, (double)size / (1024ULL * 1024));
+	});
+	return(0);
+}
+
+static _force_inline
+int main_index(mk_conf_t *conf, pt_t *pt)
+{
+	/* add suffix if missing and if /dev/xxx */
+	if(!mm_startswith(conf->idxdump, "/dev") && !mm_endswith(conf->idxdump, ".mai")) {
+		message(conf->log, "index filename does not end with `.mai' (added).");
+		conf->idxdump = opt_append(&conf->opt, conf->idxdump, ".mai");
+	}
+
+	/* open file in write mode */
+	FILE *fp = fopen(conf->idxdump, "wb");
+	if(fp == NULL) {
+		/* failed open file (locked?) */
+		return(main_index_error(conf, ERROR_OPEN_IDX, conf->idxdump));
+	}
+
+	/* initialize compressor */
+	pg_t pg;
+	pg_init_static(&pg, fp, pt);
+
+	/* index_intl does everything */
+	int error_code = main_index_intl(conf, &pg, pt);
+
+	/* done */
+	pg_stat_t stat = pg_destroy_static(&pg);
+	message(conf->log, "done. total index size (compressed) on disk: %.1f MB.", (double)stat.out / (1024ULL * 1024));
+
+	fclose(fp);
+	return(error_code);
+}
+
+
+/* scan-and-mask */
+
+static _force_inline
+int main_scan_error(mk_conf_t *conf, int error_code, char const *file)
+{
+	_unused(conf);
+	switch(error_code) {
+	/* unknown */
+	case ERROR_INTERNAL: error("failed to instanciate alignment context."); break;
+
+	/* in mapping */
+	case ERROR_OPEN_QSEQ: error("failed to open sequence file `%s'. Please check file path and format.", file); break;
+
+	/* argument missing */
+	case ERROR_NO_ARG: error("argument is not enough. a reference and at least one query files are required."); break;
+
+	/* index loading */
+	case ERROR_OPEN_IDX: error("failed to open index file `%s'. Please check file path and permission.", file); break;
+	case ERROR_LOAD_IDX: error("failed to load index block from `%s'. Please check file path and version, or rebuild the index.", file); break;
+
+	/* index construction */
+	case ERROR_OPEN_RSEQ: error("failed to open sequence file `%s' for building index. Please check file path and format.", file); break;
+	}
+	return(error_code);
+}
+
+/* working buffer */
+typedef struct {
+	/* always available */
+	mk_conf_t *conf;
+	size_t fcnt;					/* fetched count */
+
+	pt_t *pt;
+	mk_print_t *printer;
+
+	char const *ref;				/* reference filename */
+	char const *const *query;		/* query filename */
+	size_t qcnt;
+
+
+	/* for prebuilt index */
+	FILE *fp;				/* != NULL if prebuilt index is available */
+	pg_t pg;
+} main_scan_tbuf_t;
+
+static _force_inline
+int main_scan_tbuf_destroy_static(main_scan_tbuf_t *w)
+{
+	if(w->fp != NULL) {
+		fclose(w->fp);
+		pg_destroy_static(&w->pg);
+	}
+	return(0);
+}
+
+static _force_inline
+int main_scan_tbuf_init_static(main_scan_tbuf_t *w, mk_conf_t *conf, char const *const *parg, size_t pcnt, mk_print_t *printer, pt_t *pt)
+{
+	/* save args */
+	*w = (main_scan_tbuf_t){
+		.conf = conf,
+		.fcnt = 0,
+
+		.pt = pt,
+		.printer = printer,
+
+		/* inputs */
+		.ref = parg[0],
+		.query = &parg[1],
+		.qcnt = pcnt - 1
+	};
+
+	/* check suffix to determine if the file is prebuilt index */
+	if(!mm_endswith(parg[0], ".mai")) {
+		return(0);			/* not a prebuilt index */
+	}
+
+	/* open; if fails, it would be invalid path or permission */
+	if((w->fp = fopen(parg[0], "rb")) == NULL) {
+		return(main_scan_error(conf, ERROR_OPEN_IDX, parg[0]));
+	}
+	pg_init_static(&w->pg, w->fp, pt);
+	return(0);
+}
+
+
+static _force_inline
+int main_scan_idx_gen(main_scan_tbuf_t *w, mk_idx_t **pmi)
+{
+	if(++w->fcnt > 1) { return(0); }
+
+	/* first call */
+	mk_idx_t *mi = mk_idx_gen(&w->conf->index, w->pt, w->ref, stderr);
+	if(mi == NULL) {
+		/* failed to open file */
+		return(main_scan_error(w->conf, ERROR_OPEN_RSEQ, w->ref));
+	}
+	message(stderr, "built index for `%s'.", w->ref);
+	*pmi = mi;
+	return(0);
+}
+
+static _force_inline
+int main_scan_idx_load(main_scan_tbuf_t *w, mk_idx_t **pmi)
+{
+	if(pg_eof(&w->pg)) { return(0); }
+
+	/* prebuilt index available; try to fetch next block */
+	mk_idx_t *mi = mk_idx_load(&w->pg, (read_t)pgread);
+	if(++w->fcnt == 1 && mi == NULL) {
+		/* would be broken */
+		return(main_scan_error(w->conf, ERROR_LOAD_IDX, w->ref));
+	}
+
+	/* NULL for tail */
+	if(mi != NULL) { message(stderr, "loaded index block from `%s'.", w->ref); }
+	*pmi = mi;
+	return(0);
+}
+
+/* for each query file */
+static _force_inline
+int main_scan_foreach_qfile(main_scan_tbuf_t *w, mk_mtscan_t *mt)
+{
+	for(size_t i = 0; i < w->qcnt; i++) {
+		if(mk_mtscan_file(mt, w->query[i])) {
+			return(main_scan_error(w->conf, ERROR_OPEN_QSEQ, NULL));
+		}
+	}
+	return(0);
+}
+
+/* for each index chunk */
+static _force_inline
+int main_scan_foreach_idx(main_scan_tbuf_t *w)
+{
+	while(1) {
+		mk_idx_t *mi = NULL;
+
+		int fetcher_error_code = (w->fp == NULL
+			? main_scan_idx_gen(w, &mi)
+			: main_scan_idx_load(w, &mi)
+		);
+		if(fetcher_error_code != 0 || mi == NULL) {
+			return(fetcher_error_code);		/* error should be handled inside */
+		}
+
+		/* instanciate multithreading context for this index chunk */
+		mk_mtscan_t *mt = mk_mtscan_init(&w->conf->scan, mi, w->printer, w->pt);
+		if(mt == NULL) {
+			return(main_scan_error(w->conf, ERROR_INTERNAL, NULL));
+		}
+
+		/* do the task; for each query file */
+		int scan_error_code = main_scan_foreach_qfile(w, mt);
+
+		/* done for this index chunk */
+		mk_mtscan_destroy(mt);
+		mk_idx_destroy(mi);
+		if(scan_error_code != 0) { return(scan_error_code); }
+	}
+	return(0);
+}
+
+/* for each index filename */
+static _force_inline
+int main_scan_intl(mk_conf_t *conf, mk_print_t *printer, pt_t *pt)
+{
+	char const *const *parg = (char const *const *)opt_parg(&conf->opt);
+	size_t pcnt = opt_parg_cnt(&conf->opt);
+
+	/* error if no argument is given */
+	if(pcnt < 2) {
+		return(main_scan_error(conf, ERROR_NO_ARG, NULL));
+	}
+
+	/* instanciate thread-local working buffers */
+	main_scan_tbuf_t w;
+	int init_error_code = main_scan_tbuf_init_static(&w, conf, parg, pcnt, printer, pt);
+	if(init_error_code != 0) {
+		return(init_error_code);
+	}
+
+	/* we consider the first argument as reference */
+	int scan_error_code = main_scan_foreach_idx(&w);
+
+	/* done */
+	main_scan_tbuf_destroy_static(&w);
+	return(scan_error_code);
+}
+
+/* printer */
+static _force_inline
+int main_scan(mk_conf_t *conf, pt_t *pt)
+{
+	/* instanciate alignment formatter */
+	mk_print_t printer;
+	mk_print_init_static(&printer, &conf->print, conf->args);
+
+	/* dispatch */
+	int error_code = main_scan_intl(conf, &printer, pt);
+
+	mk_print_destory_static(&printer);
+	return(error_code);
+}
+
+/* create worker threads for indexing and mapping */
+static _force_inline
+int main_dispatch(mk_conf_t *conf)
+{
+	pt_t *pt = pt_init(conf->nth);
+	if(pt == NULL) {
+		return(main_scan_error(conf, ERROR_INTERNAL, NULL));
+	}
+
+	/* dispatch either index or scan */
+	int error_code = (conf->idxdump ? main_index : main_scan)(conf, pt);
+
+	/* done */
+	pt_destroy(pt);
+	return(error_code);
+}
+
+
+/* entry */
+int main(int argc, char *argv[])
+{
+	int error_code = ERROR_NO_ARG;
+
+	/* unittest dispatcher */
+	#if defined(UNITTEST) && UNITTEST != 0
+		if(argc > 1 && strcmp(argv[1], "unittest") == 0) {
+			return(unittest_main(argc, argv));
+		}
+	#else
+		_unused(argc);
+	#endif
+
+	/* instanciate option object */
+	logger_init();
+	mk_conf_t conf;
+	mk_conf_init_static(&conf, (char const *const *)argv, stderr);
+
+	/* always print version */
+	mk_conf_outfp_t out = mk_conf_get_outfp(&conf);
+	message(out.fp, "Version: %s, Build: %s", mk_version(), MK_ARCH_NAME);
+
+	/* when -h is passed or no input file is given, print help message */
+	if(out.help) {
+		if(conf.help > 0) { error_code = 0; }	/* also exit status is 0 (not an error) */
+		mk_conf_print_help(&conf, out.fp);		/* we use stdout when invoked by -h option */
+	}
+	if(out.quit) { goto _main_final; }
+
+	/* dispatch tasks and get return code */
+	if((error_code = main_dispatch(&conf)) == 0) {
+		message(conf.log, "Command: %s", conf.args);	/* print log when succeeded */
+	}
+	logger_destroy();
+
+_main_final:;
+	mk_conf_destroy_static(&conf);
+	return(error_code);
+}
 
 /**
- * end of masker.c
+ * end of tinymasker.c
  */
