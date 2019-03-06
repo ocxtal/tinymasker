@@ -569,7 +569,12 @@ tm_ref_match_t tm_ref_get_arr(tm_ref_state_t s)
 
 /* index data structure */
 typedef struct {
-	uint32_t dummy[2];
+	/* fallback parameters */
+	size_t kmer, window;		/* k-mer length and chain window size */
+
+	/* extension params */
+	uint64_t match, mismatch, gap_open, gap_extend;
+	int64_t min_score;
 } tm_idx_conf_t;
 
 
@@ -579,6 +584,15 @@ typedef struct {
 
 	/* k-mer size */
 	uint32_t kbits;
+
+	/* chaining */
+	struct {
+		union {
+			struct { uint32_t u, v; } sep;
+			uint64_t all;
+		} window;
+		uint32_t min_scnt;
+	} chain;
 
 	/* filtering */
 	struct {
@@ -668,7 +682,16 @@ void tm_idx_destroy(tm_idx_t *mi)
 
 /* index builder */
 typedef struct {
+	re_t *name;
+	re_t *comment;
+} tm_idx_matcher_t;
+
+typedef struct {
 	tm_idx_t mi;
+
+	struct {
+		kvec_t(tm_idx_matcher_t *) matcher;
+	} score;
 
 	struct {
 		bseq_file_t *fp;
@@ -686,30 +709,71 @@ typedef struct {
 
 
 static _force_inline
-size_t tm_idx_find_profile(tm_idx_t const *mi, char const *name, size_t nlen)
+size_t tm_idx_find_profile(tm_idx_gen_t const *mii, char const *name, size_t nlen)
 {
 	_unused(name);
 	_unused(nlen);
 
+	tm_idx_matcher_t const *matcher = kv_ptr(mii->mi.score.matcher);
+	size_t const mcnt = kv_cnt(mii->mi.score.matcher);
+
 	/* regex match; find first */
-	for(size_t i = 0; i < mi->profile.cnt - 1; i++) {
-		/* FIXME */
+	for(size_t i = 0; i < mcnt; i++) {
 		;
 	}
 
 	/* not found; return the last one */
-	return(mi->profile.cnt - 1);
+	return(mii->mi.profile.cnt - 1);
 }
 
 static _force_inline
-void tm_idx_load_score(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, pt_t *pt, char const *fn)
+toml_table_t *tm_idx_dump_toml(char const *fn, FILE *log)
+{
+	FILE *fp = fopen(fn, "r");
+	if(fp == NULL) {
+		message(log, "failed to open file: `%s'. check file path and permission.", fn);
+		return(NULL);
+	}
+
+	/* parse table */
+	size_t const elen = 256;
+	char error[elen];
+	toml_table_t *table = toml_parse_file(fp, error, elen);
+	if(table == NULL) {
+		message(log, "error occurred on parsing `%s': %s", fn, error);
+		return(NULL);
+	}
+
+	/* done */
+	fclose(fp);
+	return(table);
+}
+
+static _force_inline
+uint64_t tm_idx_load_score(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, char const *fn, FILE *log)
 {
 	_unused(mii);
 	_unused(conf);
-	_unused(pt);
-	_unused(fn);
 
-	/* FIXME */
+	/* open file as toml */
+	toml_table_t *table = tm_idx_dump_toml(fn, log);
+
+	char const *key;
+	for(size_t i = 0; (key = toml_key_in(table, i)) != NULL; i++) {
+		char const *val = toml_raw_in(table, key);
+
+		/* has value */
+		if(val == NULL) { continue; }
+
+		/* has array */
+		toml_array_t *array = toml_array_in(table, key);
+
+		/* has table */
+	}
+
+
+
+	toml_free(table);
 	return;
 }
 
@@ -830,7 +894,8 @@ tm_idx_batch_t *tm_idx_collect(uint32_t tid, tm_idx_gen_t *self, tm_idx_batch_t 
 		size_t pid = tm_idx_find_profile(&self->mi, bseq_name(p), bseq_name_len(p));
 
 		/* build hash table */
-		tm_ref_sketch_t *sr = tm_idx_build_sketch(self, ref, pid,
+		tm_ref_sketch_t *sr = tm_idx_build_sketch(self,
+			ref, pid,
 			bseq_name(p), bseq_name_len(p),
 			bseq_seq(p),  bseq_seq_len(p)
 		);
@@ -916,10 +981,12 @@ tm_idx_t *tm_idx_gen(tm_idx_conf_t const *conf, pt_t *pt, char const *ref, char 
 	/* load score matrices and build regex matcher */
 	if(score != NULL) {
 		message(log, "reading score matrices...");
-		tm_idx_load_score(mii, conf, pt, score);
+		if(tm_idx_load_score(mii, conf, score, log)) {
+			goto _tm_idx_gen_error;
+		}
 	} else {
 		message(log, "loading default score matrix...");
-		tm_idx_load_default_score(mii, conf);
+		tm_idx_load_default_score(mii, conf);		/* never fail */
 	}
 
 	/* read sequence and collect k-mers */
@@ -1193,9 +1260,9 @@ KRADIX_SORT_INIT(seed, tm_seed_t, tm_seed_upos, 4);
 
 typedef struct {
 	uint16_t src, dst, cnt;
-} tm_intv_t;
-_static_assert(sizeof(tm_intv_t) == 6);
-typedef struct { tm_intv_t *a; size_t n, m; } tm_intv_v;
+} tm_sqiv_t;
+_static_assert(sizeof(tm_sqiv_t) == 6);
+typedef struct { tm_sqiv_t *a; size_t n, m; } tm_sqiv_v;
 
 /* chain */
 typedef struct {
@@ -1282,33 +1349,19 @@ RBT_INIT_ITER(aln, tm_aln_t, tm_aln_rbt_header,
 );
 
 
-/* working buffer */
+/* working buffers */
 typedef struct {
-	uint32_t dummy;
-} tm_scan_conf_t;
-
-typedef struct {
-	/* working buffers */
 	struct {
 		tm_seed_v arr;		/* for sorting seeds */
-		tm_intv_v intv;
+		tm_sqiv_v sqiv;
 	} seed;
 
-	/* chaining */
 	struct {
-		union {
-			struct { uint32_t u, v; } sep;
-			uint64_t all;
-		} window;
-		uint32_t min_scnt;
-
-		/* working buffer */
 		tm_chain_v arr;
 	} chain;
 
-	/* alignment bin */
 	struct {
-		uint32_t min_weight;
+		uint32_t min_weight;	/* working variable */
 		dz_t *dz;				/* everything contained */
 
 		/* result bin */
@@ -1318,12 +1371,13 @@ typedef struct {
 
 
 static _force_inline
-void tm_scan_init_static(tm_scan_t *self, size_t cnt, tm_scan_conf_t const *conf)
+void tm_scan_init_static(tm_scan_t *self, size_t cnt)
 {
-	_unused(self);
-	_unused(cnt);
-	_unused(conf);
+	memset(self, 0, sizeof(tm_scan_t) * cnt);
 
+	for(size_t i = 0; i < cnt; i++) {
+		self->dz = dz_init();
+	}
 	return;
 }
 
@@ -1340,7 +1394,7 @@ static _force_inline
 void tm_scan_clear(tm_scan_t *self)
 {
 	kv_clear(self->seed.arr);
-	kv_clear(self->seed.intv);
+	kv_clear(self->seed.sqiv);
 	kv_clear(self->chain.arr);
 	kv_clear(self->extend.arr);
 	return;
@@ -1358,20 +1412,20 @@ tm_seed_t *tm_seed_reserve(tm_seed_v *buf, tm_seed_t *q)
 }
 
 static _force_inline
-tm_intv_t *tm_intv_reserve(tm_intv_v *buf, tm_intv_t *q)
+tm_sqiv_t *tm_sqiv_reserve(tm_sqiv_v *buf, tm_sqiv_t *q)
 {
 	/* update count */
 	kv_cnt(*buf) = q - kv_ptr(*buf);
 
-	tm_intv_t *p = kv_reserve(tm_intv_t, *buf, 64);
+	tm_sqiv_t *p = kv_reserve(tm_sqiv_t, *buf, 64);
 	return(&p[kv_cnt(*buf)]);
 }
 
 static _force_inline
-size_t tm_save_intv(tm_ref_state_t s, tm_ref_squash_t sq, tm_intv_t *r)
+size_t tm_save_sqiv(tm_ref_state_t s, tm_ref_squash_t sq, tm_sqiv_t *r)
 {
 	/* just copy */
-	*r = (tm_intv_t){
+	*r = (tm_sqiv_t){
 		.src = sq.src,
 		.dst = sq.dst,
 		.cnt = sq.cnt
@@ -1404,14 +1458,14 @@ size_t tm_expand_seed(tm_ref_state_t s, v4i32_t uofs, v4i32_t vofs, tm_seed_t *q
 }
 
 static _force_inline
-size_t tm_collect_seed(tm_ref_sketch_t const *ref, uint8_t const *query, size_t qlen, tm_seed_v *seed, tm_intv_v *intv)
+size_t tm_collect_seed(tm_ref_sketch_t const *ref, uint8_t const *query, size_t qlen, tm_seed_v *seed, tm_sqiv_v *sqiv)
 {
 	/* load coordinate constants */
 	v4i32_t const uinc = _set_v4i32(2), vinc = _set_v4i32(-1);
 	v4i32_t uofs = _set_v4i32(0x20000), vofs = _set_v4i32(0x10000);
 
 	tm_seed_t *q = tm_seed_reserve(seed, kv_ptr(*seed));
-	tm_intv_t *r = tm_intv_reserve(intv, kv_ptr(*intv));
+	tm_sqiv_t *r = tm_sqiv_reserve(sqiv, kv_ptr(*sqiv));
 
 	/* initial state (of three general-purpose registers) */
 	tm_ref_state_t s = tm_ref_match_init(ref);
@@ -1424,7 +1478,7 @@ size_t tm_collect_seed(tm_ref_sketch_t const *ref, uint8_t const *query, size_t 
 
 		/* update matching status for the next bin (prefetch) */
 		tm_ref_next_t n = tm_ref_match_next(s, query[i]);
-		r += tm_save_intv(n.state, n.squash, r);
+		r += tm_save_sqiv(n.state, n.squash, r);
 
 		/* skip current bin if not matching */
 		if(!s.unmatching) {
@@ -1437,20 +1491,20 @@ size_t tm_collect_seed(tm_ref_sketch_t const *ref, uint8_t const *query, size_t 
 		/* test array expansion every 32 times */
 		if((i & 0x1f) != 0) { continue; }
 		q = tm_seed_reserve(seed, q);
-		r = tm_intv_reserve(intv, r);
+		r = tm_sqiv_reserve(sqiv, r);
 	}
 	return(kv_cnt(*seed));
 }
 
 static _force_inline
-size_t tm_squash_seed(tm_intv_t const *intv, size_t icnt, tm_seed_v *seed)
+size_t tm_squash_seed(tm_sqiv_t const *sqiv, size_t icnt, tm_seed_v *seed)
 {
 	tm_seed_t *q = kv_ptr(*seed);
 
 	/* squash succeeding match */
 	size_t idx = 0;
 	for(size_t i = 0; i < icnt; i++) {
-		tm_intv_t const *p = &intv[i];
+		tm_sqiv_t const *p = &sqiv[i];
 
 		/* determine source and destination indices */
 		size_t const src = idx + p->src;
@@ -1478,10 +1532,9 @@ int64_t tm_chain_test_ptr(tm_seed_t const *p, tm_seed_t const *t)
 }
 
 static _force_inline
-tm_seed_t *tm_chain_find_first(tm_scan_t const *self, tm_seed_t *p, tm_seed_t *t, uint64_t lb)
+tm_seed_t *tm_chain_find_first(tm_seed_t *p, tm_seed_t *t, uint64_t lb, uint64_t window)
 {
 	/* constants */
-	uint64_t const window = self->chain.window.all;	/* window sizes */
 	uint64_t const umask = 0xffffffff00000000;	/* extract upper */
 	uint64_t const tmask = 0x8000000080000000;	/* extract two sign bit pair */
 
@@ -1494,7 +1547,7 @@ tm_seed_t *tm_chain_find_first(tm_scan_t const *self, tm_seed_t *p, tm_seed_t *t
 		/* check if reached tail */
 		if((cont | tm_chain_test_ptr(++p, t)) < 0) { return(NULL); }
 
-		uint64_t v = _loadu_u64(p) - lb;		/* 1: (u, v - vlb) for inclusion test */
+		uint64_t const v = _loadu_u64(p) - lb;	/* 1: (u, v - vlb) for inclusion test */
 		if(((ub - v) & tmask) == 0) { break; }	/* 2,3: break if chainable (first chainable seed found) */
 
 		/* unchainable; test if out of uub */
@@ -1504,10 +1557,8 @@ tm_seed_t *tm_chain_find_first(tm_scan_t const *self, tm_seed_t *p, tm_seed_t *t
 }
 
 static _force_inline
-tm_seed_t *tm_chain_find_alt(tm_scan_t const *self, tm_seed_t *p, tm_seed_t *t, uint64_t lb)
+tm_seed_t *tm_chain_find_alt(tm_seed_t *p, tm_seed_t *t, uint64_t lb)
 {
-	_unused(self);
-
 	/* constants */
 	uint64_t const tmask = 0x8000000080000000;	/* extract two sign bit pair */
 
@@ -1520,12 +1571,12 @@ tm_seed_t *tm_chain_find_alt(tm_scan_t const *self, tm_seed_t *p, tm_seed_t *t, 
 
 	int64_t cont = 0;
 	while((cont | tm_chain_test_ptr(++p, t)) >= 0) {
-		uint64_t v = _loadu_u64(p) - lb;		/* 1: (u, v - vlb) for inclusion test */
+		uint64_t const v = _loadu_u64(p) - lb;	/* 1: (u, v - vlb) for inclusion test */
 		cont = ub - v;
 		if((ub - v) & tmask) { continue; }		/* skip if unchainable */
 
 		/* chainable; test if the seed is nearer than the previous */
-		uint64_t w = v + (v<<32);				/* 2,3: (u + v - vlb, v - vlb) */
+		uint64_t const w = v + (v<<32);			/* 2,3: (u + v - vlb, v - vlb) */
 		if((ub - w) & tmask) { break; }			/* 4,5: further than previous */
 
 		/* nearer seed found */
@@ -1536,7 +1587,7 @@ tm_seed_t *tm_chain_find_alt(tm_scan_t const *self, tm_seed_t *p, tm_seed_t *t, 
 }
 
 static _force_inline
-tm_seed_t *tm_chain_find_nearest(tm_scan_t const *self, tm_seed_t *p, tm_seed_t *t)
+tm_seed_t *tm_chain_find_nearest(tm_seed_t *p, tm_seed_t *t, uint64_t window)
 {
 	/* load root positions */
 	uint64_t const umask = 0xffffffff00000000;	/* extract upper */
@@ -1544,7 +1595,7 @@ tm_seed_t *tm_chain_find_nearest(tm_scan_t const *self, tm_seed_t *p, tm_seed_t 
 	uint64_t lb = (uv & ~umask);				/* (0, vlb) */
 
 	/* find first chainable seed */
-	tm_seed_t *n = tm_chain_find_first(self, p, t, lb);
+	tm_seed_t *n = tm_chain_find_first(self, p, t, lb, window);
 	if(n == NULL) { return(NULL); }				/* we expect control paths are kept isolated */
 
 	/* then inspect alternative chainable seeds */
@@ -1552,7 +1603,7 @@ tm_seed_t *tm_chain_find_nearest(tm_scan_t const *self, tm_seed_t *p, tm_seed_t 
 }
 
 static _force_inline
-size_t tm_chain_record(tm_scan_t const *self, v2i32_t root, v2i32_t tail, v2i32_t scnt, tm_chain_t *q)
+size_t tm_chain_record(v2i32_t root, v2i32_t tail, v2i32_t scnt, v2i32_t min_scnt, tm_chain_t *q)
 {
 	/* avoid use of general-purpose register to minimize spills */
 	v2i32_t const span = _sub_v2i32(tail, root);
@@ -1567,14 +1618,13 @@ size_t tm_chain_record(tm_scan_t const *self, v2i32_t root, v2i32_t tail, v2i32_
 	_storeu_v4i32(q, chain);
 
 	/* forward if scnt > min_scnt */
-	v2i32_t const min_scnt = _load_v2i32(&self->chain.min_scnt);
 	v2i32_t const inc = _set_v2i32(1);		/* kept on register */
 	v2i32_t const fwd = _and_v2i32(inc, _gt_v2i32(scnt, min_scnt));
 	return(_ext_v2i32(fwd, 0));				/* movq */
 }
 
 static _force_inline
-size_t tm_chain_seed(tm_scan_t const *self, tm_seed_t *seed, size_t scnt, tm_chain_v *chain)
+size_t tm_chain_seed(tm_idx_profile_t const *profile, tm_seed_t *seed, size_t scnt, tm_chain_v *chain)
 {
 	/*
 	 * greedy extension; relatively smaller window size (~32) is preferred for good performance.
@@ -1582,8 +1632,11 @@ size_t tm_chain_seed(tm_scan_t const *self, tm_seed_t *seed, size_t scnt, tm_cha
 	 * keep seed and counter on xmm regsters and do everything of the chain composing on xmm registers
 	 * to minimize spill of general-purpose registers.
 	 */
-	uint64_t const chained = 0x40000000;		/* offset */
+	uint64_t const chained = 0x40000000;				/* offset */
+	uint64_t const window = profile->chain.window.all;	/* window sizes */
+
 	v2i32_t const inc = _set_v2i32(1);
+	v2i32_t const min_scnt = _load_v2i32(&profile->chain.min_scnt);
 
 	/* src pointers */
 	tm_seed_t *p = seed - 1, *t = &seed[scnt];
@@ -1603,7 +1656,7 @@ size_t tm_chain_seed(tm_scan_t const *self, tm_seed_t *seed, size_t scnt, tm_cha
 		/* iteratively link nearest seed */
 		tm_seed_t *s = p;
 		while(1) {
-			tm_seed_t *n = tm_chain_find_nearest(self, s, t);
+			tm_seed_t *n = tm_chain_find_nearest(s, t, window);
 			if(n == NULL) { break; }
 
 			/* increment seed count */
@@ -1613,7 +1666,7 @@ size_t tm_chain_seed(tm_scan_t const *self, tm_seed_t *seed, size_t scnt, tm_cha
 			s = n;				/* save last chained seed */
 		}
 
-		q += tm_chain_record(self, root, _loadu_v2i32(s), scnt, q);
+		q += tm_chain_record(root, _loadu_v2i32(s), scnt, min_scnt, q);
 	}
 
 	/* update chain count */
@@ -1770,42 +1823,39 @@ size_t tm_filter_chain(tm_idx_sketch_t const *si, tm_idx_profile_t const *profil
 }
 
 static _force_inline
-size_t tm_seed_and_sort(tm_scan_t *self, tm_ref_sketch_t const *ref, uint8_t const *query, size_t qlen)
+size_t tm_seed_and_sort(tm_ref_sketch_t const *ref, uint8_t const *query, size_t qlen, tm_seed_v *seed, tm_sqiv_t *sqiv)
 {
 	/* enumerate seeds */
-	kv_clear(self->seed.arr);
-	if(tm_collect_seed(ref, query, qlen, &self->seed.arr, &self->seed.intv) == 0) {
+	kv_clear(*seed);
+	if(tm_collect_seed(ref, query, qlen, seed, sqiv) == 0) {
 		return(0);
 	}
 
-	tm_intv_t const *intv = kv_ptr(self->seed.intv);
-	size_t icnt = kv_cnt(self->seed.intv);
-
 	/* squash overlapping seeds */
-	if(tm_squash_seed(intv, icnt, &self->seed.arr) == 0) {
+	if(tm_squash_seed(kv_ptr(*sqiv), kv_cnt(*sqiv), seed) == 0) {
 		return(0);
 	}
 
 	/* sort seeds by u-coordinates for chaining */
-	radix_sort_seed(kv_ptr(self->seed.arr), kv_cnt(self->seed.arr));
-	return(kv_cnt(self->seed.arr));
+	radix_sort_seed(kv_ptr(*seed), kv_cnt(*seed));
+	return(kv_cnt(*seed));
 }
 
 static _force_inline
-size_t tm_chain_and_filter(tm_scan_t *self, tm_idx_sketch_t const *si, tm_idx_profile_t const *profile, uint8_t const *query)
+size_t tm_chain_and_filter(tm_idx_sketch_t const *si, tm_idx_profile_t const *profile, uint8_t const *query, tm_seed_t const *seed, size_t scnt, tm_chain_v *chain)
 {
 	/* chaining; return if no chain obtained */
-	size_t const cbase = kv_cnt(self->chain.arr);		/* save chain count */
-	size_t const ccnt  = tm_chain_seed(self, kv_ptr(self->seed.arr), kv_cnt(self->seed.arr), &self->chain.arr);
+	size_t const cbase = kv_cnt(*chain);		/* save chain count */
+	size_t const ccnt  = tm_chain_seed(profile, seed, scnt, chain);
 	if(ccnt == 0) { return(0); }
 
 	/* filter (try small extension with simple score matrix) */
-	size_t const cfilt = tm_filter_chain(si, profile, query, &kv_ptr(self->chain.arr)[cbase], ccnt);
+	size_t const cfilt = tm_filter_chain(si, profile, query, &kv_ptr(*chain)[cbase], ccnt);
 	if(cfilt == 0) { return(0); }
 
 	/* finalize filtered chains */
-	kv_cnt(self->chain.arr) = cbase + cfilt; 
-	return(kv_cnt(self->chain.arr));
+	kv_cnt(*chain) = cbase + cfilt; 
+	return(kv_cnt(*chain));
 }
 
 
@@ -1960,11 +2010,13 @@ size_t tm_scan_mask(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *seq, si
 	tm_idx_sketch_t const **si = (tm_idx_sketch_t const **)idx->sketch.arr;
 	for(size_t i = 0; i < idx->sketch.cnt; i++) {
 		/* collect seeds */
-		if(tm_seed_and_sort(self, &si[i]->ref, seq, slen) == 0) { continue; }
+		if(tm_seed_and_sort(&si[i]->ref, seq, slen, &self->seed.arr, &self->seed.sqiv) == 0) { continue; }
 
 		/* chain and filter */
 		tm_idx_profile_t const *profile = idx->profile.arr[si[i]->h.pid];
-		tm_chain_and_filter(self, si[i], profile, seq);
+		tm_seed_t const *seed = kv_ptr(self->seed.arr);
+		size_t scnt = kv_cnt(self->seed.arr);
+		tm_chain_and_filter(si[i], profile, seq, seed, scnt, &self->chain.arr);
 	}
 
 	tm_chain_t *cptr = kv_ptr(self->chain.arr);
@@ -2020,7 +2072,7 @@ typedef struct {
 } tm_mtscan_t;
 
 static _force_inline
-tm_mtscan_t *tm_mtscan_init(tm_scan_conf_t const *conf, tm_idx_t const *mi, tm_print_t *printer, pt_t *pt)
+tm_mtscan_t *tm_mtscan_init(tm_idx_t const *mi, tm_print_t *printer, pt_t *pt)
 {
 	_unused(conf);
 	_unused(mi);
@@ -2078,22 +2130,178 @@ typedef struct {
 	opt_t opt;
 } tm_conf_t;
 
-static _force_inline
-void tm_conf_init_static(tm_conf_t *conf, char const *const *argv, FILE *fp)
+
+
+
+#define tm_conf_append(_type, _ptr, _cnt, _body) { \
+	kvec_t(_type) b; \
+	kv_build(b, (void *)_ptr, _cnt, _cnt); \
+	{ _body; } \
+	_ptr = kv_ptr(b); \
+	_cnt = kv_cnt(b); \
+}
+
+
+static void mm_conf_preset(opt_t *opt, mm_conf_t *conf, char const *arg)
 {
-	_unused(conf);
-	_unused(argv);
-	_unused(fp);
+	struct mm_conf_preset_s {
+		/* key-value pair */
+		char const *key;
+		char const *val;
+
+		/* child */
+		struct mm_conf_preset_s const *children[6];
+	};
+
+	/* preset is defined recursively */
+	#define _n(_k, ...)		&((struct mm_conf_preset_s const){ (_k), __VA_ARGS__ })
+	struct mm_conf_preset_s const *presets[] = {
+		{ 0 }
+	};
+	#undef _n
+
+	struct mm_conf_preset_s const *const *q = presets;
+	split_foreach(arg, 0, ".:", {		/* traverse preset param tree along with parsing */
+		while(*q != NULL && strncmp(p, (*q)->key, l) != 0) { q++; }
+		if(*q == NULL) {				/* terminate if not matched, not loaded from file */
+			int ret = opt_load_conf(opt, conf, p);
+			oassert(opt, ret, "no preset params found for `%.*s'.", (int)l, p);
+			break;
+		}
+		opt_parse_line(opt, conf, (*q)->val);/* apply recursively */
+		q = (*q)->children;				/* visit child nodes */
+	});
 	return;
 }
 
-static _force_inline
-void tm_conf_destroy_static(tm_conf_t *conf)
-{
-	_unused(conf);
-	return;
+/* index filename */
+static void mm_conf_idxdump(opt_t *opt, mm_conf_t *conf, char const *arg) {
+	_unused(opt);
+	conf->idxdump = opt_strdup(opt, arg, strlen(arg));
+}
+static void mm_conf_profile(opt_t *opt, mm_conf_t *conf, char const *arg) {
+	_unused(opt);
+	conf->profile = opt_strdup(opt, arg, strlen(arg));
 }
 
+/* indexing */
+static void mm_conf_kmer(opt_t *opt, mm_conf_t *conf, char const *arg) {
+	size_t k = mm_atoi(arg, 0);
+	oassert(opt, k >= 3 && k <= 10, "k must be inside [3,10].");
+
+	conf->fallback.k = k;
+}
+static void mm_conf_window(opt_t *opt, mm_conf_t *conf, char const *arg) {
+	size_t w = mm_atoi(arg, 0);
+	oassert(opt, w >= 1 && w <= 64, "w must be inside [2,64].");
+
+	conf->fallback.w = w;
+}
+static void mm_conf_match(opt_t *opt, mm_conf_t *conf, char const *arg) {
+	int64_t m = mm_atoi(arg, 0);
+	oassert(opt, m >= 1 && m <= 7, "match award (-a) must be inside [1,7] (%s).", arg);
+	conf->fallback.match = m;
+}
+static void mm_conf_mismatch(opt_t *opt, mm_conf_t *conf, char const *arg) {
+	int64_t x = mm_atoi(arg, 0);
+	oassert(opt, x >= 1 && x <= 7, "mismatch penalty (-b) must be inside [1,7] (%s).", arg);
+
+	mm_conf_set_score(opt, conf, -x, 0);
+	conf->fallback.mismatch = x;
+}
+static void mm_conf_gi(opt_t *opt, mm_conf_t *conf, char const *arg) {
+	int64_t gi = mm_atoi(arg, 0);
+	oassert(opt, gi >= 1 && gi <= 7, "gap open penalty (-p) must be inside [1,7] (%s).", arg);
+
+	conf->fallback.gap_open = gi;
+}
+static void mm_conf_ge(opt_t *opt, mm_conf_t *conf, char const *arg) {
+	int64_t ge = mm_atoi(arg, 0);
+	oassert(opt, ge >= 1 && ge <= 7, "gap extension penalty (-q) must be inside [1,7] (%s).", arg);
+
+	conf->fallback.gap_extend = ge;
+}
+
+
+
+
+static _force_inline
+uint64_t mm_conf_check_sanity(mm_conf_t *conf)
+{
+	return(opt_ecnt(&conf->opt));
+}
+
+static _force_inline
+uint64_t mm_conf_restore_default(mm_conf_t *conf)
+{
+	tm_conf_t defaults = {
+		.index = {
+			.kmer = 5,
+			.window = 32,
+			.match = 2,
+			.mismatch = -3,
+			.gap_open = -5,
+			.gap_extend = -1,
+			.min_score = 0
+		},
+		.
+	};
+
+	/* we assume all element is sized 64bit */
+	uint64_t *q = (uint64_t *)conf;
+	uint64_t const *p = (uint64_t const *)&defaults;
+	for(size_t i = 0; i < offsetof(mm_conf_t, opt) / sizeof(uint64_t); i++) {
+		if(q[i] != 0) { continue; }		/* parameter set */
+		if(p[i] == 0) { continue; }		/* default value not found */
+		q[i] = p[i];					/* load default */
+	}
+	return(0);
+}
+
+static _force_inline
+uint64_t tm_conf_init_static(tm_conf_t *conf, char const *const *argv, FILE *fp)
+{
+	*conf = (tm_conf_t){
+		/* logger */
+		.log = stderr,
+
+		#define _c(_x)			( (opt_callback_t)(_x) )
+		.opt.t = {
+			['\0'] = { 0, NULL },
+			['d'] = { OPT_REQ,  _c(tm_conf_idxdump) },
+
+			['v'] = { OPT_OPT,  _c(mm_conf_verbose) },
+			['h'] = { OPT_BOOL, _c(mm_conf_help) },
+			['t'] = { OPT_REQ,  _c(mm_conf_threads) },
+
+			/* preset and configuration file */
+			['x'] = { OPT_REQ,  _c(tm_conf_preset) },
+
+			/* fallback parameters */
+			['k'] = { OPT_REQ,  _c(mm_conf_kmer) },
+			['w'] = { OPT_REQ,  _c(mm_conf_chain) },
+			['a'] = { OPT_REQ,  _c(mm_conf_match) },
+			['b'] = { OPT_REQ,  _c(mm_conf_mismatch) },
+			['p'] = { OPT_REQ,  _c(mm_conf_gap) },
+			['s'] = { OPT_REQ,  _c(mm_conf_min_score) }
+		}
+		#undef _c
+	}
+
+	opt_init_static(&conf->opt, fp);
+	if(opt_parse_argv(&conf->opt, conf, argv + 1)) { goto _tm_conf_init_fail; }
+	if(tm_conf_restore_default(conf)) { goto _tm_conf_init_fail; }
+	if(tm_conf_check_sanity(conf)) { goto _tm_conf_init_fail; }
+
+	/* parsed without error */
+	conf->args = opt_join(&conf->opt, argv, ' ');
+	return(0);
+
+
+_tm_conf_init_fail:;
+	opt_destroy_static(&conf->opt);
+	return(1);
+}
 
 /* determine help and verbose level */
 typedef struct {
