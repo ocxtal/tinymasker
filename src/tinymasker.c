@@ -22,9 +22,14 @@
 #define UNITTEST_UNIQUE_ID		1
 #include "utils/utils.h"		/* include all */
 
-#define DZ_PROTEIN
+#define DZ_NUCL_4BIT
 #define DZ_MAT_SIZE				( 16 )
 #include "dozeu.h"
+
+
+/* toml parser and regex */
+#include "toml.h"
+#include "re.h"
 
 
 /* misc */
@@ -585,6 +590,11 @@ typedef struct {
 	/* k-mer size */
 	uint32_t kbits;
 
+	/* metadata */
+	struct {
+		char *name;
+	} meta;
+
 	/* chaining */
 	struct {
 		union {
@@ -592,13 +602,14 @@ typedef struct {
 			uint64_t all;
 		} window;
 		uint32_t min_scnt;
+		uint32_t reserved;
 	} chain;
 
 	/* filtering */
 	struct {
 		uint8_t score_matrix[16];		/* match-mismatch score matrix */
 		struct {
-			uint8_t cv[16], pv[16];
+			uint8_t cv[16], pv[16], gv[16];	/* p = 0, p = 1, gap */
 		} init;
 
 		/* extension test if < test_cnt, do inward extension if longer than uspan_thresh */
@@ -608,8 +619,8 @@ typedef struct {
 
 	/* extension */
 	struct {
-		uint8_t rdim, qdim, pad[2];
 		int32_t min_score;
+		uint8_t giv, gev, gih, geh;
 		int8_t score_matrix[];
 	} extend;
 } tm_idx_profile_t;
@@ -640,7 +651,10 @@ typedef struct {
 typedef struct {
 	/* save global configuration at the head */
 	void *base;
-	char const *filename;
+	struct {
+		char const *ref;
+		char const *profile;
+	} filename;
 
 	/* score matrices */
 	struct {
@@ -682,15 +696,16 @@ void tm_idx_destroy(tm_idx_t *mi)
 
 /* index builder */
 typedef struct {
-	re_t *name;
-	re_t *comment;
+	re_pattern_t *name;
+	re_pattern_t *comment;
 } tm_idx_matcher_t;
 
 typedef struct {
 	tm_idx_t mi;
 
 	struct {
-		kvec_t(tm_idx_matcher_t *) matcher;
+		kvec_t(tm_idx_profile_t *) profile;
+		kvec_t(tm_idx_matcher_t) matcher;
 	} score;
 
 	struct {
@@ -709,17 +724,33 @@ typedef struct {
 
 
 static _force_inline
-size_t tm_idx_find_profile(tm_idx_gen_t const *mii, char const *name, size_t nlen)
+void tm_idx_push_profile(tm_idx_gen_t *mii, tm_idx_matcher_t matcher, tm_idx_profile_t *profile)
 {
-	_unused(name);
-	_unused(nlen);
+	kv_push(tm_idx_matcher_t, mii->score.matcher, matcher);
+	kv_push(tm_idx_profile_t *, mii->score.profile, profile);
+	return;
+}
 
-	tm_idx_matcher_t const *matcher = kv_ptr(mii->mi.score.matcher);
-	size_t const mcnt = kv_cnt(mii->mi.score.matcher);
+static _force_inline
+size_t tm_idx_find_profile(tm_idx_gen_t const *mii, char const *name, size_t nlen, char const *comment, size_t clen)
+{
+	tm_idx_matcher_t const *matcher = kv_ptr(mii->score.matcher);
+	size_t const mcnt = kv_cnt(mii->score.matcher);
 
 	/* regex match; find first */
 	for(size_t i = 0; i < mcnt; i++) {
-		;
+		tm_idx_matcher_t const *m = &matcher[i];
+
+		/* result buffers */
+		re_result_t nres = { NULL, NULL }, cres = { NULL, NULL };
+
+		/* do we need to save the results? */
+		if(m->name != NULL && !re_match(m->name, name, &nres)) {
+			return(i);
+		}
+		if(m->comment != NULL && !re_match(m->comment, comment, &cres)) {
+			return(i);
+		}
 	}
 
 	/* not found; return the last one */
@@ -727,11 +758,11 @@ size_t tm_idx_find_profile(tm_idx_gen_t const *mii, char const *name, size_t nle
 }
 
 static _force_inline
-toml_table_t *tm_idx_dump_toml(char const *fn, FILE *log)
+toml_table_t *tm_idx_dump_toml(char const *fn)
 {
 	FILE *fp = fopen(fn, "r");
 	if(fp == NULL) {
-		message(log, "failed to open file: `%s'. check file path and permission.", fn);
+		error("failed to open file: `%s'. check file path and permission.", fn);
 		return(NULL);
 	}
 
@@ -740,7 +771,7 @@ toml_table_t *tm_idx_dump_toml(char const *fn, FILE *log)
 	char error[elen];
 	toml_table_t *table = toml_parse_file(fp, error, elen);
 	if(table == NULL) {
-		message(log, "error occurred on parsing `%s': %s", fn, error);
+		error("error occurred on parsing `%s': %s", fn, error);
 		return(NULL);
 	}
 
@@ -750,42 +781,295 @@ toml_table_t *tm_idx_dump_toml(char const *fn, FILE *log)
 }
 
 static _force_inline
-uint64_t tm_idx_load_score(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, char const *fn, FILE *log)
+tm_idx_matcher_t tm_idx_parse_matcher(char const *pname, toml_table_t const *table)
 {
-	_unused(mii);
-	_unused(conf);
+	_unused(pname);
 
-	/* open file as toml */
-	toml_table_t *table = tm_idx_dump_toml(fn, log);
+	tm_idx_matcher_t matcher = {
+		.name    = NULL,
+		.comment = NULL
+	};
 
-	char const *key;
-	for(size_t i = 0; (key = toml_key_in(table, i)) != NULL; i++) {
-		char const *val = toml_raw_in(table, key);
+	/* construct sequence name and comment matcher */
+	char const *sname   = toml_raw_in(table, "name");
+	char const *comment = toml_raw_in(table, "comment");
 
-		/* has value */
-		if(val == NULL) { continue; }
+	if(sname   != NULL) { matcher.name = re_compile(sname); }
+	if(comment != NULL) { matcher.comment = re_compile(comment); }
+	return(matcher);
+}
 
-		/* has array */
-		toml_array_t *array = toml_array_in(table, key);
+static _force_inline
+size_t tm_idx_profile_size(size_t plen)
+{
+	size_t const size = (
+		  sizeof(tm_idx_profile_t)
+		+ _roundup(plen + 1, 16)
+		+ DZ_MAT_SIZE * DZ_MAT_SIZE		/* is 4 * DZ_MAT_SIZE possible? */
+	);
+	return(size);
+}
 
-		/* has table */
+static _force_inline
+char *tm_idx_profile_name(tm_idx_profile_t *profile)
+{
+	size_t const ofs = (
+		  sizeof(tm_idx_profile_t)
+		+ DZ_MAT_SIZE * DZ_MAT_SIZE		/* is 4 * DZ_MAT_SIZE possible? */
+	);
+	return(_add_offset(profile, ofs));
+}
+
+typedef void (*tm_idx_score_foreach)(void *opaque, int8_t *p, size_t i, size_t j);
+
+static _force_inline
+void tm_idx_score_foreach(tm_idx_profile_t *profile, void *opaque, tm_idx_score_foreach_t fp)
+{
+	for(size_t i = 0; i < DZ_MAT_SIZE; i++) {
+		for(size_t j = 0; j < DZ_MAT_SIZE; j++) {
+			 fp(opaque, &profile->extend.score_matrix[i * DZ_MAT_SIZE + j], i, j);
+		}
+	}
+	return;
+}
+
+static
+void tm_idx_fill_score_callback(int64_t *s, int8_t *p, size_t i, size_t j)
+{
+	*p = s[(i & j) == 0];
+	return;
+}
+
+static _force_inline
+void tm_idx_fill_score(tm_idx_profile_t *profile, int64_t m, int64_t x)
+{
+	int64_t s[2] = { m, x };
+	tm_idx_score_foreach(profile,
+		(void *)s,
+		(tm_idx_score_foreach_t)tm_idx_fill_score_callback
+	);
+	return;
+}
+
+static _force_inline
+void tm_idx_fill_default(tm_idx_profile_t *profile)
+{
+	/* default params */
+	profile->kbits = 2 * 5;
+
+	profile->chain.window.sep.u = 32;
+	profile->chain.window.sep.v = 32;
+	profile->chain.min_scnt = 2;
+
+	profile->extend.min_score = 16;
+	profile->extend.giv = 5;
+	profile->extend.gev = 1;
+	profile->extend.gih = 5;
+	profile->extend.geh = 1;
+	tm_idx_fill_score(profile, 2, -3);
+	return;
+}
+
+static _force_inline
+void tm_idx_fill_overridden(tm_idx_profile_t *profile, tm_idx_conf_t const *conf)
+{
+	if(conf->kmer > 0) {
+		profile->kbits = 2 * conf->kmer;
 	}
 
+	/* chaining */
+	if(conf->window > 0) {
+		profile->chain.window.sep.u = conf->window;
+		profile->chain.window.sep.v = conf->window;
+	}
 
+	/* score matrix */
+	if(conf->match > 0 && conf->mismatch > 0) {
+		int64_t const m = conf->match;
+		int64_t const x = -((int64_t)conf->mismatch);
 
+		tm_idx_fill_score(profile, m, x);
+	}
+
+	/* gap penalties */
+	if(conf->gap_open > 0) {
+		profile->extend.giv = conf->gap_open;
+		profile->extend.gih = conf->gap_open;
+	}
+	if(conf->gap_extend > 0) {
+		profile->extend.gev = conf->gap_extend;
+		profile->extend.geh = conf->gap_extend;
+	}
+
+	/* postprocess */
+	if(conf->min_score > 0) {
+		profile->extend.min_score = conf->min_score;
+	}
+	return;
+}
+
+typedef struct {
+	int64_t acc, min, max;
+	size_t cnt;
+} tm_idx_calc_acc_t;
+
+static
+void tm_idx_acc_filter_score(tm_idx_calc_acc_t *acc, int8_t *p, size_t i, size_t j)
+{
+	int64_t const s = *p;
+	struct tm_idx_calc_acc_s *q = &acc[(i & j) == 0];
+	q->acc += s;
+	q->min = MIN2(q->min, s);
+	q->max = MAX2(q->max, s);
+	q->cnt++;
+	return;
+}
+
+static _force_inline
+void tm_idx_calc_filter_score(tm_idx_profile_t *profile)
+{
+	/* count and accumulate */
+	tm_idx_calc_acc_t c[2] = {
+		{ 0, INT32_MAX, INT32_MIN, 0 },
+		{ 0, INT32_MAX, INT32_MIN, 0 }
+	};
+	tm_idx_score_foreach(profile,
+		(void *)c,
+		(tm_idx_score_foreach_t)tm_idx_acc_filter_score
+	);
+
+	/* take average */
+	int64_t const mave = c[0].acc / c[0].cnt;
+	int64_t const m = (c[0].min == mave
+		? c[0].min
+		: MAX2(1, mave * 3 / 4)
+	);
+
+	int64_t const xave = c[1].acc / c[1].cnt;
+	int64_t const x = (c[1].min == mave
+		? c[1].min
+		: MIN2(-1, xave * 3 / 4)
+	);
+
+	for(size_t i = 0; i < 16; i++) {
+		profile->filter.score_matrix[i] = (i == 0) ? x : m;
+	}
+	return;
+}
+
+static _force_inline
+void tm_idx_calc_filter_ivec(tm_idx_profile_t *profile)
+{
+	/* FIXME; initial vectors and gap vector */
+
+	return;
+}
+
+static _force_inline
+void tm_idx_calc_filter_thresh(tm_idx_profile_t *profile)
+{
+	int64_t min_score = profile->extend.min_score / 4;
+	profile->filter.min_score = MAX2(0, min_score);
+	return;
+}
+
+static _force_inline
+void tm_idx_calc_filter_params(tm_idx_profile_t *profile)
+{
+	tm_idx_calc_filter_score(profile);
+	tm_idx_calc_filter_ivec(profile);
+	tm_idx_calc_filter_thresh(profile);
+	return;
+}
+
+static _force_inline
+tm_idx_profile_t *tm_idx_default_profile(tm_idx_conf_t const *conf)
+{
+	/* name */
+	char const *pname = "default";
+	size_t const plen = strlen(pname);
+
+	/* allocate profile object */
+	size_t const size = tm_idx_profile_size(plen);
+	tm_idx_profile_t *profile = malloc(size);
+	memset(profile, 0, size);
+
+	/* save size and name */
+	profile->size = size;
+	profile->meta.name = tm_idx_profile_name(profile);
+	strcpy(profile->meta.name, pname, plen);
+
+	/* load default params */
+	tm_idx_fill_default(profile);
+	tm_idx_fill_overridden(profile, conf);
+
+	/* derive filtering parameters from extension parameters */
+	tm_idx_calc_filter_params(profile);
+	return(profile);
+}
+
+static _force_inline
+tm_idx_profile_t *tm_idx_parse_profile(char const *pname, toml_table_t const *table)
+{
+	size_t const plen = strlen(pname);	
+
+	/* FIXME: save profile name */
+
+	return;
+}
+
+static _force_inline
+uint64_t tm_idx_load_score(tm_idx_gen_t *mii, tm_idx_profile_t const *template, char const *fn)
+{
+	/* open file as toml */
+	toml_table_t const *root = tm_idx_dump_toml(fn);
+
+	char const *key;
+	for(size_t i = 0; (key = toml_key_in(root, i)) != NULL; i++) {
+		toml_table_t const *table = toml_table_in(root, key);
+
+		/* check if the key has a corresponding table */
+		if(table == NULL) {
+			error("missing tabular content for key `%s'. ignoring.", key);
+			continue;
+		}
+
+		/* parse name / comment matcher */
+		tm_idx_matcher_t matcher = tm_idx_parse_matcher(key, table);
+		if(matcher.name == NULL && matcher.comment == NULL) { continue; }	/* error when both NULL */
+
+		/* parse score matrix */
+		tm_idx_profile_t *profile = tm_idx_parse_profile(key, table);	/* NULL if error */
+		if(profile == NULL) { continue; }
+
+		/* save */
+		tm_idx_push_profile(mii, matcher, profile);
+	}
 	toml_free(table);
 	return;
 }
 
 static _force_inline
-void tm_idx_load_default_score(tm_idx_gen_t *mii, tm_idx_conf_t const *conf)
+uint64_t tm_idx_gen_profile(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, char const *fn, FILE *log)
 {
-	_unused(mii);
-	_unused(conf);
+	/* compose default (fallback) profile as template */
+	tm_idx_profile_t *fallback = tm_idx_default_profile(conf);
 
-	/* FIXME */
+	if(fn != NULL) {
+		message(log, "reading score matrices...");
+		if(tm_idx_load_score(mii, fallback, fn)) {
+			goto _tm_idx_gen_error;
+		}
+	} else {
+		message(log, "loading default score matrix...");
+	}
+
+	/* append default score matrix as fallback */
+	tm_idx_matcher_t m = { NULL, NULL };
+	tm_idx_push_profile(mii, m, profile);
 	return;
 }
+
 
 static
 tm_idx_batch_t *tm_idx_fetch(uint32_t tid, tm_idx_gen_t *self)
@@ -891,7 +1175,10 @@ tm_idx_batch_t *tm_idx_collect(uint32_t tid, tm_idx_gen_t *self, tm_idx_batch_t 
 		bseq_meta_t *p = &meta[i];
 
 		/* get score matrix for this sequence from its name with regex matching */
-		size_t pid = tm_idx_find_profile(&self->mi, bseq_name(p), bseq_name_len(p));
+		size_t pid = tm_idx_find_profile(&self->mi,
+			bseq_name(p),    bseq_name_len(p),
+			bseq_comment(p), bseq_comment_len(p)
+		);
 
 		/* build hash table */
 		tm_ref_sketch_t *sr = tm_idx_build_sketch(self,
@@ -934,7 +1221,7 @@ void tm_idx_record(uint32_t tid, tm_idx_gen_t *self, tm_idx_batch_t *batch)
 }
 
 static _force_inline
-uint64_t tm_idx_gen_core(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, pt_t *pt, char const *fn)
+uint64_t tm_idx_gen_core(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, char const *fn, pt_t *pt)
 {
 	_unused(conf);
 
@@ -971,7 +1258,39 @@ uint64_t tm_idx_gen_core(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, pt_t *pt,
 }
 
 static _force_inline
-tm_idx_t *tm_idx_gen(tm_idx_conf_t const *conf, pt_t *pt, char const *ref, char const *score, FILE *log)
+tm_idx_t *tm_idx_gen_finalize(tm_idx_gen_t *mii, char const *ref, char const *profile)
+{
+	/* cleanup regex matcher */
+	tm_idx_matcher_t const *matcher = kv_ptr(mii->score.matcher);
+	size_t const mcnt = kv_cnt(mii->score.matcher);
+
+	for(size_t i = 0; i < mcnt; i++) {
+		tm_idx_matcher_t const *m = &matcher[i];
+
+		if(m->name != NULL) { re_free(m->name); }
+		if(m->comment != NULL) { re_free(m->comment); }
+	}
+	kv_destroy(mii->score.matcher);
+
+	/* save filename */
+	mii->filename.ref     = mm_strdup(ref);
+	mii->filename.profile = mm_strdup(profile);
+
+	/* copy pointers */
+	tm_idx_t *mi = &mii->mi;
+	mi->profile.arr = kv_ptr(mii->score.profile);
+	mi->profile.cnt = kv_cnt(mii->score.profile);
+
+	mi->sketch.arr = kv_ptr(mii->col.bin);
+	mi->sketch.cnt = kv_cnt(mii->col.bin);
+
+	/* clear working buffers */
+	memset(_add_offset(mi, sizeof(tm_idx_t)), 0, sizeof(tm_idx_gen_t) - sizeof(tm_idx_t));
+	return(mi);
+}
+
+static _force_inline
+tm_idx_t *tm_idx_gen(tm_idx_conf_t const *conf, pt_t *pt, char const *ref, char const *profile, FILE *log)
 {
 	/* allocate thread-local buffers */
 	size_t size = sizeof(tm_idx_gen_t) + pt_nth(pt) * sizeof(tm_ref_tbuf_t);
@@ -979,24 +1298,16 @@ tm_idx_t *tm_idx_gen(tm_idx_conf_t const *conf, pt_t *pt, char const *ref, char 
 	memset(mii, 0, size);
 
 	/* load score matrices and build regex matcher */
-	if(score != NULL) {
-		message(log, "reading score matrices...");
-		if(tm_idx_load_score(mii, conf, score, log)) {
-			goto _tm_idx_gen_error;
-		}
-	} else {
-		message(log, "loading default score matrix...");
-		tm_idx_load_default_score(mii, conf);		/* never fail */
-	}
+	tm_idx_gen_profile(mii, conf, profile, log);
 
 	/* read sequence and collect k-mers */
 	message(log, "reading sequences and collecting k-mers...");
-	if(tm_idx_gen_core(mii, conf, pt, ref)) {
+	if(tm_idx_gen_core(mii, conf, ref, pt)) {
 		goto _tm_idx_gen_error;
 	}
 
 	message(log, "done.");
-	return((tm_idx_t *)mii);
+	return(tm_idx_gen_finalize(mii, ref, profile));
 
 _tm_idx_gen_error:;
 	kv_destroy(mii->col.bin);

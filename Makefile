@@ -12,7 +12,7 @@ CFLAGS = -std=c99 $(OFLAGS) $(WFLAGS)
 all: tinymasker
 
 tinymasker: $(SRC)/tinymasker.c $(SRC)/dozeu.h
-	$(CC) $(CFLAGS) -o tinymasker $(SRC)/tinymasker.c
+	$(CC) $(CFLAGS) -o tinymasker $(SRC)/tinymasker.c $(SRC)/toml.c $(SRC)/re.c
 
 clean:
 	$(RM) -f tinymasker
