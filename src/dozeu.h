@@ -133,10 +133,12 @@ enum dz_alphabet_query {
 #endif
 
 #if (defined(DEBUG) || (defined(UNITTEST) && UNITTEST != 0)) && !defined(__cplusplus)
-#  include "log.h"
-#  define UNITTEST_ALIAS_MAIN		0
-#  define UNITTEST_UNIQUE_ID		3213
-#  include "unittest.h"
+#  include "utils/log.h"
+#  if !defined(UNITTEST_UNIQUE_ID)
+#    define UNITTEST_ALIAS_MAIN		0
+#    define UNITTEST_UNIQUE_ID		3213
+#  endif
+#  include "utils/unittest.h"
 unittest_config( .name = "dozeu" );
 unittest() { debug("hello"); }
 #else
@@ -2479,12 +2481,12 @@ uint64_t dz_calc_max_pos_core(dz_state_t const *ff)
 
 	if(pcap == NULL) {
 		/* is root */
-		debug("pcap == NULL, rlen(%d)", (int32_t)ff->rlen);
+		debug("pcap == NULL");
 		dz_tail_t const *tail = dz_restore_tail(ff);
 		return(((uint64_t)tail->rsave.len)<<32);
 	}
 
-	debug("ff(%p), pcap(%p), rrem(%d), rlen(%d)", ff, pcap, (int32_t)pcap->rrem, (int32_t)ff->rlen);
+	debug("ff(%p), pcap(%p)", ff, pcap);
 	return((dz_calc_max_rpos_core(ff)<<32) | dz_calc_max_qpos_core(ff));
 }
 
@@ -2605,7 +2607,6 @@ uint64_t dz_trace_reload_section(dz_trace_work_t *w, size_t layer)
 	/* merging vector; load contents to find an edge */
 	dz_head_t const *head = dz_chead(w->pcap);
 	uint16_t const prev_score = dz_trace_score(layer, w->cap, w->idx) + head->adj;
-	debug("merging vector, %s(%d), fcnt(%lu)", #_l, prev_score, fcnt);
 
 	/* load incoming vectors */
 	size_t const vidx = dz_trace_vector_idx(w->idx);
