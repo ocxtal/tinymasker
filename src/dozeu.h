@@ -1438,6 +1438,7 @@ void dz_init_score_matrix(
 	}
 	return;
 }
+
 #endif
 
 
