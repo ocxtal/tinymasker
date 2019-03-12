@@ -74,9 +74,9 @@ typedef struct v4i32_s {
 
 /* load and store */
 #define _load_v4i32(...)	_a_v4i32e(load, _e_p, __VA_ARGS__)
-#define _loadu_v4i32(...)	_a_v4i32e(load, _e_p, __VA_ARGS__)
+#define _loadu_v4i32(...)	_a_v4i32e(loadu, _e_p, __VA_ARGS__)
 #define _store_v4i32(...)	_a_v4i32ev(store, _e_pv, __VA_ARGS__)
-#define _storeu_v4i32(...)	_a_v4i32ev(store, _e_pv, __VA_ARGS__)
+#define _storeu_v4i32(...)	_a_v4i32ev(storeu, _e_pv, __VA_ARGS__)
 
 /* broadcast */
 #define _set_v4i32(...)		_a_v4i32(set1, _e_i, __VA_ARGS__)
