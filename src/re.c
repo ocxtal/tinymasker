@@ -269,6 +269,9 @@ tonfa(struct re_nfa_s *nfa, size_t start, struct re_s *re)
                 t = tonfa(nfa, start, re->left);
                 return tonfa(nfa, t, re->right);
         }
+
+        /* never reach here */
+        return 0;
 }
 
 
