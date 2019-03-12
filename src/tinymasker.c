@@ -14,6 +14,10 @@
 #  define BATCH_SIZE			( 512ULL * 1024 )
 #endif
 
+#ifndef MAX_THREADS
+#  define MAX_THREADS			( 256 )
+#endif
+
 
 #ifndef UNITTEST
 #  define UNITTEST				( 0 )
@@ -582,7 +586,6 @@ typedef struct {
 	int64_t min_score;
 } tm_idx_conf_t;
 
-
 /* matcher object; k-mer length, score matrix, and score thresholds */
 typedef struct {
 	uint32_t size;
@@ -619,9 +622,10 @@ typedef struct {
 
 	/* extension */
 	struct {
+		dz_profile_t *dz;
 		int32_t min_score;
 		uint8_t giv, gev, gih, geh;
-		int8_t score_matrix[];
+		int8_t score_matrix[DZ_MAT_SIZE * DZ_MAT_SIZE];
 	} extend;
 } tm_idx_profile_t;
 // _static_assert(sizeof(tm_idx_profile_t) == 16);
@@ -734,6 +738,9 @@ void tm_idx_push_profile(tm_idx_gen_t *mii, tm_idx_matcher_t matcher, tm_idx_pro
 static _force_inline
 size_t tm_idx_find_profile(tm_idx_gen_t const *mii, char const *name, size_t nlen, char const *comment, size_t clen)
 {
+	_unused(nlen);
+	_unused(clen);
+
 	tm_idx_matcher_t const *matcher = kv_ptr(mii->score.matcher);
 	size_t const mcnt = kv_cnt(mii->score.matcher);
 
@@ -802,25 +809,18 @@ tm_idx_matcher_t tm_idx_parse_matcher(char const *pname, toml_table_t const *tab
 static _force_inline
 size_t tm_idx_profile_size(size_t plen)
 {
-	size_t const size = (
-		  sizeof(tm_idx_profile_t)
-		+ _roundup(plen + 1, 16)
-		+ DZ_MAT_SIZE * DZ_MAT_SIZE		/* is 4 * DZ_MAT_SIZE possible? */
-	);
+	size_t const size = sizeof(tm_idx_profile_t) + _roundup(plen + 1, 16);
 	return(size);
 }
 
 static _force_inline
-char *tm_idx_profile_name(tm_idx_profile_t *profile)
+char *tm_idx_profile_name_ptr(tm_idx_profile_t *profile)
 {
-	size_t const ofs = (
-		  sizeof(tm_idx_profile_t)
-		+ DZ_MAT_SIZE * DZ_MAT_SIZE		/* is 4 * DZ_MAT_SIZE possible? */
-	);
+	size_t const ofs = sizeof(tm_idx_profile_t);
 	return(_add_offset(profile, ofs));
 }
 
-typedef void (*tm_idx_score_foreach)(void *opaque, int8_t *p, size_t i, size_t j);
+typedef void (*tm_idx_score_foreach_t)(void *opaque, int8_t *p, size_t i, size_t j);
 
 static _force_inline
 void tm_idx_score_foreach(tm_idx_profile_t *profile, void *opaque, tm_idx_score_foreach_t fp)
@@ -871,7 +871,7 @@ void tm_idx_fill_default(tm_idx_profile_t *profile)
 }
 
 static _force_inline
-void tm_idx_fill_overridden(tm_idx_profile_t *profile, tm_idx_conf_t const *conf)
+void tm_idx_override_default(tm_idx_profile_t *profile, tm_idx_conf_t const *conf)
 {
 	if(conf->kmer > 0) {
 		profile->kbits = 2 * conf->kmer;
@@ -917,7 +917,7 @@ static
 void tm_idx_acc_filter_score(tm_idx_calc_acc_t *acc, int8_t *p, size_t i, size_t j)
 {
 	int64_t const s = *p;
-	struct tm_idx_calc_acc_s *q = &acc[(i & j) == 0];
+	tm_idx_calc_acc_t *q = &acc[(i & j) == 0];
 	q->acc += s;
 	q->min = MIN2(q->min, s);
 	q->max = MAX2(q->max, s);
@@ -961,6 +961,7 @@ static _force_inline
 void tm_idx_calc_filter_ivec(tm_idx_profile_t *profile)
 {
 	/* FIXME; initial vectors and gap vector */
+	_unused(profile);
 
 	return;
 }
@@ -983,6 +984,35 @@ void tm_idx_calc_filter_params(tm_idx_profile_t *profile)
 }
 
 static _force_inline
+void *tm_idx_malloc(void *unused, size_t size)
+{
+	_unused(unused);
+	return(malloc(size));
+}
+
+static _force_inline
+void tm_idx_finalize_profile(tm_idx_profile_t *profile)
+{
+	dz_allocator_t alloc = {
+		.ctx = NULL,
+		.fp = tm_idx_malloc
+	};
+	dz_score_conf_t conf = {
+		.score_matrix = profile->extend.score_matrix,
+		.ins_open   = profile->extend.giv,
+		.ins_extend = profile->extend.gev,
+		.del_open   = profile->extend.gih,
+		.del_extend = profile->extend.geh,
+
+		/* fixed */
+		.max_gap_len = 16,
+		.full_length_bonus = 0
+	};
+	profile->extend.dz = dz_init_profile(&alloc, &conf);
+	return;
+}
+
+static _force_inline
 tm_idx_profile_t *tm_idx_default_profile(tm_idx_conf_t const *conf)
 {
 	/* name */
@@ -996,34 +1026,38 @@ tm_idx_profile_t *tm_idx_default_profile(tm_idx_conf_t const *conf)
 
 	/* save size and name */
 	profile->size = size;
-	profile->meta.name = tm_idx_profile_name(profile);
-	strcpy(profile->meta.name, pname, plen);
+	profile->meta.name = tm_idx_profile_name_ptr(profile);
+	memcpy(profile->meta.name, pname, plen + 1);
 
 	/* load default params */
 	tm_idx_fill_default(profile);
-	tm_idx_fill_overridden(profile, conf);
+	tm_idx_override_default(profile, conf);
 
 	/* derive filtering parameters from extension parameters */
 	tm_idx_calc_filter_params(profile);
+
+	/* instanciate dz */
+	tm_idx_finalize_profile(profile);
 	return(profile);
 }
 
 static _force_inline
-tm_idx_profile_t *tm_idx_parse_profile(char const *pname, toml_table_t const *table)
+tm_idx_profile_t *tm_idx_parse_profile(tm_idx_profile_t const *template, char const *pname, toml_table_t const *table)
 {
 	size_t const plen = strlen(pname);	
 
 	/* FIXME: save profile name */
+	_unused(template);
+	_unused(table);
 
-	return;
+	/* instanciate dz */
+	// tm_idx_finalize_profile(profile);
+	return(NULL);
 }
 
 static _force_inline
-uint64_t tm_idx_load_score(tm_idx_gen_t *mii, tm_idx_profile_t const *template, char const *fn)
+uint64_t tm_idx_load_score_core(tm_idx_gen_t *mii, tm_idx_profile_t const *template, toml_table_t const *root)
 {
-	/* open file as toml */
-	toml_table_t const *root = tm_idx_dump_toml(fn);
-
 	char const *key;
 	for(size_t i = 0; (key = toml_key_in(root, i)) != NULL; i++) {
 		toml_table_t const *table = toml_table_in(root, key);
@@ -1039,14 +1073,25 @@ uint64_t tm_idx_load_score(tm_idx_gen_t *mii, tm_idx_profile_t const *template, 
 		if(matcher.name == NULL && matcher.comment == NULL) { continue; }	/* error when both NULL */
 
 		/* parse score matrix */
-		tm_idx_profile_t *profile = tm_idx_parse_profile(key, table);	/* NULL if error */
-		if(profile == NULL) { continue; }
+		tm_idx_profile_t *profile = tm_idx_parse_profile(template, key, table);	/* NULL if error */
+		if(profile == NULL) { return(1); }	/* unignorable error */
 
 		/* save */
 		tm_idx_push_profile(mii, matcher, profile);
 	}
-	toml_free(table);
-	return;
+	return(0);			/* no error */
+}
+
+static _force_inline
+uint64_t tm_idx_load_score(tm_idx_gen_t *mii, tm_idx_profile_t const *template, char const *fn)
+{
+	/* open file as toml */
+	toml_table_t *root = tm_idx_dump_toml(fn);
+
+	/* parse */
+	uint64_t state = tm_idx_load_score_core(mii, template, root);
+	toml_free(root);
+	return(state);
 }
 
 static _force_inline
@@ -1058,7 +1103,7 @@ uint64_t tm_idx_gen_profile(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, char c
 	if(fn != NULL) {
 		message(log, "reading score matrices...");
 		if(tm_idx_load_score(mii, fallback, fn)) {
-			goto _tm_idx_gen_error;
+			return(1);
 		}
 	} else {
 		message(log, "loading default score matrix...");
@@ -1066,8 +1111,8 @@ uint64_t tm_idx_gen_profile(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, char c
 
 	/* append default score matrix as fallback */
 	tm_idx_matcher_t m = { NULL, NULL };
-	tm_idx_push_profile(mii, m, profile);
-	return;
+	tm_idx_push_profile(mii, m, fallback);
+	return(0);
 }
 
 
@@ -1175,7 +1220,7 @@ tm_idx_batch_t *tm_idx_collect(uint32_t tid, tm_idx_gen_t *self, tm_idx_batch_t 
 		bseq_meta_t *p = &meta[i];
 
 		/* get score matrix for this sequence from its name with regex matching */
-		size_t pid = tm_idx_find_profile(&self->mi,
+		size_t pid = tm_idx_find_profile(self,
 			bseq_name(p),    bseq_name_len(p),
 			bseq_comment(p), bseq_comment_len(p)
 		);
@@ -1258,9 +1303,8 @@ uint64_t tm_idx_gen_core(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, char cons
 }
 
 static _force_inline
-tm_idx_t *tm_idx_gen_finalize(tm_idx_gen_t *mii, char const *ref, char const *profile)
+void tm_idx_destroy_matcher(tm_idx_gen_t *mii)
 {
-	/* cleanup regex matcher */
 	tm_idx_matcher_t const *matcher = kv_ptr(mii->score.matcher);
 	size_t const mcnt = kv_cnt(mii->score.matcher);
 
@@ -1271,13 +1315,21 @@ tm_idx_t *tm_idx_gen_finalize(tm_idx_gen_t *mii, char const *ref, char const *pr
 		if(m->comment != NULL) { re_free(m->comment); }
 	}
 	kv_destroy(mii->score.matcher);
+	return;
+}
+
+static _force_inline
+tm_idx_t *tm_idx_gen_finalize(tm_idx_gen_t *mii, char const *ref, char const *profile)
+{
+	/* cleanup regex matcher */
+	tm_idx_destroy_matcher(mii);
 
 	/* save filename */
-	mii->filename.ref     = mm_strdup(ref);
-	mii->filename.profile = mm_strdup(profile);
+	tm_idx_t *mi = &mii->mi;
+	mi->filename.ref     = mm_strdup(ref);
+	mi->filename.profile = mm_strdup(profile);
 
 	/* copy pointers */
-	tm_idx_t *mi = &mii->mi;
 	mi->profile.arr = kv_ptr(mii->score.profile);
 	mi->profile.cnt = kv_cnt(mii->score.profile);
 
@@ -1298,7 +1350,9 @@ tm_idx_t *tm_idx_gen(tm_idx_conf_t const *conf, pt_t *pt, char const *ref, char 
 	memset(mii, 0, size);
 
 	/* load score matrices and build regex matcher */
-	tm_idx_gen_profile(mii, conf, profile, log);
+	if(tm_idx_gen_profile(mii, conf, profile, log)) {
+		goto _tm_idx_gen_error;
+	}
 
 	/* read sequence and collect k-mers */
 	message(log, "reading sequences and collecting k-mers...");
@@ -1381,6 +1435,19 @@ size_t tm_idx_scan_profile(tm_idx_t const *mi)
 }
 
 static _force_inline
+void *tm_idx_dump_profile_core(tm_idx_dump_t *w, tm_idx_profile_t *profile)
+{
+	uint8_t buf[profile->size + 1];
+	tm_idx_profile_t *p = (tm_idx_profile_t *)buf;
+	memcpy(p, profile, profile->size);
+
+	/* ignore dz_profile_t object */
+	p->meta.name = NULL;
+	p->extend.dz = NULL;
+	return(tm_idx_dump_block(w, p, p->size));
+}
+
+static _force_inline
 void *tm_idx_dump_profile(tm_idx_dump_t *w, tm_idx_t const *mi)
 {
 	/* copy pointer array */
@@ -1389,7 +1456,7 @@ void *tm_idx_dump_profile(tm_idx_dump_t *w, tm_idx_t const *mi)
 
 	/* dump body */
 	for(size_t i = 0; i < mi->profile.cnt; i++) {
-		buf[i] = tm_idx_dump_block(w, buf[i], buf[i]->size);
+		buf[i] = tm_idx_dump_profile_core(w, buf[i]);
 		/* we don't add padding between profiles */
 	}
 	tm_idx_dump_pad(w);
@@ -1447,7 +1514,8 @@ size_t tm_idx_calc_size(tm_idx_t const *mi)
 	size_t size = 0;
 
 	size += sizeof(tm_idx_t);
-	size += strlen(mi->filename) + 1;
+	size += strlen(mi->filename.ref) + 1;
+	size += strlen(mi->filename.profile) + 1;
 	size += tm_idx_padding_size(size);		/* make aligned */
 
 	size += tm_idx_scan_profile(mi);
@@ -1477,7 +1545,12 @@ size_t tm_idx_dump(tm_idx_t const *mi, void *fp, write_t wfp)
 	tm_idx_dump_block(&w, &hdr, sizeof(tm_idx_hdr_t));
 	cmi.profile.arr = tm_idx_dump_profile(&w, &cmi);
 	cmi.sketch.arr = tm_idx_dump_sketch(&w, &cmi);
-	cmi.filename = tm_idx_dump_block(&w, cmi.filename, strlen(cmi.filename) + 1);
+
+	/* input seqence names */
+	cmi.filename.ref     = tm_idx_dump_block(&w, cmi.filename.ref, strlen(cmi.filename.ref) + 1);
+	cmi.filename.profile = tm_idx_dump_block(&w, cmi.filename.profile, strlen(cmi.filename.profile) + 1);
+
+	/* done */
 	tm_idx_dump_pad(&w);
 	tm_idx_dump_block(&w, &cmi, sizeof(tm_idx_t));
 	return(w.ofs);
@@ -1506,6 +1579,8 @@ void tm_idx_patch_profile(tm_idx_t *mi, uint8_t *base)
 	size_t const pcnt = mi->profile.cnt;
 	for(size_t i = 0; i < pcnt; i++) {
 		p[i] = _add_offset(p[i], base);
+		p[i]->meta.name = tm_idx_profile_name_ptr(p[i]);
+		tm_idx_finalize_profile(p[i]);		/* instanciate dz */
 	}
 	return;
 }
@@ -1551,7 +1626,8 @@ tm_idx_t *tm_idx_load(void *fp, read_t rfp)
 
 	/* restore pointers */
 	tm_idx_t *mi = tm_idx_slice_root(base, hdr.size);
-	mi->filename = _add_offset(mi->filename, base);
+	mi->filename.ref     = _add_offset(mi->filename.ref, base);
+	mi->filename.profile = _add_offset(mi->filename.profile, base);
 	tm_idx_patch_profile(mi, base);
 	tm_idx_patch_sketch(mi, base);
 	return(mi);
@@ -1673,7 +1749,7 @@ typedef struct {
 
 	struct {
 		uint32_t min_weight;	/* working variable */
-		dz_t *dz;				/* everything contained */
+		dz_arena_t *fill, *trace;
 
 		/* result bin */
 		tm_aln_v arr;
@@ -1686,8 +1762,10 @@ void tm_scan_init_static(tm_scan_t *self, size_t cnt)
 {
 	memset(self, 0, sizeof(tm_scan_t) * cnt);
 
+	size_t const size = DZ_MEM_INIT_SIZE - _roundup(sizeof(dz_arena_t), DZ_MEM_ALIGN_SIZE);
 	for(size_t i = 0; i < cnt; i++) {
-		self->dz = dz_init();
+		self->extend.fill = dz_arena_init(size);
+		self->extend.trace = NULL;
 	}
 	return;
 }
@@ -1906,11 +1984,11 @@ tm_seed_t *tm_chain_find_nearest(tm_seed_t *p, tm_seed_t *t, uint64_t window)
 	uint64_t lb = (uv & ~umask);				/* (0, vlb) */
 
 	/* find first chainable seed */
-	tm_seed_t *n = tm_chain_find_first(self, p, t, lb, window);
+	tm_seed_t *n = tm_chain_find_first(p, t, lb, window);
 	if(n == NULL) { return(NULL); }				/* we expect control paths are kept isolated */
 
 	/* then inspect alternative chainable seeds */
-	return(tm_chain_find_alt(self, n, t, lb));
+	return(tm_chain_find_alt(n, t, lb));
 }
 
 static _force_inline
@@ -2134,10 +2212,11 @@ size_t tm_filter_chain(tm_idx_sketch_t const *si, tm_idx_profile_t const *profil
 }
 
 static _force_inline
-size_t tm_seed_and_sort(tm_ref_sketch_t const *ref, uint8_t const *query, size_t qlen, tm_seed_v *seed, tm_sqiv_t *sqiv)
+size_t tm_seed_and_sort(tm_ref_sketch_t const *ref, uint8_t const *query, size_t qlen, tm_seed_v *seed, tm_sqiv_v *sqiv)
 {
 	/* enumerate seeds */
 	kv_clear(*seed);
+	kv_clear(*sqiv);
 	if(tm_collect_seed(ref, query, qlen, seed, sqiv) == 0) {
 		return(0);
 	}
@@ -2153,7 +2232,7 @@ size_t tm_seed_and_sort(tm_ref_sketch_t const *ref, uint8_t const *query, size_t
 }
 
 static _force_inline
-size_t tm_chain_and_filter(tm_idx_sketch_t const *si, tm_idx_profile_t const *profile, uint8_t const *query, tm_seed_t const *seed, size_t scnt, tm_chain_v *chain)
+size_t tm_chain_and_filter(tm_idx_sketch_t const *si, tm_idx_profile_t const *profile, uint8_t const *query, tm_seed_t *seed, size_t scnt, tm_chain_v *chain)
 {
 	/* chaining; return if no chain obtained */
 	size_t const cbase = kv_cnt(*chain);		/* save chain count */
@@ -2169,9 +2248,47 @@ size_t tm_chain_and_filter(tm_idx_sketch_t const *si, tm_idx_profile_t const *pr
 	return(kv_cnt(*chain));
 }
 
+static _force_inline
+size_t tm_collect_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *seq, size_t slen)
+{
+	tm_idx_sketch_t const **si = (tm_idx_sketch_t const **)idx->sketch.arr;
+	tm_idx_profile_t const **pf = (tm_idx_profile_t const **)idx->profile.arr;
+
+	/* clear result bin */
+	kv_clear(self->chain.arr);
+
+	/* collect chain for each reference sequence */
+	for(size_t i = 0; i < idx->sketch.cnt; i++) {
+		/* collect seeds */
+		if(tm_seed_and_sort(&si[i]->ref, seq, slen, &self->seed.arr, &self->seed.sqiv) == 0) { continue; }
+
+		/* chain and filter */
+		tm_seed_t *seed = kv_ptr(self->seed.arr);
+		size_t scnt = kv_cnt(self->seed.arr);
+		tm_chain_and_filter(si[i], pf[si[i]->h.pid], seq, seed, scnt, &self->chain.arr);
+	}
+	return(kv_cnt(self->chain.arr));
+}
+
 
 
 /* X-drop DP extension */
+
+static _force_inline
+tm_aln_t tm_chain_as_aln(tm_scan_t const *self, tm_chain_t const *chain)
+{
+	_unused(self);
+	_unused(chain);
+
+	/* FIXME */
+	return((tm_aln_t){
+		.pos  = { .r = 0, .q = 0 },
+		.span = { .r = 0, .q = 0 },
+		.qmax = 0
+	});
+}
+
+
 static _force_inline
 uint64_t tm_extend_is_complete(tm_scan_t *self)
 {
@@ -2182,22 +2299,25 @@ uint64_t tm_extend_is_complete(tm_scan_t *self)
 }
 
 static _force_inline
-uint64_t tm_extend_is_covered(tm_scan_t *self, tm_aln_t const *caln, uint32_t weight)
+uint64_t tm_extend_is_covered(tm_scan_t *self, tm_chain_t const *chain)
 {
 	/* convert chain position to (pseudo) alignment range */
-	tm_aln_t const *v = kv_ptr(self->extend.arr);
+	tm_aln_t const caln = tm_chain_as_aln(self, chain);
+	uint32_t const weight = chain->attr.stat.weight;
 
 	/* for each overlapping alignment */
-	rbt_iter_t it;
-	rbt_init_iter_aln(&it, v, caln);
+	tm_aln_t const *v = kv_ptr(self->extend.arr);
 
-	tm_aln_t const *p = rbt_fetch_head_aln(&it, v, caln);
+	rbt_iter_t it;
+	rbt_init_iter_aln(&it, v, &caln);
+
+	tm_aln_t const *p = rbt_fetch_head_aln(&it, v, &caln);
 	while(p != NULL) {
 		if(p->min_weight > weight) {
 			return(1);		/* already covered */
 		}
 
-		p = rbt_fetch_next_aln(&it, v, caln);
+		p = rbt_fetch_next_aln(&it, v, &caln);
 	}
 	return(0);				/* possiblilty remains for better alignment */
 }
@@ -2216,46 +2336,82 @@ static _force_inline
 void tm_extend_clear(tm_scan_t *self)
 {
 	kv_clear(self->extend.arr);
+	dz_arena_flush(self->extend.trace);
 	return;
 }
 
+typedef struct {
+	uint8_t const *ptr;
+	uint32_t len;
+	uint32_t dir;
+} tm_extend_ref_t;
 
 static _force_inline
-tm_aln_t tm_chain_as_aln(tm_scan_t const *self, tm_chain_t const *chain)
+dz_state_t const *tm_extend_seed_core(dz_arena_t *mem, dz_profile_t const *profile, tm_extend_ref_t const *ref, uint8_t const *query, size_t qlen, size_t qspos)
 {
-	_unused(self);
-	_unused(chain);
+	/* build query-side profile */
+	dz_query_conv_t qconv = {
+		.single = dz_query_conv_single,
+		.bulk   = dz_query_conv_bulk
+	};
+	dz_query_t *q = dz_pack_query_alloc_mem(mem, profile, (char const *)query, qlen);
+	if(qspos & 0x80000000) {
+		dz_pack_query_reverse(q, profile, qconv, (char const *)&query[qspos], qspos);
+	} else {
+		dz_pack_query_forward(q, profile, qconv, (char const *)&query[qspos], qlen - qspos);
+	}
 
-	/* FIXME */
-	return((tm_aln_t){
-		.pos  = { .r = 0, .q = 0 },
-		.span = { .r = 0, .q = 0 },
-		.qmax = 0
-	});
+	/* reference-side */
+	dz_ref_t r = {
+		.ptr = (char const *)ref->ptr,
+		.len = ref->len,
+		.dir = ref->dir,
+
+		.id  = 0,	/* rid is always zero */
+		.init_s = INT16_MIN
+	};
+
+	dz_state_t const *ff = dz_extend_core(
+		mem, profile, q, &r,
+		dz_root(profile), 1		/* always use root */
+	);
+	return(ff);
 }
 
 static _force_inline
-tm_aln_t tm_extend_seed(tm_scan_t const *self, uint8_t const *ref, size_t rlen, dz_query_t *const *query, tm_aln_t const *caln)
+tm_aln_t tm_extend_seed(tm_scan_t *self, tm_idx_profile_t const *pf, tm_idx_sketch_t const *sk, size_t rrpos, uint8_t const *query, size_t qlen, size_t qrpos)
 {
-	/* upward then downward */
-	int64_t rrpos = caln->pos.r;
-	dz_forefront_t const *r = dz_extend(self->extend.dz, query[1],
-		dz_root(self->extend.dz), 1,
-		(char const *)&ref[rrpos], -rrpos, 0
-	);
+	dz_arena_flush(self->extend.fill);
 
-	/* turnback */
-	uint64_t spos = dz_calc_max_pos(self->extend.dz, r);
-	uint64_t rspos = spos>>32, qspos = spos & 0xffffffff;
-	dz_forefront_t const *f = dz_extend(self->extend.dz, query[0],
-		dz_root(self->extend.dz), 1,
-		(char const *)&ref[rspos], rlen - rspos, 0
-	);
+	/* get reference sequence */
+	uint8_t const *ref = tm_idx_ref_seq_ptr(sk);
+	size_t const rlen = tm_idx_ref_seq_len(sk);
+
+	/* forward */
+	tm_extend_ref_t rf = {
+		.ptr = &ref[rrpos],
+		.len = rlen - rrpos,
+		.dir = 0
+	};
+	dz_state_t const *r = tm_extend_seed_core(self->extend.fill, pf->extend.dz, &rf, query, qlen, qrpos);
+
+	/* get downward max */
+	uint64_t const spos = dz_calc_max_pos_core(r);
+	uint64_t const rspos = spos>>32;
+	uint64_t const qspos = spos & 0xffffffff;
+
+	/* backward */
+	tm_extend_ref_t rr = {
+		.ptr = &ref[rspos],
+		.len = rspos,
+		.dir = 1
+	};
+	dz_state_t const *f = tm_extend_seed_core(self->extend.fill, pf->extend.dz, &rr, query, qlen, qspos);
 
 	/* traceback */
-	dz_alignment_t *aln = dz_trace(self->extend.dz, f);
+	dz_alignment_t *aln = dz_trace_core(self->extend.trace, pf->extend.dz, f);
 
-	uint32_t rspan = aln->ref_length, qspan = aln->query_length;
+	uint32_t const rspan = aln->ref_length, qspan = aln->query_length;
 	return((tm_aln_t){
 		/* coordinates */
 		.qmax = qspos + qspan,
@@ -2273,36 +2429,34 @@ tm_aln_t tm_extend_seed(tm_scan_t const *self, uint8_t const *ref, size_t rlen, 
 }
 
 static _force_inline
-size_t tm_extend(tm_scan_t *self, tm_idx_sketch_t const **sk, uint8_t const *query, size_t qlen, tm_chain_t const *chain, size_t ccnt)
+size_t tm_extend_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *query, size_t qlen, tm_chain_t const *chain, size_t ccnt)
 {
+	tm_idx_sketch_t const **sk = (tm_idx_sketch_t const **)idx->sketch.arr;
+	tm_idx_profile_t const **pf = (tm_idx_profile_t const **)idx->profile.arr;
+
 	/* clear bin */
 	tm_extend_clear(self);
-	dz_flush(self->extend.dz);
-
-	/* build reference-side profile */
-	dz_query_t *q[2] = {
-		dz_pack_query_forward(self->extend.dz, (char const *)query, qlen),
-		dz_pack_query_reverse(self->extend.dz, (char const *)query, qlen)
-	};
 
 	/* for each chain try extension */
 	for(size_t i = 0; i < ccnt; i++) {
-		tm_chain_t const *p = &chain[i];
-		if(p->attr.stat.weight < self->extend.min_weight) { break; }
+		tm_chain_t const *q = &chain[i];
+		if(q->attr.stat.weight < self->extend.min_weight) { break; }
 
 		/* skip if already covered (and there is no possibility that this chain surpasses the previous ones) */
-		tm_aln_t caln = tm_chain_as_aln(self, p);
-		if(tm_extend_is_covered(self, &caln, p->attr.stat.weight)) { continue; }
+		if(tm_extend_is_covered(self, q)) { continue; }
 
-		/* get reference sequence */
-		tm_idx_sketch_t const *r = sk[p->attr.stat.rid];
-		uint8_t const *ref = tm_idx_ref_seq_ptr(r);
-		size_t const rlen = tm_idx_ref_seq_len(r);
+		tm_aln_t const caln = tm_chain_as_aln(self, q);
+		tm_idx_sketch_t const *s = sk[q->attr.stat.rid];
+		tm_idx_profile_t const *p = pf[s->h.pid];
 
-		tm_aln_t aln = tm_extend_seed(self, ref, rlen, &q[0], &caln);
-		if(aln.score <= 0) { continue; }
+		/* extend */
+		tm_aln_t aln = tm_extend_seed(self,
+			p, s, caln.pos.r,			/* reference */
+			query, qlen, caln.pos.q		/* query */
+		);
+		if(aln.score <= p->extend.min_score) { continue; }
 
-		tm_extend_record(self, p, aln);
+		tm_extend_record(self, q, aln);
 		if(tm_extend_is_complete(self)) { break; }
 	}
 
@@ -2313,32 +2467,22 @@ size_t tm_extend(tm_scan_t *self, tm_idx_sketch_t const **sk, uint8_t const *que
 
 /* evaluate all; query sequence be shorter than 2Gbp */
 static _force_inline
-size_t tm_scan_mask(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *seq, size_t slen)
+size_t tm_scan_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *seq, size_t slen)
 {
 	tm_scan_clear(self);
 
-	/* collect chain for each reference sequence */
-	tm_idx_sketch_t const **si = (tm_idx_sketch_t const **)idx->sketch.arr;
-	for(size_t i = 0; i < idx->sketch.cnt; i++) {
-		/* collect seeds */
-		if(tm_seed_and_sort(&si[i]->ref, seq, slen, &self->seed.arr, &self->seed.sqiv) == 0) { continue; }
-
-		/* chain and filter */
-		tm_idx_profile_t const *profile = idx->profile.arr[si[i]->h.pid];
-		tm_seed_t const *seed = kv_ptr(self->seed.arr);
-		size_t scnt = kv_cnt(self->seed.arr);
-		tm_chain_and_filter(si[i], profile, seq, seed, scnt, &self->chain.arr);
+	/* seed and chain */
+	if(tm_collect_all(self, idx, seq, slen) == 0) {
+		return(0);
 	}
 
+	/* sort by estimated identity */
 	tm_chain_t *cptr = kv_ptr(self->chain.arr);
 	size_t const ccnt = kv_cnt(self->chain.arr);
-	if(ccnt == 0) { return(0); }
-
-	/* sort by estimated identity */
 	radix_sort_chain(cptr, ccnt);
 
 	/* convert chain to alignment */
-	size_t acnt = tm_extend(self, si, seq, slen, cptr, ccnt);
+	size_t acnt = tm_extend_all(self, idx, seq, slen, cptr, ccnt);
 	return(acnt);
 }
 
@@ -2385,7 +2529,6 @@ typedef struct {
 static _force_inline
 tm_mtscan_t *tm_mtscan_init(tm_idx_t const *mi, tm_print_t *printer, pt_t *pt)
 {
-	_unused(conf);
 	_unused(mi);
 	_unused(printer);
 	_unused(pt);
@@ -2432,8 +2575,8 @@ typedef struct {
 	size_t nth;
 
 	/* scan-and-mask params */
-	tm_idx_conf_t index;
-	tm_scan_conf_t scan;
+	char const *profile;
+	tm_idx_conf_t fallback;
 	tm_print_conf_t print;
 
 	/* option parser */
@@ -2453,25 +2596,23 @@ typedef struct {
 }
 
 
-static void mm_conf_preset(opt_t *opt, mm_conf_t *conf, char const *arg)
+static void tm_conf_preset(opt_t *opt, tm_conf_t *conf, char const *arg)
 {
-	struct mm_conf_preset_s {
+	struct tm_conf_preset_s {
 		/* key-value pair */
 		char const *key;
 		char const *val;
 
 		/* child */
-		struct mm_conf_preset_s const *children[6];
+		struct tm_conf_preset_s const *children[6];
 	};
 
 	/* preset is defined recursively */
-	#define _n(_k, ...)		&((struct mm_conf_preset_s const){ (_k), __VA_ARGS__ })
-	struct mm_conf_preset_s const *presets[] = {
-		{ 0 }
-	};
+	#define _n(_k, ...)		&((struct tm_conf_preset_s const){ (_k), __VA_ARGS__ })
+	struct tm_conf_preset_s const *presets[] = { 0 };		/* FIXME */
 	#undef _n
 
-	struct mm_conf_preset_s const *const *q = presets;
+	struct tm_conf_preset_s const *const *q = presets;
 	split_foreach(arg, 0, ".:", {		/* traverse preset param tree along with parsing */
 		while(*q != NULL && strncmp(p, (*q)->key, l) != 0) { q++; }
 		if(*q == NULL) {				/* terminate if not matched, not loaded from file */
@@ -2485,68 +2626,90 @@ static void mm_conf_preset(opt_t *opt, mm_conf_t *conf, char const *arg)
 	return;
 }
 
+static void tm_conf_verbose(opt_t *opt, tm_conf_t *conf, char const *arg) {
+	if(arg == NULL || *arg == '\0') { conf->verbose = 1; return; }
+	if(isdigit(*arg)) { conf->verbose = (size_t)mm_atoi(arg, 0); return; }
+	if(*arg != 'v') { return; }
+	tm_conf_verbose(opt, conf, arg + 1);
+	conf->verbose++;
+}
+static void tm_conf_threads(opt_t *opt, tm_conf_t *conf, char const *arg) {
+	conf->nth = mm_atoi(arg, 0);
+	oassert(opt, conf->nth < MAX_THREADS, "#threads must be less than %d.", MAX_THREADS);
+}
+static void tm_conf_help(opt_t *opt, tm_conf_t *conf, char const *arg) {
+	_unused(opt);
+	_unused(arg);
+	conf->verbose++;
+	conf->help++;
+}
+
 /* index filename */
-static void mm_conf_idxdump(opt_t *opt, mm_conf_t *conf, char const *arg) {
+static void tm_conf_idxdump(opt_t *opt, tm_conf_t *conf, char const *arg) {
 	_unused(opt);
 	conf->idxdump = opt_strdup(opt, arg, strlen(arg));
 }
-static void mm_conf_profile(opt_t *opt, mm_conf_t *conf, char const *arg) {
+static void tm_conf_profile(opt_t *opt, tm_conf_t *conf, char const *arg) {
 	_unused(opt);
 	conf->profile = opt_strdup(opt, arg, strlen(arg));
 }
 
 /* indexing */
-static void mm_conf_kmer(opt_t *opt, mm_conf_t *conf, char const *arg) {
+static void tm_conf_kmer(opt_t *opt, tm_conf_t *conf, char const *arg) {
 	size_t k = mm_atoi(arg, 0);
 	oassert(opt, k >= 3 && k <= 10, "k must be inside [3,10].");
 
-	conf->fallback.k = k;
+	conf->fallback.kmer = k;
 }
-static void mm_conf_window(opt_t *opt, mm_conf_t *conf, char const *arg) {
+static void tm_conf_chain(opt_t *opt, tm_conf_t *conf, char const *arg) {
 	size_t w = mm_atoi(arg, 0);
 	oassert(opt, w >= 1 && w <= 64, "w must be inside [2,64].");
 
-	conf->fallback.w = w;
+	conf->fallback.window = w;
 }
-static void mm_conf_match(opt_t *opt, mm_conf_t *conf, char const *arg) {
+static void tm_conf_match(opt_t *opt, tm_conf_t *conf, char const *arg) {
 	int64_t m = mm_atoi(arg, 0);
 	oassert(opt, m >= 1 && m <= 7, "match award (-a) must be inside [1,7] (%s).", arg);
+
 	conf->fallback.match = m;
 }
-static void mm_conf_mismatch(opt_t *opt, mm_conf_t *conf, char const *arg) {
+static void tm_conf_mismatch(opt_t *opt, tm_conf_t *conf, char const *arg) {
 	int64_t x = mm_atoi(arg, 0);
 	oassert(opt, x >= 1 && x <= 7, "mismatch penalty (-b) must be inside [1,7] (%s).", arg);
 
-	mm_conf_set_score(opt, conf, -x, 0);
 	conf->fallback.mismatch = x;
 }
-static void mm_conf_gi(opt_t *opt, mm_conf_t *conf, char const *arg) {
+static void tm_conf_gap_open(opt_t *opt, tm_conf_t *conf, char const *arg) {
 	int64_t gi = mm_atoi(arg, 0);
 	oassert(opt, gi >= 1 && gi <= 7, "gap open penalty (-p) must be inside [1,7] (%s).", arg);
 
 	conf->fallback.gap_open = gi;
 }
-static void mm_conf_ge(opt_t *opt, mm_conf_t *conf, char const *arg) {
+static void tm_conf_gap_extend(opt_t *opt, tm_conf_t *conf, char const *arg) {
 	int64_t ge = mm_atoi(arg, 0);
 	oassert(opt, ge >= 1 && ge <= 7, "gap extension penalty (-q) must be inside [1,7] (%s).", arg);
 
 	conf->fallback.gap_extend = ge;
 }
+static void tm_conf_min_score(opt_t *opt, tm_conf_t *conf, char const *arg) {
+	_unused(opt);
 
+	conf->fallback.min_score = mm_atoi(arg, 0);
+}
 
 
 
 static _force_inline
-uint64_t mm_conf_check_sanity(mm_conf_t *conf)
+uint64_t tm_conf_check_sanity(tm_conf_t *conf)
 {
 	return(opt_ecnt(&conf->opt));
 }
 
 static _force_inline
-uint64_t mm_conf_restore_default(mm_conf_t *conf)
+uint64_t tm_conf_restore_default(tm_conf_t *conf)
 {
 	tm_conf_t defaults = {
-		.index = {
+		.fallback = {
 			.kmer = 5,
 			.window = 32,
 			.match = 2,
@@ -2555,18 +2718,28 @@ uint64_t mm_conf_restore_default(mm_conf_t *conf)
 			.gap_extend = -1,
 			.min_score = 0
 		},
-		.
+		.print = {
+			0
+		}
 	};
 
 	/* we assume all element is sized 64bit */
 	uint64_t *q = (uint64_t *)conf;
 	uint64_t const *p = (uint64_t const *)&defaults;
-	for(size_t i = 0; i < offsetof(mm_conf_t, opt) / sizeof(uint64_t); i++) {
+	for(size_t i = 0; i < offsetof(tm_conf_t, opt) / sizeof(uint64_t); i++) {
 		if(q[i] != 0) { continue; }		/* parameter set */
 		if(p[i] == 0) { continue; }		/* default value not found */
 		q[i] = p[i];					/* load default */
 	}
 	return(0);
+}
+
+static _force_inline
+void tm_conf_destroy_static(tm_conf_t *conf)
+{
+	if(conf == NULL) { return; }
+	opt_destroy_static(&conf->opt);
+	return;
 }
 
 static _force_inline
@@ -2581,23 +2754,24 @@ uint64_t tm_conf_init_static(tm_conf_t *conf, char const *const *argv, FILE *fp)
 			['\0'] = { 0, NULL },
 			['d'] = { OPT_REQ,  _c(tm_conf_idxdump) },
 
-			['v'] = { OPT_OPT,  _c(mm_conf_verbose) },
-			['h'] = { OPT_BOOL, _c(mm_conf_help) },
-			['t'] = { OPT_REQ,  _c(mm_conf_threads) },
+			['v'] = { OPT_OPT,  _c(tm_conf_verbose) },
+			['h'] = { OPT_BOOL, _c(tm_conf_help) },
+			['t'] = { OPT_REQ,  _c(tm_conf_threads) },
 
 			/* preset and configuration file */
 			['x'] = { OPT_REQ,  _c(tm_conf_preset) },
 
 			/* fallback parameters */
-			['k'] = { OPT_REQ,  _c(mm_conf_kmer) },
-			['w'] = { OPT_REQ,  _c(mm_conf_chain) },
-			['a'] = { OPT_REQ,  _c(mm_conf_match) },
-			['b'] = { OPT_REQ,  _c(mm_conf_mismatch) },
-			['p'] = { OPT_REQ,  _c(mm_conf_gap) },
-			['s'] = { OPT_REQ,  _c(mm_conf_min_score) }
+			['k'] = { OPT_REQ,  _c(tm_conf_kmer) },
+			['w'] = { OPT_REQ,  _c(tm_conf_chain) },
+			['a'] = { OPT_REQ,  _c(tm_conf_match) },
+			['b'] = { OPT_REQ,  _c(tm_conf_mismatch) },
+			['p'] = { OPT_REQ,  _c(tm_conf_gap_open) },
+			['q'] = { OPT_REQ,  _c(tm_conf_gap_extend) },
+			['m'] = { OPT_REQ,  _c(tm_conf_min_score) }
 		}
 		#undef _c
-	}
+	};
 
 	opt_init_static(&conf->opt, fp);
 	if(opt_parse_argv(&conf->opt, conf, argv + 1)) { goto _tm_conf_init_fail; }
@@ -2664,11 +2838,23 @@ void tm_conf_print_help(tm_conf_t const *conf, FILE *log)
 			"    $ tinymasker -t4 index.tmi contigs.fa\n"
 			"")
 	_msg(2, "General options:");
+	_msg(2, "  -x STR/FILE  load preset params or load config file []");
+	_msg(2, "  -t INT       number of threads [%zu]", conf->nth);
+	_msg(2, "  -d FILE      dump index to FILE (index construction mode)");
+	_msg(2, "  -v [INT]     show version number or set verbose level (when number passed)");
 	_msg(2, "");
-	if(conf->verbose < 2) {
-		_msg(2, "  Pass -hh to show all the options.");
-		_msg(2, "");
-	}
+	_msg(2, "Indexing options:");
+	_msg(2, "  -c FILE      load profile configurations []");
+	_msg(2, "");
+	_msg(2, "Indexing and mapping fallbacks (default params):");
+	_msg(2, "  -k INT       k-mer length [%zu]", conf->fallback.kmer);
+	_msg(2, "  -w INT       chaining window size [%zu]", conf->fallback.window);
+	_msg(2, "  -a INT       match award []");
+	_msg(2, "  -b INT       mismatch penalty []");
+	_msg(2, "  -p INT       gap-open penalty []");
+	_msg(2, "  -q INT       gap-extension penalty []");
+	_msg(2, "  -m INT       minimum score threshold []");
+	_msg(2, "");
 
 	#undef _msg_impl
 	#undef _msg
@@ -2705,7 +2891,7 @@ int main_index_intl(tm_conf_t *conf, pg_t *pg, pt_t *pt)
 	kv_foreach(void *, opt_pargv(&conf->opt), ({
 
 		/* generate index */
-		tm_idx_t *mi = tm_idx_gen(&conf->index, pt, *p, NULL, stderr);
+		tm_idx_t *mi = tm_idx_gen(&conf->fallback, pt, *p, conf->profile, stderr);
 		if(mi == NULL) {
 			/* failed to open file */
 			return(main_index_error(conf, ERROR_OPEN_RSEQ, conf->idxdump));
@@ -2847,7 +3033,7 @@ int main_scan_idx_gen(main_scan_tbuf_t *w, tm_idx_t **pmi)
 	if(++w->fcnt > 1) { return(0); }
 
 	/* first call */
-	tm_idx_t *mi = tm_idx_gen(&w->conf->index, w->pt, w->ref, NULL, stderr);
+	tm_idx_t *mi = tm_idx_gen(&w->conf->fallback, w->pt, w->ref, w->conf->profile, stderr);
 	if(mi == NULL) {
 		/* failed to open file */
 		return(main_scan_error(w->conf, ERROR_OPEN_RSEQ, w->ref));
@@ -2903,7 +3089,7 @@ int main_scan_foreach_idx(main_scan_tbuf_t *w)
 		}
 
 		/* instanciate multithreading context for this index chunk */
-		tm_mtscan_t *mt = tm_mtscan_init(&w->conf->scan, mi, w->printer, w->pt);
+		tm_mtscan_t *mt = tm_mtscan_init(mi, w->printer, w->pt);
 		if(mt == NULL) {
 			return(main_scan_error(w->conf, ERROR_INTERNAL, NULL));
 		}

@@ -6,7 +6,8 @@ SRC = src
 
 OFLAGS = -O3 -march=native
 WFLAGS = -Wall -Wextra -Wno-unused-variable -Wno-unused-function -Wno-constant-conversion
-CFLAGS = -std=c99 $(OFLAGS) $(WFLAGS)
+LDFLAGS = -lz -lbz2 -llzma
+CFLAGS = -std=c99 $(OFLAGS) $(WFLAGS) $(LDFLAGS)
 
 
 all: tinymasker
