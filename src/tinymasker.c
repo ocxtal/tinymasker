@@ -465,7 +465,8 @@ tm_ref_sketch_t *tm_ref_build_index(tm_ref_conf_t const *conf, uint8_t const *se
 	if(size > UINT32_MAX) { trap(); }
 
 	/* malloc; use entire page */
-	void *base = malloc(_roundup(size + conf->margin.head + conf->margin.tail, 4096));
+	size_t const rounded_size = _roundup(size + conf->margin.head + conf->margin.tail, 4096);
+	void *base = malloc(size);
 	if(base == NULL) { return(NULL); }
 
 	/* save metadata */
@@ -761,7 +762,7 @@ size_t tm_idx_find_profile(tm_idx_gen_t const *mii, char const *name, size_t nle
 	}
 
 	/* not found; return the last one */
-	return(mii->mi.profile.cnt - 1);
+	return(kv_cnt(mii->score.profile) - 1);
 }
 
 static _force_inline
@@ -1157,7 +1158,7 @@ tm_ref_sketch_t *tm_idx_build_sketch(tm_idx_gen_t *self, tm_ref_tbuf_t *ref, siz
 	size_t const margin = tm_idx_roundup(nlen) + tm_idx_roundup(slen);
 
 	/* retrieve profile */
-	tm_idx_profile_t const *profile = self->mi.profile.arr[pid];
+	tm_idx_profile_t const *profile = kv_ptr(self->score.profile)[pid];
 
 	/* pack args */
 	tm_ref_conf_t conf = {
@@ -2913,9 +2914,9 @@ static _force_inline
 int main_index(tm_conf_t *conf, pt_t *pt)
 {
 	/* add suffix if missing and if /dev/xxx */
-	if(!mm_startswith(conf->idxdump, "/dev") && !mm_endswith(conf->idxdump, ".mai")) {
-		message(conf->log, "index filename does not end with `.mai' (added).");
-		conf->idxdump = opt_append(&conf->opt, conf->idxdump, ".mai");
+	if(!mm_startswith(conf->idxdump, "/dev") && !mm_endswith(conf->idxdump, ".tmi")) {
+		message(conf->log, "index filename does not end with `.tmi' (added).");
+		conf->idxdump = opt_append(&conf->opt, conf->idxdump, ".tmi");
 	}
 
 	/* open file in write mode */
@@ -3014,7 +3015,7 @@ int main_scan_tbuf_init_static(main_scan_tbuf_t *w, tm_conf_t *conf, char const 
 	};
 
 	/* check suffix to determine if the file is prebuilt index */
-	if(!mm_endswith(parg[0], ".mai")) {
+	if(!mm_endswith(parg[0], ".tmi")) {
 		return(0);			/* not a prebuilt index */
 	}
 
