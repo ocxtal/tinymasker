@@ -47,6 +47,13 @@ char *mm_join(char const *const *p, char c)
 }
 
 static _force_inline
+size_t mm_strlen(char const *p)
+{
+	if(p == NULL) { return(0); }
+	return(strlen(p));
+}
+
+static _force_inline
 int mm_startswith(char const *p, char const *prf)
 {
 	size_t l = strlen(p), r = strlen(prf);
