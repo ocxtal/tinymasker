@@ -166,6 +166,10 @@ void bseq_init_work(bseq_work_t *w, bseq_file_t *fp, bseq_metam_v const *seq, ui
 {
 	w->cvl = _from_v16i8_v32i8(_loadu_v16i8(&fp->conv[0]));
 	w->cvh = _from_v16i8_v32i8(_loadu_v16i8(&fp->conv[16]));
+
+	_print_v32i8(w->cvl);
+	_print_v32i8(w->cvh);
+
 	w->dv = _set_v32i8(fp->delim[1]);
 	w->sv = _set_v32i8(' ');
 	w->tv = _set_v32i8('\t');
@@ -201,7 +205,7 @@ size_t bseq_seq_transvp(bseq_work_t *w, v32i8_t v, size_t l) {
 
 	/* merge two */
 	v32i8_t const selv = _xor_v32i8(_add_v32i8(v, v), _shl_v32i8(v, 3));
-	v32i8_t const nucl = _sel_v32i8(nl, nh, selv);
+	v32i8_t const nucl = _sel_v32i8(selv, nh, nl);
 
 	_storeu_v32i8(&w->q[w->n], nucl);
 	return(l);
@@ -293,13 +297,13 @@ void bseq_fixup_name(bseq_work_t *w, bseq_file_t *fp)
 	/* fill terminators */
 	w->s->nlen = q - p;
 	w->s->hlen = (t + 1) - p;				/* might have further spaces at the head of comment */
-	// debug("nlen(%u), hlen(%u)", w->s->nlen, w->s->hlen);
+	debug("nlen(%u), hlen(%u)", w->s->nlen, w->s->hlen);
 
 	w->q[q] = '\0';
 	w->q[t] = '\0';							/* string terminator; keep q[n] initialized (invariant condition) */
 	w->n = t;
 
-	// debug("name(%lu, %s), comment(%lu, %s), n(%lu)", bseq_name_len(w->s), &w->q[p], bseq_comment_len(w->s), &w->q[q + 1], w->n);
+	debug("name(%lu, %s), comment(%lu, %s), n(%lu)", bseq_name_len(w->s), &w->q[p], bseq_comment_len(w->s), &w->q[q + 1], w->n);
 	return;
 }
 
@@ -307,8 +311,8 @@ static _force_inline
 void bseq_fixup_seq(bseq_work_t *w, bseq_file_t *fp)
 {
 	w->s->slen = fp->acc;
-	w->s->seq = (uint8_t *)w->n - fp->acc / 2;
-	// debug("seq(%p), slen(%lu)", w->s->seq, w->s->slen);
+	w->s->seq = (uint8_t *)w->n - fp->acc;
+	debug("seq(%p), slen(%lu)", w->s->seq, w->s->slen);
 	return;
 }
 
@@ -585,7 +589,7 @@ void bseq_load_conv(uint8_t *q, uint8_t const *p)
 
 	/* use default table if provided table is all zero */
 	v16i8_t const cv = _loadu_v16i8(p), eqv = _eq_v16i8(cv, _zero_v16i8());
-	if(((v16_masku_t){ .mask = _mask_v16i8(eqv) }).all != 0) {
+	if(((v16_masku_t){ .mask = _mask_v16i8(eqv) }).all != 0xffff) {
 
 		/* 0x00 and 0x0f are excluded */
 		for(size_t i = 0x01; i < 0x0f; i++) {
