@@ -37,10 +37,10 @@
 
 
 /* misc */
-#ifndef MK_VERSION
-#  define MK_VERSION			"tinymasker-0.0.1"
+#ifndef TM_VERSION
+#  define TM_VERSION			"tinymasker-0.0.1"
 #endif
-#define MK_ARCH_NAME			ARCH_NAME			/* SSE4.1 or AVX2 */
+#define TM_ARCH_NAME			ARCH_NAME			/* SSE4.1 or AVX2 */
 
 /* version string */
 static _force_inline
@@ -49,8 +49,8 @@ char const *tm_version(void)
 	char const *prefix = "tinymasker-";
 
 	/* remove prefix */
-	uint64_t spos = mm_startswith(MK_VERSION, prefix) ? strlen(prefix) : 0;
-	return(&MK_VERSION[spos]);
+	uint64_t spos = mm_startswith(TM_VERSION, prefix) ? mm_strlen(prefix) : 0;
+	return(&TM_VERSION[spos]);
 }
 
 unittest_config( .name = "tinymasker" );
@@ -203,6 +203,7 @@ void tm_ref_push_pos(tm_ref_work_t *w, uint32_t pos)
 			.kmer = w->kmer[i].r,
 			.pos = pos			/* FIXME: direction flag needed? */
 		};
+		// debug("pos(%u), kmer(%x, %x)", pos, w->kmer[i].f, w->kmer[i].r);
 	}
 	return;
 }
@@ -219,7 +220,7 @@ void tm_ref_push_base(tm_ref_work_t *w, uint8_t base)
 	}
 
 	/* push base */
-	tm_ref_update_kmer(&w->kmer[size], size, w->amask, w->shift, b2 & 0x03);
+	tm_ref_update_kmer(&w->kmer[0], size, w->amask, w->shift, b2 & 0x03);
 	return;
 }
 
@@ -228,9 +229,11 @@ tm_ref_kpos_t *tm_ref_reserve(tm_ref_kpos_v *buf, tm_ref_kpos_t *q)
 {
 	/* update count */
 	kv_cnt(*buf) = q - kv_ptr(*buf);
+	// debug("cnt(%zu)", kv_cnt(*buf));
 
-	tm_ref_kpos_t *p = kv_reserve(tm_ref_kpos_t, *buf, 1024);
-	return(&p[kv_cnt(*buf)]);
+	size_t const kcnt = kv_cnt(*buf);
+	tm_ref_kpos_t *p = kv_reserve(tm_ref_kpos_t, *buf, kcnt + 1024);
+	return(&p[kcnt]);
 }
 
 static _force_inline
@@ -248,6 +251,7 @@ size_t tm_ref_enumerate_kmer(size_t kbits, uint8_t const *seq, size_t slen, tm_r
 		.branches = 0,
 		.kmer = { { 0 } }
 	};
+	// debug("kbits(%zu), seq(%p), slen(%zu)", kbits, seq, slen);
 
 	/* push bases at the head */
 	size_t const k = kbits>>1;
@@ -279,6 +283,7 @@ size_t tm_ref_enumerate_kmer(size_t kbits, uint8_t const *seq, size_t slen, tm_r
 
 
 /* rotate */
+#if 0
 static _force_inline
 size_t tm_ref_rotate_kmer(size_t kbits, tm_ref_kpos_t *kpos, size_t kcnt)
 {
@@ -291,6 +296,7 @@ size_t tm_ref_rotate_kmer(size_t kbits, tm_ref_kpos_t *kpos, size_t kcnt)
 	}
 	return(kcnt);
 }
+#endif
 
 static _force_inline
 size_t tm_ref_collect_kmer(tm_ref_conf_t const *conf, uint8_t const *seq, size_t slen, tm_ref_kpos_v *buf)
@@ -301,7 +307,7 @@ size_t tm_ref_collect_kmer(tm_ref_conf_t const *conf, uint8_t const *seq, size_t
 	}
 
 	/* rotate by a base before sort */
-	tm_ref_rotate_kmer(conf->kbits, kv_ptr(*buf), kv_cnt(*buf));
+	// tm_ref_rotate_kmer(conf->kbits, kv_ptr(*buf), kv_cnt(*buf));
 
 	/* sort kmers by position */
 	radix_sort_kmer(kv_ptr(*buf), kv_cnt(*buf));
@@ -322,8 +328,8 @@ typedef struct {
 } tm_ref_bin_t;
 _static_assert(sizeof(tm_ref_bin_t) == 16);		/* smallest bin size == 16 */
 
-#define MK_REF_ALIGN_SIZE		( sizeof(uint64_t) )
-#define MK_REF_BASE_OFS			( sizeof(tm_ref_sketch_t) )
+#define TM_REF_ALIGN_SIZE		( sizeof(uint64_t) )
+#define TM_REF_BASE_OFS			( sizeof(tm_ref_sketch_t) )
 
 
 typedef struct {
@@ -336,6 +342,7 @@ size_t tm_ref_count_kmer(tm_ref_cnt_t *p, size_t ksize, tm_ref_kpos_t const *kpo
 {
 	_unused(ksize);
 
+	// debug("ksize(%zx), kcnt(%zu)", ksize, kcnt);
 	for(tm_ref_kpos_t const *k = kpos, *t = &kpos[kcnt]; k < t; k++) {
 		p[k->kmer>>2].cnt++;
 	}
@@ -350,7 +357,8 @@ size_t tm_ref_calc_size(tm_ref_cnt_t const *p, size_t ksize)
 	size_t acc = 0;
 	for(size_t i = 0; i < ksize; i++) {
 		if(p[i].cnt == 0) { continue; }
-		acc += _roundup(hdr + sizeof(uint16_t) * p[i].cnt, MK_REF_ALIGN_SIZE);
+		acc += _roundup(hdr + sizeof(uint16_t) * p[i].cnt, TM_REF_ALIGN_SIZE);
+		// debug("i(%zx), cnt(%zu), acc(%zu)", i, p[i].cnt, acc);
 	}
 	return(acc);
 }
@@ -362,7 +370,7 @@ size_t tm_ref_pack_kpos(tm_ref_cnt_t *p, size_t ksize, tm_ref_kpos_t const *kpos
 
 	/* first bin */
 	size_t const hdr = sizeof(tm_ref_bin_t);
-	size_t ofs = MK_REF_BASE_OFS;
+	size_t ofs = TM_REF_BASE_OFS;
 
 	tm_ref_kpos_t const *k = kpos, *t = &kpos[kcnt];
 	while(k < t) {
@@ -378,17 +386,21 @@ size_t tm_ref_pack_kpos(tm_ref_cnt_t *p, size_t ksize, tm_ref_kpos_t const *kpos
 		size_t i = 0, j = 0;
 		do {
 			uint32_t const kall = k->kmer;
-			do {
+			while(k < t && k->kmer == kall) {
 				bin->pos[i++] = k++->pos;
-			} while(k < t && k->kmer == kall);
+			}
 
 			do {
 				bin->link[j++].tail = i;
-			} while(j < (kall & 0x03));
+			} while(j <= (kall & 0x03));
 		} while(k < t && (k->kmer>>2) == kbase);
 
+		/* fill missing tail */
+		while(j < 4) { bin->link[j++].tail = i; }
+		// debug("kbase(%u), ofs(%zu), cnt(%u, %zu, %zu)", kbase, ofs, p[kbase].cnt, i, j);
+
 		/* update offset */
-		ofs += _roundup(hdr + sizeof(uint16_t) * p[kbase].cnt, MK_REF_ALIGN_SIZE);
+		ofs += _roundup(hdr + sizeof(uint16_t) * p[kbase].cnt, TM_REF_ALIGN_SIZE);
 	}
 	return(ofs);
 }
@@ -422,7 +434,7 @@ tm_ref_prefix_t tm_ref_find_link(tm_ref_cnt_t const *p, uint32_t kmer, size_t ma
 	/* never reach here?? */
 	return((tm_ref_prefix_t){
 		.len = max_depth,
-		.ofs = MK_REF_BASE_OFS
+		.ofs = TM_REF_BASE_OFS
 	});
 }
 
@@ -456,6 +468,7 @@ tm_ref_sketch_t *tm_ref_build_index(tm_ref_conf_t const *conf, uint8_t const *se
 	/* reserve profile buffer */
 	size_t const ksize = 0x01ULL<<conf->kbits;
 	tm_ref_cnt_t *p = kv_reserve(tm_ref_cnt_t, *buf, ksize);
+	memset(p, 0, ksize * sizeof(tm_ref_cnt_t));
 
 	/* count kmers */
 	tm_ref_count_kmer(p, ksize, kpos, kcnt);
@@ -466,7 +479,7 @@ tm_ref_sketch_t *tm_ref_build_index(tm_ref_conf_t const *conf, uint8_t const *se
 
 	/* malloc; use entire page */
 	size_t const rounded_size = _roundup(size + conf->margin.head + conf->margin.tail, 4096);
-	void *base = malloc(size);
+	void *base = malloc(rounded_size);
 	if(base == NULL) { return(NULL); }
 
 	/* save metadata */
@@ -535,14 +548,14 @@ tm_ref_state_t tm_ref_match_init(tm_ref_sketch_t const *ref)
 	return((tm_ref_state_t){
 		.prefix     = ref->kbits>>1,
 		.unmatching = 1,
-		.bin        = _add_offset(ref, MK_REF_BASE_OFS)	/* bin for AAA... */
+		.bin        = _add_offset(ref, TM_REF_BASE_OFS)	/* bin for AAA... */
 	});
 }
 
 static _force_inline
 tm_ref_next_t tm_ref_match_next(tm_ref_state_t s, uint8_t next)
 {
-	int64_t const pitch = MK_REF_ALIGN_SIZE;
+	int64_t const pitch = TM_REF_ALIGN_SIZE;
 
 	/* get link to the next bin */
 	tm_ref_link_t const link = s.bin->link[next];
@@ -1018,7 +1031,7 @@ tm_idx_profile_t *tm_idx_default_profile(tm_idx_conf_t const *conf)
 {
 	/* name */
 	char const *pname = "default";
-	size_t const plen = strlen(pname);
+	size_t const plen = mm_strlen(pname);
 
 	/* allocate profile object */
 	size_t const size = tm_idx_profile_size(plen);
@@ -1045,7 +1058,7 @@ tm_idx_profile_t *tm_idx_default_profile(tm_idx_conf_t const *conf)
 static _force_inline
 tm_idx_profile_t *tm_idx_parse_profile(tm_idx_profile_t const *template, char const *pname, toml_table_t const *table)
 {
-	size_t const plen = strlen(pname);	
+	size_t const plen = mm_strlen(pname);	
 
 	/* FIXME: save profile name */
 	_unused(template);
@@ -1220,11 +1233,20 @@ tm_idx_batch_t *tm_idx_collect(uint32_t tid, tm_idx_gen_t *self, tm_idx_batch_t 
 	for(size_t i = 0; i < bseq_meta_cnt(&batch->bin); i++) {
 		bseq_meta_t *p = &meta[i];
 
+		/*
+		debug("name(%s)", bseq_name(p));
+		for(size_t j = 0; j < bseq_seq_len(p); j++) {
+			fprintf(stderr, "%c", "NACMGRSVTWYHKDBN"[bseq_seq(p)[j]]);
+		}
+		fprintf(stderr, "\n");
+		*/
+
 		/* get score matrix for this sequence from its name with regex matching */
 		size_t pid = tm_idx_find_profile(self,
 			bseq_name(p),    bseq_name_len(p),
 			bseq_comment(p), bseq_comment_len(p)
 		);
+		// debug("pid(%zu)", pid);
 
 		/* build hash table */
 		tm_ref_sketch_t *sr = tm_idx_build_sketch(self,
@@ -1299,8 +1321,8 @@ uint64_t tm_idx_gen_core(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, char cons
 	}
 
 	/* sanity check */
-	size_t read = mii->mi.sketch.cnt;
-	return(read == 0 || read != c.cnt || read != kv_cnt(mii->col.bin));
+	// debug("read(%zu, %zu)", c.cnt, kv_cnt(mii->col.bin));
+	return(c.cnt != kv_cnt(mii->col.bin));
 }
 
 static _force_inline
@@ -1400,6 +1422,12 @@ size_t tm_idx_padding_size(size_t ofs)
 	return((64ULL - ofs) & (64ULL - 1));
 }
 
+static _force_inline
+size_t tm_idx_string_size(char const *s)
+{
+	return(mm_strlen(s) + 1);
+}
+
 /* dump block and return offset from dumped object as void * */
 static _force_inline
 void *tm_idx_dump_block(tm_idx_dump_t *w, void const *p, size_t size)
@@ -1416,6 +1444,15 @@ void *tm_idx_dump_pad(tm_idx_dump_t *w)
 
 	static uint8_t const pad[64] = { 0 };
 	return(tm_idx_dump_block(w, pad, size));
+}
+
+static _force_inline
+void *tm_idx_dump_string(tm_idx_dump_t *w, char const *s)
+{
+	char c = '\0';
+	char const *p = s == 0 ? &c : s;
+	size_t const l = tm_idx_string_size(s);
+	return(tm_idx_dump_block(w, p, l));
 }
 
 
@@ -1515,8 +1552,8 @@ size_t tm_idx_calc_size(tm_idx_t const *mi)
 	size_t size = 0;
 
 	size += sizeof(tm_idx_t);
-	size += strlen(mi->filename.ref) + 1;
-	size += strlen(mi->filename.profile) + 1;
+	size += tm_idx_string_size(mi->filename.ref);
+	size += tm_idx_string_size(mi->filename.profile);
 	size += tm_idx_padding_size(size);		/* make aligned */
 
 	size += tm_idx_scan_profile(mi);
@@ -1548,8 +1585,8 @@ size_t tm_idx_dump(tm_idx_t const *mi, void *fp, write_t wfp)
 	cmi.sketch.arr = tm_idx_dump_sketch(&w, &cmi);
 
 	/* input seqence names */
-	cmi.filename.ref     = tm_idx_dump_block(&w, cmi.filename.ref, strlen(cmi.filename.ref) + 1);
-	cmi.filename.profile = tm_idx_dump_block(&w, cmi.filename.profile, strlen(cmi.filename.profile) + 1);
+	cmi.filename.ref     = tm_idx_dump_string(&w, cmi.filename.ref);
+	cmi.filename.profile = tm_idx_dump_string(&w, cmi.filename.profile);
 
 	/* done */
 	tm_idx_dump_pad(&w);
@@ -1759,24 +1796,24 @@ typedef struct {
 
 
 static _force_inline
-void tm_scan_init_static(tm_scan_t *self, size_t cnt)
+void tm_scan_init_static(tm_scan_t *self)
 {
-	memset(self, 0, sizeof(tm_scan_t) * cnt);
+	memset(self, 0, sizeof(tm_scan_t));
 
 	size_t const size = DZ_MEM_INIT_SIZE - _roundup(sizeof(dz_arena_t), DZ_MEM_ALIGN_SIZE);
-	for(size_t i = 0; i < cnt; i++) {
-		self->extend.fill = dz_arena_init(size);
-		self->extend.trace = NULL;
-	}
+	self->extend.fill = dz_arena_init(size);
+	self->extend.trace = NULL;
 	return;
 }
 
 static _force_inline
-void tm_scan_destroy_static(tm_scan_t *self, size_t cnt)
+void tm_scan_destroy_static(tm_scan_t *self)
 {
 	_unused(self);
-	_unused(cnt);
-
+	kv_destroy(self->seed.arr);
+	kv_destroy(self->seed.sqiv);
+	kv_destroy(self->chain.arr);
+	kv_destroy(self->extend.arr);
 	return;
 }
 
@@ -1797,8 +1834,9 @@ tm_seed_t *tm_seed_reserve(tm_seed_v *buf, tm_seed_t *q)
 	/* update count */
 	kv_cnt(*buf) = q - kv_ptr(*buf);
 
-	tm_seed_t *p = kv_reserve(tm_seed_t, *buf, 65536);
-	return(&p[kv_cnt(*buf)]);
+	size_t const scnt = kv_cnt(*buf);
+	tm_seed_t *p = kv_reserve(tm_seed_t, *buf, scnt + 65536);
+	return(&p[scnt]);
 }
 
 static _force_inline
@@ -1807,8 +1845,9 @@ tm_sqiv_t *tm_sqiv_reserve(tm_sqiv_v *buf, tm_sqiv_t *q)
 	/* update count */
 	kv_cnt(*buf) = q - kv_ptr(*buf);
 
-	tm_sqiv_t *p = kv_reserve(tm_sqiv_t, *buf, 64);
-	return(&p[kv_cnt(*buf)]);
+	size_t const vcnt = kv_cnt(*buf);
+	tm_sqiv_t *p = kv_reserve(tm_sqiv_t, *buf, vcnt + 64);
+	return(&p[vcnt]);
 }
 
 static _force_inline
@@ -1902,9 +1941,9 @@ size_t tm_squash_seed(tm_sqiv_t const *sqiv, size_t icnt, tm_seed_v *seed)
 		size_t const tail = idx + p->cnt;
 
 		/* copy with ymm */
-		for(size_t i = src, j = dst; j < tail; i += 8, j += 8) {
-			v32i8_t const v = _loadu_v32i8(&q[i]);
-			_storeu_v32i8(&q[j], v);
+		for(size_t k = src, l = dst; l < tail; k += 8, l += 8) {
+			v32i8_t const v = _loadu_v32i8(&q[k]);
+			_storeu_v32i8(&q[l], v);
 		}
 
 		/* update index for next iteration */
@@ -2524,32 +2563,122 @@ void tm_print_init_static(tm_print_t *self, tm_print_conf_t const *conf, char co
 
 /* multithreaded scan-and-mask */
 typedef struct {
-	uint32_t dummy;
+	tm_idx_t const *mi;
+	bseq_file_t *fp;
+	tm_print_t *printer;
+	pt_t *pt;
+
+	/* counters */
+	size_t icnt, ocnt;
+
+	tm_scan_t scan[];
 } tm_mtscan_t;
 
 static _force_inline
 tm_mtscan_t *tm_mtscan_init(tm_idx_t const *mi, tm_print_t *printer, pt_t *pt)
 {
-	_unused(mi);
-	_unused(printer);
-	_unused(pt);
+	size_t const size = sizeof(tm_mtscan_t) + pt_nth(pt) * sizeof(tm_scan_t);
+	tm_mtscan_t *self = malloc(size);
+	*self = (tm_mtscan_t){
+		.mi = mi,
+		.printer = printer,
+		.pt = pt
+	};
 
-	return(NULL);
+	for(size_t i = 0; i < pt_nth(pt); i++) {
+		tm_scan_init_static(&self->scan[i]);
+	}
+	return(self);
 }
 
 static _force_inline
 void tm_mtscan_destroy(tm_mtscan_t *self)
 {
+	if(self == NULL) { return; }
+
+	for(size_t i = 0; i < pt_nth(self->pt); i++) {
+		tm_scan_destroy_static(&self->scan[i]);
+	}
 	free(self);
 	return;
 }
 
+typedef struct {
+	size_t id;
+	dz_arena_t *mem;
+	bseq_batch_t seq_bin;
+} tm_mtscan_batch_t;
+
+static
+void *tm_mtscan_source(uint32_t tid, tm_mtscan_t *self)
+{
+	_unused(tid);
+
+	/* NULL if reached tail */
+	if(bseq_is_eof(self->fp)) { return(NULL); }
+
+	/* fetch */
+	bseq_batch_t *seq_bin = bseq_read(self->fp);
+	if(seq_bin == NULL) { return(NULL); }
+
+	/* init working buffer */
+	tm_mtscan_batch_t *batch = _sub_offset(seq_bin, offsetof(tm_mtscan_batch_t, seq_bin));
+	batch->id  = self->icnt++;
+	batch->mem = dz_arena_init(DZ_MEM_INIT_SIZE);
+	return(batch);
+}
+
+static
+void *tm_mtscan_worker(uint32_t tid, tm_mtscan_t *self, tm_mtscan_batch_t *batch)
+{
+	/* working buffers */
+	tm_scan_t *scan = &self->scan[tid];
+	bseq_meta_t *meta = bseq_meta_ptr(&batch->seq_bin);
+
+	/* setup result buffer */
+	scan->extend.trace = batch->mem;
+
+	/* for each query sequence */
+	for(size_t i = 0; i < bseq_meta_cnt(&batch->seq_bin); i++) {
+		bseq_meta_t *seq = &meta[i];
+		seq->u.flag = tm_scan_all(scan, self->mi, bseq_seq(seq), bseq_seq_len(seq));
+	}
+	return(batch);
+}
+
+static
+void tm_mtscan_drain(uint32_t tid, tm_mtscan_t *self, tm_mtscan_batch_t *batch)
+{
+	_unused(tid);
+
+	self->ocnt++;
+
+	dz_arena_destroy(batch->mem);
+	bseq_free(&batch->seq_bin);
+	return;
+}
+
+
 static _force_inline
 int tm_mtscan_file(tm_mtscan_t *self, char const *fn)
 {
-	_unused(self);
-	_unused(fn);
+	bseq_conf_t const bseq_conf = {
+		.batch_size  = BATCH_SIZE,
+		.head_margin = offsetof(tm_mtscan_batch_t, seq_bin)
+	};
+	self->fp = bseq_open(&bseq_conf, fn);
+	if(self->fp == NULL) { return(1); }
 
+	/* multithreaded scan-and-mask */
+	pt_stream(self->pt, self,
+		(pt_source_t)tm_mtscan_source,
+		(pt_worker_t)tm_mtscan_worker,
+		(pt_drain_t)tm_mtscan_drain
+	);
+
+	/* done */
+	bseq_close(self->fp);
+	self->fp = NULL;
 	return(0);
 }
 
@@ -2648,11 +2777,11 @@ static void tm_conf_help(opt_t *opt, tm_conf_t *conf, char const *arg) {
 /* index filename */
 static void tm_conf_idxdump(opt_t *opt, tm_conf_t *conf, char const *arg) {
 	_unused(opt);
-	conf->idxdump = opt_strdup(opt, arg, strlen(arg));
+	conf->idxdump = opt_strdup(opt, arg, mm_strlen(arg));
 }
 static void tm_conf_profile(opt_t *opt, tm_conf_t *conf, char const *arg) {
 	_unused(opt);
-	conf->profile = opt_strdup(opt, arg, strlen(arg));
+	conf->profile = opt_strdup(opt, arg, mm_strlen(arg));
 }
 
 /* indexing */
@@ -2711,7 +2840,7 @@ uint64_t tm_conf_restore_default(tm_conf_t *conf)
 {
 	tm_conf_t defaults = {
 		.fallback = {
-			.kmer = 5,
+			.kmer = 3,
 			.window = 32,
 			.match = 2,
 			.mismatch = -3,
@@ -2890,10 +3019,12 @@ int main_index_intl(tm_conf_t *conf, pg_t *pg, pt_t *pt)
 
 	/* iterate over index blocks */
 	kv_foreach(void *, opt_pargv(&conf->opt), ({
+		debug("p(%s)", *p);
 
 		/* generate index */
 		tm_idx_t *mi = tm_idx_gen(&conf->fallback, pt, *p, conf->profile, stderr);
 		if(mi == NULL) {
+			debug("mi == NULL");
 			/* failed to open file */
 			return(main_index_error(conf, ERROR_OPEN_RSEQ, conf->idxdump));
 		}
@@ -2935,10 +3066,11 @@ int main_index(tm_conf_t *conf, pt_t *pt)
 
 	/* done */
 	pg_stat_t stat = pg_destroy_static(&pg);
-	message(conf->log, "done. total index size (compressed) on disk: %.1f MB.", (double)stat.out / (1024ULL * 1024));
-
 	fclose(fp);
-	return(error_code);
+	if(error_code) { return(error_code); }
+
+	message(conf->log, "done. total index size (compressed) on disk: %.1f MB.", (double)stat.out / (1024ULL * 1024));
+	return(0);
 }
 
 
@@ -3187,7 +3319,7 @@ int main(int argc, char *argv[])
 
 	/* always print version */
 	tm_conf_outfp_t out = tm_conf_get_outfp(&conf);
-	message(out.fp, "Version: %s, Build: %s", tm_version(), MK_ARCH_NAME);
+	message(out.fp, "Version: %s, Build: %s", tm_version(), TM_ARCH_NAME);
 
 	/* when -h is passed or no input file is given, print help message */
 	if(out.help) {
