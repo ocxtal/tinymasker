@@ -2789,7 +2789,7 @@ void dz_trace_init_work(dz_trace_work_t *w, dz_profile_t const *profile, dz_stat
 	w->de = profile->dev[0];
 
 	/* clear counters */
-	memset(w->cnt, 0, sizeof(uint32_t));
+	memset(w->cnt, 0, 4 * sizeof(uint32_t));
 
 	/* load max column pointers */
 	w->pcap = ff->max.cap;
