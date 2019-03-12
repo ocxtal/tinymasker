@@ -549,7 +549,7 @@ void bseq_load_conv(uint8_t *q, uint8_t const *p)
 	#define _c(x)		( ((x) & 0x1f) ^ (((x) & 0x40)>>2) )
 
 	/* ASCII -> 4bit encoding conversion table */
-	static uint8_t const conv[32] __attribute__(( aligned(16) )) = {
+	static uint8_t const conv[32] __attribute__(( aligned(32) )) = {
 		/* '\0' and ' ' (as EOF) */
 		[0] = 0xff,
 
@@ -580,7 +580,7 @@ void bseq_load_conv(uint8_t *q, uint8_t const *p)
 	};
 
 	/* copy default conversion table to working buffer */
-	uint8_t w[32] __attribute__(( aligned(16) )) = { 0 };
+	uint8_t w[32] __attribute__(( aligned(32) )) = { 0 };
 	_store_v32i8(w, _load_v32i8(conv));
 
 	/* use default table if provided table is all zero */
