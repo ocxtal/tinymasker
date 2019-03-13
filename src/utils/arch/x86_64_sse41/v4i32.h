@@ -178,7 +178,7 @@ typedef struct v4i32_s {
 )
 #define _hi_v4i32(a, b) ( \
 	(v4i32_t) { \
-		_mm_shuffle_epi32(_mm_unpacklo_epi32((a).v1, (b).v1), 0x0e) \
+		_mm_unpackhi_epi32((a).v1, (b).v1) \
 	} \
 )
 #define _shuf_v4i32(a, i) ( \
