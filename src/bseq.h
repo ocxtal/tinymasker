@@ -310,8 +310,9 @@ void bseq_fixup_name(bseq_work_t *w, bseq_file_t *fp)
 static _force_inline
 void bseq_fixup_seq(bseq_work_t *w, bseq_file_t *fp)
 {
-	w->s->slen = fp->acc;
-	w->s->seq = (uint8_t *)w->n - fp->acc;
+	w->s->seq   = (uint8_t *)w->n - fp->acc;
+	w->s->slen  = fp->acc;
+	w->s->u.ptr = NULL;
 	debug("seq(%p), slen(%lu)", w->s->seq, w->s->slen);
 	return;
 }
