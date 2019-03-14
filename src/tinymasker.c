@@ -358,9 +358,13 @@ static _force_inline
 void tm_ref_patch_feeder(tm_ref_cnt_t *p, size_t ksize)
 {
 	for(size_t i = 0; i < ksize; i++) {
+		// debug("i(%r), ksize(%zx)", tm_kmer_to_str, &i, ksize - 1);
+		if(p[i].exist == 0) { continue; }
+
 		for(uint64_t mask = (ksize - 1)>>2; mask != 0; mask >>= 2) {
 			uint64_t krem = i & mask;
-			if(p[krem].covered) { break; }
+			// debug("test mask(%lx), krem(%r), covered(%u), exist(%u)", mask, tm_kmer_to_str, &krem, p[krem].covered, p[krem].exist);
+			// if(p[krem].covered) { break; }
 
 			p[krem].covered |= 1;
 		}
@@ -368,12 +372,12 @@ void tm_ref_patch_feeder(tm_ref_cnt_t *p, size_t ksize)
 
 	size_t patched = 0;
 	for(size_t i = 0; i < (ksize>>2); i++) {
-		if((p[i].covered | p[i].exist) == 0) {
+		if(p[i].covered == 0) {
 			p[i].exist |= 1;
 			patched++;
 		}
 	}
-	debug("patched(%zu)", patched);
+	debug("ksize(%zu), patched(%zu), ratio(%f)", ksize, patched, 4.0 * (double)patched / (double)ksize);
 	return;
 }
 
@@ -401,34 +405,43 @@ size_t tm_ref_pack_kpos(tm_ref_cnt_t *p, size_t ksize, tm_ref_kpos_t const *kpos
 	size_t ofs = TM_REF_BASE_OFS;
 
 	tm_ref_kpos_t const *k = kpos, *t = &kpos[kcnt];
-	while(k < t) {
+	for(size_t i = 0; i < ksize && k < t; i++) {
+		if(p[i].exist == 0) { continue; }
+		while(k < t && (k->kmer>>2) < i) {
+			debug("something is wrong, k(%p, %p), kmer(%x)", k, t, k->kmer);
+			k++;
+		}
+
 		/* save current offset */
-		uint32_t const kbase = k->kmer>>2;
-		p[kbase].ofs = ofs;
+		p[i].ofs = ofs;
 
 		/* slice bin from current offset */
 		tm_ref_bin_t *bin = _add_offset(sk, ofs);
 		_storeu_v4i32(bin, _zero_v4i32());		/* clear link */
 
 		/* pack pos array */
-		size_t i = 0, j = 0;
-		do {
+		size_t x = 0, y = 0;
+		while(k < t && (k->kmer>>2) == i) {
 			uint32_t const kall = k->kmer;
-			while(k < t && k->kmer == kall) {
-				bin->pos[i++] = k++->pos;
+			while(y < (kall & 0x03)) {
+				bin->link[y++].tail = x;
 			}
-
-			do {
-				bin->link[j++].tail = i;
-			} while(j <= (kall & 0x03));
-		} while(k < t && (k->kmer>>2) == kbase);
+			while(k < t && k->kmer == kall) {
+				bin->pos[x++] = k++->pos;
+			}
+		}
 
 		/* fill missing tail */
-		while(j < 4) { bin->link[j++].tail = i; }
-		// debug("kbase(%u), ofs(%zu), cnt(%u, %zu, %zu)", kbase, ofs, p[kbase].cnt, i, j);
+		while(y < 4) { bin->link[y++].tail = x; }
+/*
+		debug("kmer(%r), ofs(%zu), cnt(%u, %zu, %zu), tail(%u, %u, %u, %u)",
+			tm_kmer_to_str, &i, ofs, p[i].cnt, x, y,
+			bin->link[0].tail, bin->link[1].tail, bin->link[2].tail, bin->link[3].tail
+		);
+*/
 
 		/* update offset */
-		ofs += _roundup(hdr + sizeof(uint16_t) * p[kbase].cnt, TM_REF_ALIGN_SIZE);
+		ofs += _roundup(hdr + sizeof(uint16_t) * p[i].cnt, TM_REF_ALIGN_SIZE);
 	}
 	return(ofs);
 }
@@ -494,11 +507,15 @@ void tm_ref_build_link(tm_ref_cnt_t const *p, size_t ksize, tm_ref_sketch_t *sk)
 		/* find next link for each base */
 		for(size_t j = 0; j < 4; j++) {
 			tm_ref_prefix_t n = tm_ref_find_link(p, ((i<<2) + j) & mask, max_shift);
+			int32_t const next = (int32_t)(n.ofs - p[i].ofs) / (int32_t)TM_REF_ALIGN_SIZE;	/* overflows; keep sign bit */
+			if(next > INT16_MAX || next < INT16_MIN) {
+				error("link overflow: i(%zx), next(%d)", i, next);
+			}
 
 			/* save link; preserve tail */
 			bin->link[j].plen = n.len;
-			bin->link[j].next = (n.ofs - p[i].ofs) / TM_REF_ALIGN_SIZE;	/* overflows; keep sign bit */
-
+			bin->link[j].next = next;
+/*
 			debugblock({
 				uint32_t k = i<<2;
 				debug("(%r, %u) -- (%u) -> (%r, %u), len(%u), next(%d)",
@@ -506,7 +523,9 @@ void tm_ref_build_link(tm_ref_cnt_t const *p, size_t ksize, tm_ref_sketch_t *sk)
 					tm_kmer_to_str, &n.kmer, n.ofs,
 					bin->link[j].plen, bin->link[j].next
 				);
+				// debug("done, size(%u), head_margin(%u), kbits(%u), slen(%u)", sk->size, sk->head_margin, sk->kbits, sk->slen);
 			});
+*/
 		}
 	}
 	return;
@@ -552,6 +571,7 @@ tm_ref_sketch_t *tm_ref_build_index(tm_ref_conf_t const *conf, uint8_t const *se
 	tm_ref_build_link(p, ksize, sk);
 
 	/* anything else? */
+	debug("done, size(%u), head_margin(%u), kbits(%u), slen(%u)", sk->size, sk->head_margin, sk->kbits, sk->slen);
 	return(sk);
 }
 
@@ -588,7 +608,7 @@ typedef struct {
 } tm_ref_squash_t;
 
 typedef struct {
-	size_t prefix, unmatching;
+	uint64_t prefix, unmatching;
 	tm_ref_bin_t const *bin;
 } tm_ref_state_t;
 
@@ -608,13 +628,13 @@ tm_ref_state_t tm_ref_match_init(tm_ref_sketch_t const *ref)
 {
 	return((tm_ref_state_t){
 		.prefix     = ref->kbits>>1,
-		.unmatching = 1,
+		.unmatching = -1LL,
 		.bin        = _add_offset(ref, TM_REF_BASE_OFS)	/* bin for AAA... */
 	});
 }
 
 static _force_inline
-tm_ref_squash_t tm_ref_load_squash(tm_ref_bin_t const *bin, uint8_t next)
+tm_ref_squash_t tm_ref_load_squash(tm_ref_bin_t const *bin, uint64_t unmatching, uint8_t next)
 {
 	static int8_t const scatter[16] __attribute__(( aligned(16) )) = {
 		0, 0, 0, 0, 0x80, 0x80, 0x80, 0x80,
@@ -628,7 +648,7 @@ tm_ref_squash_t tm_ref_load_squash(tm_ref_bin_t const *bin, uint8_t next)
 	v16i8_t const tv = _load_v16i8(scatter);
 	v16i8_t const sv = _load_v16i8(shuf);
 
-	v2i64_t const nv = _set_v2i64(next);
+	v2i64_t const nv = _seta_v2i64(0, (unmatching & 0xc0) | next);		/* 0xff when unmatching; clears src and dst columns */
 	v16i8_t const mv = _shuf_v16i8(nv, tv);
 
 	v16i8_t const w = _loadu_v16i8(bin->link);
@@ -642,28 +662,30 @@ tm_ref_next_t tm_ref_match_next(tm_ref_state_t s, uint8_t next)
 	int64_t const pitch = TM_REF_ALIGN_SIZE;
 
 	/* load entire table on xmm to extract index of squashable subbin */
-	tm_ref_squash_t sq = tm_ref_load_squash(s.bin, next);
+	tm_ref_squash_t sq = tm_ref_load_squash(s.bin, s.unmatching, next);
 
 	/* get link to the next bin */
 	tm_ref_link_t const *link = _add_offset(s.bin->link, next);
 	tm_ref_bin_t const *bin = _add_offset(s.bin, pitch * link->next);	/* signed */
 
 	/* update matching state */
-	size_t const prefix = MAX2(s.prefix - s.unmatching, link->plen);
+	size_t const prefix = MAX2(s.prefix + s.unmatching, link->plen);
 
 	tm_ref_next_t r = {
 		.state = {
 			.prefix     = prefix,
-			.unmatching = prefix != 0,
+			.unmatching = 0ULL - (prefix != 0),
 			.bin        = bin
 		},
 		.squash = sq
 	};
 
+/*
 	debug("plen(%u, %u, %u, %u), tail(%u, %u, %u, %u)",
 		bin->link[0].plen, bin->link[1].plen, bin->link[2].plen, bin->link[3].plen,
 		bin->link[0].tail, bin->link[1].tail, bin->link[2].tail, bin->link[3].tail
 	);
+*/
 	return(r);
 }
 
@@ -1342,6 +1364,7 @@ tm_idx_batch_t *tm_idx_collect(uint32_t tid, tm_idx_gen_t *self, tm_idx_batch_t 
 			bseq_name(p), bseq_name_len(p),
 			bseq_seq(p),  bseq_seq_len(p)
 		);
+		debug("done, sr(%p)", sr);
 
 		/* copy sequence */
 		tm_idx_sketch_t *si = tm_idx_save_seq(sr,
@@ -2027,10 +2050,12 @@ size_t tm_expand_seed(tm_ref_state_t s, v4i32_t uofs, v4i32_t vofs, tm_seed_t *q
 		_storeu_v4i32(&q[i + 2], _hi_v4i32(u, v));
 	}
 
+/*
 	fprintf(stderr, "bin(%p)\n", s.bin);
 	for(size_t i = 0; i < m.cnt; i++) {
 		fprintf(stderr, "(%u, %u)\n", q[i].v, q[i].u);
 	}
+*/
 	return(m.cnt);
 }
 
@@ -2055,19 +2080,26 @@ size_t tm_collect_seed(tm_ref_sketch_t const *ref, uint8_t const *query, size_t 
 
 		/* update matching status for the next bin (prefetch) */
 		tm_ref_next_t n = tm_ref_match_next(s, *p);
-		debug("(%r, %u) -- (%u) -> (%r, %u), link(%u, %u, %d), prefix(%u)",
+		s = n.state;
+
+/*
+		debug("(%r, %u) -- (%u) -> (%r, %u), link(%u, %u, %d), prefix(%u), cnt(%zu), (%u, %u, %u)",
 			tm_kmer_to_str, &s.bin->kmer, _ptr_diff(s.bin, ref), *p,
 			tm_kmer_to_str, &n.state.bin->kmer, _ptr_diff(n.state.bin, ref),
 			s.bin->link[*p].tail,
 			s.bin->link[*p].plen,
 			s.bin->link[*p].next,
-			n.state.prefix
+			n.state.prefix,
+			n.state.bin->link[3].tail,
+			0xfff & (uint16_t)_mm_extract_epi16(n.squash.v.v1, 0),
+			0xfff & (uint16_t)_mm_extract_epi16(n.squash.v.v1, 1),
+			0xfff & (uint16_t)_mm_extract_epi16(n.squash.v.v1, 2)
 		);
+*/
 
 		/* skip current bin if not matching */
-		s = n.state;
 		if(!s.unmatching) {
-			r += tm_save_sqiv(n.squash, r);
+			r += tm_save_sqiv(n.squash, r);		/* save previous matching state */
 			q += tm_expand_seed(s, uofs, vofs, q);
 		}
 
@@ -2080,34 +2112,59 @@ size_t tm_collect_seed(tm_ref_sketch_t const *ref, uint8_t const *query, size_t 
 	return(kv_cnt(*seed));
 }
 
+typedef struct {
+	size_t d, s, c;
+} tm_triplet_t;
+
 static _force_inline
-size_t tm_squash_seed(tm_sqiv_t const *sqiv, size_t icnt, tm_seed_v *seed)
+tm_triplet_t tm_load_sqiv(tm_sqiv_t const *sqiv, size_t i, uint64_t mask)
 {
-	tm_seed_t *q = kv_ptr(*seed);
+	tm_sqiv_t const *p = &sqiv[i];
+	uint32_t sd = _loadu_u32(&p->dst);
+
+	if((i & mask) == mask) { sd = 0; }
+
+	/* determine source and destination indices */
+	return((tm_triplet_t){
+		.d = sd & 0xfff,
+		.s = (sd>>16) & 0xfff,
+		.c = p->cnt & 0xfff
+	});
+}
+
+static _force_inline
+size_t tm_squash_seed(tm_sqiv_t const *sqiv, size_t icnt, size_t intv, tm_seed_v *seed)
+{
+	tm_seed_t *dp = kv_ptr(*seed);
+	tm_seed_t const *sp = dp;
+	uint64_t const mask = intv - 1;
 
 	/* squash succeeding match */
-	size_t idx = 0;
 	for(size_t i = 0; i < icnt; i++) {
-		tm_sqiv_t const *p = &sqiv[i];
+		tm_triplet_t sq = tm_load_sqiv(sqiv, i, mask);
 
-		/* determine source and destination indices */
-		size_t const d = p->dst & 0xfff, dst  = idx + d;
-		size_t const s = p->src & 0xfff, src  = idx + s;
-		size_t const c = p->cnt & 0xfff, tail = idx + c;
-
-		/* copy with ymm */
-		for(size_t k = src, l = dst; k < tail; k += 8, l += 8) {
-			v32i8_t const v = _loadu_v32i8(&q[k]);
-			_storeu_v32i8(&q[l], v);
+		/* former half */
+		for(size_t i = 0; i < sq.d; i += 4) {
+			v32i8_t const v = _loadu_v32i8(&sp[i]);
+			_storeu_v32i8(&dp[i], v);
 		}
 
-		/* update index for next iteration */
-		idx += c + d - s;
-		debug("(%u, %u, %u), (%zu, %zu, %zu), idx(%zu)", d, s, c, dst, src, tail, idx);
+		/* latter half */
+		dp -= sq.s - sq.d;
+		for(size_t i = sq.s; i < sq.c; i += 4) {
+			v32i8_t const v = _loadu_v32i8(&sp[i]);
+			_storeu_v32i8(&dp[i], v);
+		}
+
+		/* forward pointers */
+		sp += sq.c;
+		dp += sq.c;
+		// debug("(%u, %u, %u), idx(%zu, %zu), cnt(%zu), squashed(%zu)", sq.d, sq.s, sq.c, dp - kv_ptr(*seed), sp - kv_ptr(*seed), sq.c, sq.s - sq.d);
 	}
 
-	kv_cnt(*seed) = idx;
-	return(idx);
+	size_t const cnt = dp - kv_ptr(*seed);
+	kv_cnt(*seed) = cnt;
+	return(cnt);
 }
 
 static _force_inline
@@ -2422,16 +2479,17 @@ size_t tm_seed_and_sort(tm_ref_sketch_t const *ref, uint8_t const *query, size_t
 	}
 
 	/* squash overlapping seeds */
-	if(tm_squash_seed(kv_ptr(*sqiv), kv_cnt(*sqiv), seed) == 0) {
+	if(tm_squash_seed(kv_ptr(*sqiv), kv_cnt(*sqiv), 16, seed) == 0) {
 		return(0);
 	}
 
 	/* sort seeds by u-coordinates for chaining */
 	radix_sort_seed(kv_ptr(*seed), kv_cnt(*seed));
+/*
 	for(size_t i = 0; i < kv_cnt(*seed); i++) {
 		fprintf(stderr, "(%u, %u)\n", kv_ptr(*seed)[i].v, kv_ptr(*seed)[i].u);
 	}
-
+*/
 	return(kv_cnt(*seed));
 }
 
