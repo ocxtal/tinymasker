@@ -332,9 +332,9 @@ _static_assert(sizeof(tm_ref_bin_t) == 16);		/* smallest bin size == 16 */
 
 
 typedef struct {
-	uint64_t exist : 1;
-	uint64_t cnt   : 31;
-	uint64_t ofs   : 32;
+	uint8_t covered, exist;		/* covered flag for feeder */
+	uint16_t cnt;
+	uint32_t ofs;
 } tm_ref_cnt_t;
 typedef struct { tm_ref_cnt_t *a; size_t n, m; } tm_ref_cnt_v;
 
@@ -346,16 +346,34 @@ size_t tm_ref_count_kmer(tm_ref_cnt_t *p, size_t ksize, tm_ref_kpos_t const *kpo
 	// debug("ksize(%zx), kcnt(%zu)", ksize, kcnt);
 	for(tm_ref_kpos_t const *k = kpos, *t = &kpos[kcnt]; k < t; k++) {
 		tm_ref_cnt_t *q = &p[k->kmer>>2];
-		q->exist |= 1;
+
+		q->covered |= 1;
+		q->exist   |= 1;
 		q->cnt++;
 	}
 	return(kcnt);
 }
 
 static _force_inline
-void tm_ref_patch_head(tm_ref_cnt_t *p, size_t ksize, uint8_t const *seq, size_t slen)
+void tm_ref_patch_feeder(tm_ref_cnt_t *p, size_t ksize)
 {
-	;
+	for(size_t i = 0; i < ksize; i++) {
+		for(uint64_t mask = (ksize - 1)>>2; mask != 0; mask >>= 2) {
+			uint64_t krem = i & mask;
+			if(p[krem].covered) { break; }
+
+			p[krem].covered |= 1;
+		}
+	}
+
+	size_t patched = 0;
+	for(size_t i = 0; i < (ksize>>2); i++) {
+		if((p[i].covered | p[i].exist) == 0) {
+			p[i].exist |= 1;
+			patched++;
+		}
+	}
+	debug("patched(%zu)", patched);
 	return;
 }
 
@@ -509,7 +527,7 @@ tm_ref_sketch_t *tm_ref_build_index(tm_ref_conf_t const *conf, uint8_t const *se
 	tm_ref_count_kmer(p, ksize, kpos, kcnt);
 
 	/* patch lead */
-	tm_ref_patch_head(p, ksize, seq, slen);
+	tm_ref_patch_feeder(p, ksize);
 
 	/* accumulate block size */
 	size_t size = tm_ref_calc_size(p, ksize);
@@ -547,6 +565,10 @@ typedef struct {
 static _force_inline
 tm_ref_sketch_t *tm_ref_sketch(tm_ref_tbuf_t *self, tm_ref_conf_t const *conf, uint8_t const *seq, size_t slen)
 {
+	if(slen > UINT16_MAX) {
+		return(NULL);
+	}
+
 	/* slice kmers from sequence (ambiguous bases are expanded here) */
 	if(tm_ref_collect_kmer(conf, seq, slen, &self->kpos) == 0) {		/* with additional base */
 		return(NULL);
@@ -1297,6 +1319,7 @@ tm_idx_batch_t *tm_idx_collect(uint32_t tid, tm_idx_gen_t *self, tm_idx_batch_t 
 
 	for(size_t i = 0; i < bseq_meta_cnt(&batch->bin); i++) {
 		bseq_meta_t *p = &meta[i];
+		if(bseq_seq_len(p) > UINT16_MAX) { continue; }	/* leave p->u.ptr NULL */
 
 		/*
 		debug("name(%s)", bseq_name(p));
@@ -1345,7 +1368,13 @@ void tm_idx_record(uint32_t tid, tm_idx_gen_t *self, tm_idx_batch_t *batch)
 	/* no need for sorting batches */
 	size_t const base_rid = batch->base_rid;
 	for(size_t i = 0; i < bseq_meta_cnt(&batch->bin); i++) {
-		arr[base_rid + i] = meta[i].u.ptr;			/* just copy */
+		bseq_meta_t const *p = &meta[i];
+		if(_unlikely(p->u.ptr == NULL && bseq_seq_len(p))) {
+			error("sequence too long (%.*s: length = %zu). removed.", (int)bseq_name_len(p), bseq_name(p), bseq_seq_len(p));
+			continue;
+		}
+
+		arr[base_rid + i] = p->u.ptr;		/* just copy */
 	}
 
 	/* done */
@@ -1406,6 +1435,17 @@ void tm_idx_destroy_matcher(tm_idx_gen_t *mii)
 	return;
 }
 
+size_t tm_idx_squash_invalid(tm_idx_sketch_t **sk, size_t scnt)
+{
+	size_t cnt = 0;
+	for(size_t i = 0; i < scnt; i++) {
+		if(sk[i] == NULL) { continue; }
+		sk[cnt++] = sk[i];
+	}
+	return(cnt);
+}
+
+
 static _force_inline
 tm_idx_t *tm_idx_gen_finalize(tm_idx_gen_t *mii, char const *ref, char const *profile)
 {
@@ -1422,7 +1462,10 @@ tm_idx_t *tm_idx_gen_finalize(tm_idx_gen_t *mii, char const *ref, char const *pr
 	mi->profile.cnt = kv_cnt(mii->score.profile);
 
 	mi->sketch.arr = kv_ptr(mii->col.bin);
-	mi->sketch.cnt = kv_cnt(mii->col.bin);
+	mi->sketch.cnt = tm_idx_squash_invalid(		/* remove NULL elements */
+		kv_ptr(mii->col.bin),
+		kv_cnt(mii->col.bin)
+	);
 
 	/* clear working buffers */
 	memset(_add_offset(mi, sizeof(tm_idx_t)), 0, sizeof(tm_idx_gen_t) - sizeof(tm_idx_t));
