@@ -1095,8 +1095,8 @@ void dz_merge_fold_col(dz_work_t *w, dz_swgv_t *col)
 		for(uint64_t p = ff->range.spos; p < ff->range.epos; p++) {
 			/* adjust offset */
 			dz_swgv_t const v = dz_load_swgv(&prev_col[p]);
-			dz_swgv_t const w = dz_subs_swgv(v, adjv);
-			dz_store_swgv(&col[p], w);
+			dz_swgv_t const u = dz_subs_swgv(v, adjv);
+			dz_store_swgv(&col[p], u);
 		}
 	}
 	return;
@@ -2728,10 +2728,10 @@ uint64_t dz_trace_eat_del(dz_trace_work_t *w) {
 	if(dz_likely(w->score != e)) { return(0); }
 
 	do {
-		uint16_t const e = dz_trace_score(DZ_E_MATRIX, w->pcap, w->idx);
-		if(w->score != e - w->de) { break; }
+		uint16_t const x = dz_trace_score(DZ_E_MATRIX, w->pcap, w->idx);
+		if(w->score != x - w->de) { break; }
 
-		dz_trace_push_op(w, DZ_E_MATRIX, e);
+		dz_trace_push_op(w, DZ_E_MATRIX, x);
 		dz_trace_unwind_h(w, DZ_E_MATRIX);
 	} while(dz_trace_test_idx(w, 0));
 
