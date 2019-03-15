@@ -1096,7 +1096,7 @@ void dz_merge_fold_col(dz_work_t *w, dz_swgv_t *col)
 			/* adjust offset */
 			dz_swgv_t const v = dz_load_swgv(&prev_col[p]);
 			dz_swgv_t const w = dz_subs_swgv(v, adjv);
-			dz_store_swgv(&col[p], v);
+			dz_store_swgv(&col[p], w);
 		}
 	}
 	return;
@@ -1220,7 +1220,6 @@ uint64_t dz_fill_is_bottom(dz_work_t *w)
 static __dz_vectorize
 uint64_t dz_fill_column_body(dz_work_t *w, dz_fill_work_t *fw)
 {
-	dz_swgv_t v;
 	for(uint64_t p = w->state.range.spos; p < w->state.range.epos; p++) {
 		/* load previous DP matrix vectors */
 		dz_fill_load_vector(fw, p);
@@ -2429,7 +2428,6 @@ int64_t dz_calc_max_rpos_core(dz_state_t const *ff)
 {
 	/* max-scoring column */
 	dz_cap_t const *pcap = ff->max.cap;
-	dz_swgv_t const *col = dz_restore_column(pcap);
 
 	/* cap->rrem overlaps tail->rsave.rlen */
 	dz_tail_t const *tail = dz_restore_tail(ff);

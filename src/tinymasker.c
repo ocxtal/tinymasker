@@ -1172,6 +1172,7 @@ tm_idx_profile_t *tm_idx_parse_profile(tm_idx_profile_t const *template, char co
 	/* FIXME: save profile name */
 	_unused(template);
 	_unused(table);
+	_unused(plen);
 
 	/* instanciate dz */
 	// tm_idx_finalize_profile(profile);
