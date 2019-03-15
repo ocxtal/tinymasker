@@ -2153,7 +2153,7 @@ size_t tm_squash_seed(tm_sqiv_t const *sqiv, size_t icnt, size_t intv, tm_seed_v
 */
 		for(size_t j = 0; j < sq.d; j++) {
 			dp[j] = sp[j];
-			debug("j(%zu), v(%u), u(%u)")
+			debug("i(%zu), j(%zu), v(%u), u(%u)", i, j, sp[j].v, sp[j].u);
 		}
 
 		/* latter half */
@@ -2166,6 +2166,7 @@ size_t tm_squash_seed(tm_sqiv_t const *sqiv, size_t icnt, size_t intv, tm_seed_v
 */
 		for(size_t j = sq.s; j < sq.c; j++) {
 			dp[j] = sp[j];
+			debug("i(%zu), j(%zu), v(%u), u(%u)", i, j, sp[j].v, sp[j].u);
 		}
 
 		/* forward pointers */
@@ -2205,14 +2206,16 @@ tm_seed_t *tm_chain_find_first(uint64_t ruv, tm_seed_t *p, tm_seed_t *t, uint64_
 		if((cont | tm_chain_test_ptr(++p, t)) < 0) { return(NULL); }
 
 		uint64_t const v = _loadu_u64(p) - lb;	/* 1: (u, v - vlb) for inclusion test */
-		debug("test inclusion, pv(%lu), pu(%lu), tv(%lu), tu(%lu), u(%lu), {v - vlb}(%lu), test(%lu)", p->v, p->u, t->v, t->u, v>>32, v & 0xffffffff, (ub - v) & tmask);
-		if(((ub - v) & tmask) == 0) {			/* 2,3: break if chainable (first chainable seed found) */
+		debug("test inclusion, pv(%lu), pu(%lu), u(%lu), {v - vlb}(%lu), test(%lu)", p->v, p->u, v>>32, v & 0xffffffff, (ub - v) & tmask);
+
+		cont = ub - v;		/* save diff for testing MSb */
+		if(((cont | v) & tmask) == 0) {			/* 2,3: break if chainable (first chainable seed found) */
 			debug("chainable");
 			break;
 		}
 
-		/* unchainable; test if out of uub */
-		cont = ub - v;		/* save diff for testing MSb */
+		/* unchainable */
+		debug("unchainable");
 	}
 	return(p);
 }
@@ -2234,9 +2237,9 @@ tm_seed_t *tm_chain_find_alt(tm_seed_t *p, tm_seed_t *t, uint64_t lb)
 	int64_t cont = 0;
 	while((cont | tm_chain_test_ptr(++p, t)) >= 0) {
 		uint64_t const v = _loadu_u64(p) - lb;	/* 1: (u, v - vlb) for inclusion test */
-		debug("u(%lu), {v - vlb}(%lu), uub(%lu), vub(%lu), test(%lu), term(%lu)", v>>32, v & 0xffffffff, ub>>32, ub & 0xffffffff, (ub - v) & tmask, (int64_t)(ub - v) < 0);
+		debug("u(%lu), {v - vlb}(%lu), uub(%lu), vub(%lu), test(%lu), term(%lu)", p->u, v & 0xffffffff, ub>>32, ub & 0xffffffff, (ub - v) & tmask, (int64_t)(ub - v) < 0);
 		cont = ub - v;
-		if((ub - v) & tmask) { debug("unchainable"); continue; }		/* skip if unchainable */
+		if((cont | v) & tmask) { debug("unchainable"); continue; }		/* skip if unchainable */
 
 		/* chainable; test if the seed is nearer than the previous */
 		uint64_t const w = v + (v<<32);			/* 2,3: (u + v - vlb, v - vlb) */
