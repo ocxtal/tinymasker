@@ -1,24 +1,63 @@
 
 CC = gcc
+GIT = git
 RM = rm
+MAKE = make
+CAT = cat
 
-SRC = src
 
+# install directory
+PREFIX = /usr/local
+
+
+# source directory
+SRCDIR = src
+TARGET = tinymasker
+
+
+# compiler flags
 OFLAGS = -O3
 WFLAGS = -Wall -Wextra -Wno-unused-variable -Wno-unused-function -Wno-constant-conversion -Wno-implicit-fallthrough
-LDFLAGS = -lz -lbz2 -llzma -lpthread
-CFLAGS = -std=c99 -march=native $(OFLAGS) $(WFLAGS) $(LDFLAGS)
-DEBUG_CFLAGS = -g -std=c99 -march=native -DDEBUG $(WFLAGS) $(LDFLAGS)
+LDFLAGS = -lpthread $(UTIL_LDFLAGS)
+CFLAGS = -std=c99 -march=native $(WFLAGS)
+GFLAGS = -g -DDEBUG # -fsanitize=address -fsanitize=leak
 
 
-all: tinymasker
+# intermediate
+SRCS = tinymasker.c toml.c re.c
 
-tinymasker: $(SRC)/tinymasker.c $(SRC)/dozeu.h
-	$(CC) $(CFLAGS) -o tinymasker $(SRC)/tinymasker.c $(SRC)/toml.c $(SRC)/re.c
+SRCS_INTL = $(addprefix $(SRCDIR)/, $(SRCS))
+OBJS_INTL = $(SRCS_INTL:c=o)
+DEPS_INTL = $(SRCS_INTL:c=deps)
 
-debug: $(SRC)/tinymasker.c $(SRC)/dozeu.h
-	$(CC) $(DEBUG_CFLAGS) -o tinymasker.debug $(SRC)/tinymasker.c $(SRC)/toml.c $(SRC)/re.c
+# default version string is parsed from git tags, otherwise extracted from the source
+VERSION = $(shell $(GIT) describe --tags || grep "define TM_VERSION" $(SRCDIR)/tinymasker.c | grep -o '".*"' | sed 's/"//g')
+
+
+# suffix rule
+.c.o:
+	$(CC) $(OFLAGS) $(CFLAGS) -c -o $(<:c=o) $<
+
+
+# rules
+all: $(TARGET)
+
+$(TARGET): $(OBJS_INTL)
+	$(CC) -o $(TARGET) $(OFLAGS) $(CFLAGS) $(OBJS_INTL) $(LDFLAGS)
+
+debug: $(SRCS_INTL)
+	$(CC) -o $(TARGET).debug $(GFLAGS) $(CFLAGS) $(SRCS_INTL) $(LDFLAGS)
 
 clean:
-	$(RM) -f tinymasker tinymasker.debug
+	$(RM) -f $(TARGET) $(TARGET).debug $(OBJS_INTL)
 
+deps: $(DEPS_INTL)
+	$(CAT) $^ > $(SRCDIR)/Makefile.deps
+
+$(DEPS_INTL): $(SRCS_INTL)
+	$(CC) -MM -MT $(@:deps=o) $(CFLAGS) $(@:deps=c) > $@
+
+
+# dependencies
+-include $(SRCDIR)/Makefile.deps
+-include $(SRCDIR)/Makefile.util
