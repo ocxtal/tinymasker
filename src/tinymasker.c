@@ -702,7 +702,7 @@ tm_ref_match_t tm_ref_get_arr(tm_ref_state_t s)
 /* index data structure */
 typedef struct {
 	/* fallback parameters */
-	size_t kmer, window;		/* k-mer length and chain window size */
+	size_t kmer, window, min_scnt;		/* k-mer length and chain window size */
 
 	/* extension params */
 	uint64_t match, mismatch, gap_open, gap_extend;
@@ -982,7 +982,7 @@ void tm_idx_fill_default(tm_idx_profile_t *profile)
 
 	profile->chain.window.sep.u = 32;
 	profile->chain.window.sep.v = 32;
-	profile->chain.min_scnt = 2;
+	profile->chain.min_scnt = 4;
 
 	profile->extend.min_score = 16;
 	profile->extend.giv = 5;
@@ -1004,6 +1004,9 @@ void tm_idx_override_default(tm_idx_profile_t *profile, tm_idx_conf_t const *con
 	if(conf->window > 0) {
 		profile->chain.window.sep.u = conf->window;
 		profile->chain.window.sep.v = conf->window;
+	}
+	if(conf->min_scnt > 0) {
+		profile->chain.min_scnt = conf->min_scnt;
 	}
 
 	/* score matrix */
@@ -2051,12 +2054,12 @@ size_t tm_expand_seed(tm_ref_state_t s, v4i32_t uofs, v4i32_t vofs, tm_seed_t *q
 		_storeu_v4i32(&q[i + 2], _hi_v4i32(u, v));
 	}
 
-
+/*
 	fprintf(stderr, "bin(%p)\n", s.bin);
 	for(size_t i = 0; i < m.cnt; i++) {
 		fprintf(stderr, "(%u, %u)\n", q[i].v, q[i].u);
 	}
-
+*/
 	return(m.cnt);
 }
 
@@ -2083,7 +2086,7 @@ size_t tm_collect_seed(tm_ref_sketch_t const *ref, uint8_t const *query, size_t 
 		tm_ref_next_t n = tm_ref_match_next(s, *p);
 		s = n.state;
 
-
+/*
 		debug("(%r, %u) -- (%u) -> (%r, %u), link(%u, %u, %d), prefix(%u), cnt(%zu), (%u, %u, %u)",
 			tm_kmer_to_str, &s.bin->kmer, _ptr_diff(s.bin, ref), *p,
 			tm_kmer_to_str, &n.state.bin->kmer, _ptr_diff(n.state.bin, ref),
@@ -2096,7 +2099,7 @@ size_t tm_collect_seed(tm_ref_sketch_t const *ref, uint8_t const *query, size_t 
 			0xfff & (uint16_t)_mm_extract_epi16(n.squash.v.v1, 1),
 			0xfff & (uint16_t)_mm_extract_epi16(n.squash.v.v1, 2)
 		);
-
+*/
 
 		/* skip current bin if not matching */
 		if(!s.unmatching) {
@@ -2123,7 +2126,10 @@ tm_triplet_t tm_load_sqiv(tm_sqiv_t const *sqiv, size_t i, uint64_t mask)
 	tm_sqiv_t const *p = &sqiv[i];
 	uint32_t sd = _loadu_u32(&p->dst);
 
-	if((i & mask) == mask) { debug("leave, i(%zu)", i); sd = 0; }
+	if((i & mask) == mask) {
+		sd = 0;
+		// debug("leave, i(%zu)", i);
+	}
 
 	/* determine source and destination indices */
 	return((tm_triplet_t){
@@ -2145,29 +2151,29 @@ size_t tm_squash_seed(tm_sqiv_t const *sqiv, size_t icnt, size_t intv, tm_seed_v
 		tm_triplet_t sq = tm_load_sqiv(sqiv, i, mask);
 
 		/* former half */
-/*
 		for(size_t j = 0; j < sq.d; j += 4) {
 			v32i8_t const v = _loadu_v32i8(&sp[j]);
 			_storeu_v32i8(&dp[j], v);
 		}
-*/
+/*
 		for(size_t j = 0; j < sq.d; j++) {
 			dp[j] = sp[j];
 			debug("i(%zu), j(%zu), v(%u), u(%u)", i, j, sp[j].v, sp[j].u);
 		}
+*/
 
 		/* latter half */
 		dp -= sq.s - sq.d;
-/*
 		for(size_t j = sq.s; j < sq.c; j += 4) {
 			v32i8_t const v = _loadu_v32i8(&sp[j]);
 			_storeu_v32i8(&dp[j], v);
 		}
-*/
+/*
 		for(size_t j = sq.s; j < sq.c; j++) {
 			dp[j] = sp[j];
 			debug("i(%zu), j(%zu), v(%u), u(%u)", i, j, sp[j].v, sp[j].u);
 		}
+*/
 
 		/* forward pointers */
 		sp += sq.c;
@@ -2183,7 +2189,7 @@ size_t tm_squash_seed(tm_sqiv_t const *sqiv, size_t icnt, size_t intv, tm_seed_v
 static _force_inline
 int64_t tm_chain_test_ptr(tm_seed_t const *p, tm_seed_t const *t)
 {
-	debug("check tail, test(%ld)", (int64_t)((ptrdiff_t)(t - p - 1)));
+	// debug("check tail, test(%ld)", (int64_t)((ptrdiff_t)(t - p - 1)));
 	return((int64_t)((ptrdiff_t)(t - p - 1)));
 }
 
@@ -2197,8 +2203,7 @@ tm_seed_t *tm_chain_find_first(uint64_t ruv, tm_seed_t *p, tm_seed_t *t, uint64_
 	/* load bounds */
 	uint64_t const uv = ruv;					/* (ulb, vlb) */
 	uint64_t ub = (uv & umask) + window;		/* (uub, vub - vlb) */
-
-	debug("uub(%lu), vwlen(%lu)", ub>>32, ub & 0xffffffff);
+	// debug("uub(%lu), vwlen(%lu)", ub>>32, ub & 0xffffffff);
 
 	int64_t cont = 0;		/* continuous flag */
 	while(1) {
@@ -2206,16 +2211,16 @@ tm_seed_t *tm_chain_find_first(uint64_t ruv, tm_seed_t *p, tm_seed_t *t, uint64_
 		if((cont | tm_chain_test_ptr(++p, t)) < 0) { return(NULL); }
 
 		uint64_t const v = _loadu_u64(p) - lb;	/* 1: (u, v - vlb) for inclusion test */
-		debug("test inclusion, pv(%lu), pu(%lu), u(%lu), {v - vlb}(%lu), test(%lu)", p->v, p->u, v>>32, v & 0xffffffff, (ub - v) & tmask);
+		// debug("test inclusion, pv(%lu), pu(%lu), u(%lu), {v - vlb}(%lu), test(%lu)", p->v, p->u, v>>32, v & 0xffffffff, (ub - v) & tmask);
 
 		cont = ub - v;		/* save diff for testing MSb */
 		if(((cont | v) & tmask) == 0) {			/* 2,3: break if chainable (first chainable seed found) */
-			debug("chainable");
+			// debug("chainable");
 			break;
 		}
 
 		/* unchainable */
-		debug("unchainable");
+		// debug("unchainable");
 	}
 	return(p);
 }
@@ -2229,7 +2234,7 @@ tm_seed_t *tm_chain_find_alt(tm_seed_t *p, tm_seed_t *t, uint64_t lb)
 	/* calculate bounds */
 	uint64_t rv = _loadu_u64(p) - lb;
 	uint64_t ub = rv + (rv<<32);
-	debug("u(%lu), {v - vlb}(%lu), uub(%lu), vub(%lu)", rv>>32, rv & 0xffffffff, ub>>32, ub & 0xffffffff);
+	// debug("u(%lu), {v - vlb}(%lu), uub(%lu), vub(%lu)", rv>>32, rv & 0xffffffff, ub>>32, ub & 0xffffffff);
 
 	/* keep nearest seed */
 	tm_seed_t *n = p;
@@ -2237,14 +2242,20 @@ tm_seed_t *tm_chain_find_alt(tm_seed_t *p, tm_seed_t *t, uint64_t lb)
 	int64_t cont = 0;
 	while((cont | tm_chain_test_ptr(++p, t)) >= 0) {
 		uint64_t const v = _loadu_u64(p) - lb;	/* 1: (u, v - vlb) for inclusion test */
-		debug("u(%lu), {v - vlb}(%lu), uub(%lu), vub(%lu), test(%lu), term(%lu)", p->u, v & 0xffffffff, ub>>32, ub & 0xffffffff, (ub - v) & tmask, (int64_t)(ub - v) < 0);
+		// debug("u(%lu), {v - vlb}(%lu), uub(%lu), vub(%lu), test(%lu), term(%lu)", p->u, v & 0xffffffff, ub>>32, ub & 0xffffffff, (ub - v) & tmask, (int64_t)(ub - v) < 0);
 		cont = ub - v;
-		if((cont | v) & tmask) { debug("unchainable"); continue; }		/* skip if unchainable */
+		if((cont | v) & tmask) {		/* skip if unchainable */
+			// debug("unchainable");
+			continue;
+		}
 
 		/* chainable; test if the seed is nearer than the previous */
 		uint64_t const w = v + (v<<32);			/* 2,3: (u + v - vlb, v - vlb) */
-		debug("{u + v - vlb}(%lu), {v - vlb}(%lu)", w>>32, w & 0xffffffff);
-		if((ub - w) & tmask) { debug("further; terminate"); break; }			/* 4,5: further than previous */
+		// debug("{u + v - vlb}(%lu), {v - vlb}(%lu)", w>>32, w & 0xffffffff);
+		if((ub - w) & tmask) {			/* 4,5: further than previous */
+			// debug("further; terminate");
+			break;
+		}
 
 		/* nearer seed found */
 		ub = w;			/* update bounds */
@@ -2260,8 +2271,7 @@ tm_seed_t *tm_chain_find_nearest(uint64_t ruv, tm_seed_t *p, tm_seed_t *t, uint6
 	uint64_t const umask = 0xffffffff00000000;	/* extract upper */
 	uint64_t const uv = ruv;					/* (ulb, vlb) */
 	uint64_t lb = (uv & ~umask);				/* (0, vlb) */
-
-	debug("ulb(%lu), vlb(%lu)", uv>>32, lb);
+	// debug("ulb(%lu), vlb(%lu)", uv>>32, lb);
 
 	/* find first chainable seed */
 	tm_seed_t *n = tm_chain_find_first(ruv, p, t, lb, window);
@@ -2287,7 +2297,7 @@ size_t tm_chain_record(v2i32_t root, v2i32_t tail, v2i32_t scnt, v2i32_t min_scn
 	_storeu_v4i32(q, chain);
 
 	/* forward if scnt > min_scnt */
-	v2i32_t const inc = _set_v2i32(1);		/* kept on register */
+	v2i32_t const inc = _seta_v2i32(0, 1);		/* kept on register */
 	v2i32_t const fwd = _and_v2i32(inc, _gt_v2i32(scnt, min_scnt));
 	return(_ext_v2i32(fwd, 0));				/* movq */
 }
@@ -2304,7 +2314,7 @@ size_t tm_chain_seed(tm_idx_profile_t const *profile, tm_seed_t *seed, size_t sc
 	uint64_t const chained = 0x80000000;				/* offset */
 	uint64_t const window = profile->chain.window.all;	/* window sizes */
 
-	v2i32_t const inc = _set_v2i32(1);
+	v2i32_t const inc = _seta_v2i32(0, 1);
 	v2i32_t const min_cnt = _load_v2i32(&profile->chain.min_scnt);
 
 	/* src pointers */
@@ -2320,7 +2330,7 @@ size_t tm_chain_seed(tm_idx_profile_t const *profile, tm_seed_t *seed, size_t sc
 
 		/* root found; keep seed on xmm register */
 		v2i32_t const root = _loadu_v2i32(p);	/* we expect this won't be spilled */
-		v2i32_t cnt = _zero_v2i32();
+		v2i32_t cnt = _seta_v2i32(0, 1);
 
 		/* iteratively link nearest seed */
 		tm_seed_t *s = p;
@@ -2337,10 +2347,13 @@ size_t tm_chain_seed(tm_idx_profile_t const *profile, tm_seed_t *seed, size_t sc
 			s->u += chained;		/* mark chained */
 		}
 
+/*
 		debugblock({
-			debug("%r ---> %r, cnt(%u)", tm_seed_to_str, p, tm_seed_to_str, s, _ext_v2i32(cnt, 0));
+			if(_ext_v2i32(cnt, 0) > _ext_v2i32(min_cnt, 0)) {
+				debug("%r ---> %r, cnt(%u)", tm_seed_to_str, p, tm_seed_to_str, s, _ext_v2i32(cnt, 0));
+			}
 		});
-
+*/
 		q += tm_chain_record(root, _loadu_v2i32(s), cnt, min_cnt, q);
 	}
 
@@ -2513,16 +2526,19 @@ size_t tm_seed_and_sort(tm_ref_sketch_t const *ref, uint8_t const *query, size_t
 	}
 
 	/* sort seeds by u-coordinates for chaining */
+/*
 	fprintf(stderr, "raw:\n");
 	for(size_t i = 0; i < kv_cnt(*seed); i++) {
 		fprintf(stderr, "(%u, %u)\n", kv_ptr(*seed)[i].v, kv_ptr(*seed)[i].u);
 	}
+*/
 	radix_sort_seed(kv_ptr(*seed), kv_cnt(*seed));
-
+/*
 	fprintf(stderr, "sorted:\n");
 	for(size_t i = 0; i < kv_cnt(*seed); i++) {
 		fprintf(stderr, "(%u, %u)\n", kv_ptr(*seed)[i].v, kv_ptr(*seed)[i].u);
 	}
+*/
 	return(kv_cnt(*seed));
 }
 
@@ -3051,7 +3067,7 @@ static void tm_conf_profile(opt_t *opt, tm_conf_t *conf, char const *arg) {
 /* indexing */
 static void tm_conf_kmer(opt_t *opt, tm_conf_t *conf, char const *arg) {
 	size_t k = mm_atoi(arg, 0);
-	oassert(opt, k >= 3 && k <= 10, "k must be inside [3,10].");
+	oassert(opt, k >= 3 && k <= 7, "k must be inside [3,7].");
 
 	conf->fallback.kmer = k;
 }
@@ -3060,6 +3076,12 @@ static void tm_conf_chain(opt_t *opt, tm_conf_t *conf, char const *arg) {
 	oassert(opt, w >= 1 && w <= 64, "w must be inside [2,64].");
 
 	conf->fallback.window = w;
+}
+static void tm_conf_ccnt(opt_t *opt, tm_conf_t *conf, char const *arg) {
+	size_t c = mm_atoi(arg, 0);
+	oassert(opt, c >= 1, "c must be inside greater than zero.");
+
+	conf->fallback.min_scnt = c;
 }
 static void tm_conf_match(opt_t *opt, tm_conf_t *conf, char const *arg) {
 	int64_t m = mm_atoi(arg, 0);
@@ -3158,6 +3180,7 @@ uint64_t tm_conf_init_static(tm_conf_t *conf, char const *const *argv, FILE *fp)
 			/* fallback parameters */
 			['k'] = { OPT_REQ,  _c(tm_conf_kmer) },
 			['w'] = { OPT_REQ,  _c(tm_conf_chain) },
+			['c'] = { OPT_REQ,  _c(tm_conf_ccnt) },
 			['a'] = { OPT_REQ,  _c(tm_conf_match) },
 			['b'] = { OPT_REQ,  _c(tm_conf_mismatch) },
 			['p'] = { OPT_REQ,  _c(tm_conf_gap_open) },
@@ -3579,7 +3602,10 @@ int main(int argc, char *argv[])
 	/* instanciate option object */
 	logger_init();
 	tm_conf_t conf;
-	tm_conf_init_static(&conf, (char const *const *)argv, stderr);
+	if(tm_conf_init_static(&conf, (char const *const *)argv, stderr)) {
+		error("error in parsing arguments. abort.");
+		goto _main_final;
+	}
 
 	/* always print version */
 	tm_conf_outfp_t out = tm_conf_get_outfp(&conf);
