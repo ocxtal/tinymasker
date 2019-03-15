@@ -17,9 +17,10 @@ TARGET = tinymasker
 
 # compiler flags
 OFLAGS = -O3
-WFLAGS = -Wall -Wextra -Wno-unused-variable -Wno-unused-function -Wno-constant-conversion -Wno-implicit-fallthrough
+WFLAGS = -Wall -Wextra
+NWFLAGS = $(shell bash -c "if [[ $(CC) = icc* ]]; then echo '-Wno-unused-function'; else echo '-Wno-unused-function -Wno-unused-label -Wno-constant-conversion -Wno-implicit-fallthrough -Wno-missing-field-initializers'; fi")
 LDFLAGS = -lpthread $(UTIL_LDFLAGS)
-CFLAGS = -std=c99 -march=native $(UTIL_CFLAGS) $(WFLAGS)
+CFLAGS = -std=c99 -march=native $(UTIL_CFLAGS) $(WFLAGS) $(NWFLAGS)
 GFLAGS = -g -DDEBUG # -fsanitize=address -fsanitize=leak
 
 
@@ -41,6 +42,7 @@ VERSION = $(shell $(GIT) describe --tags || grep "define TM_VERSION" $(SRCDIR)/t
 
 # rules
 all: $(TARGET)
+	echo $(CFLAGS)
 
 $(TARGET): $(OBJS_INTL)
 	$(CC) -o $(TARGET) $(OFLAGS) $(CFLAGS) $(OBJS_INTL) $(LDFLAGS)
