@@ -19,7 +19,7 @@ TARGET = tinymasker
 OFLAGS = -O3
 WFLAGS = -Wall -Wextra -Wno-unused-variable -Wno-unused-function -Wno-constant-conversion -Wno-implicit-fallthrough
 LDFLAGS = -lpthread $(UTIL_LDFLAGS)
-CFLAGS = -std=c99 -march=native $(WFLAGS)
+CFLAGS = -std=c99 -march=native $(UTIL_CFLAGS) $(WFLAGS)
 GFLAGS = -g -DDEBUG # -fsanitize=address -fsanitize=leak
 
 
