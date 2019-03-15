@@ -1822,7 +1822,7 @@ typedef struct {
  * r  = (2 * u + v) / 3
  */
 typedef struct {
-	uint32_t u, v;
+	uint32_t v, u;
 } tm_seed_t;
 _static_assert(sizeof(tm_seed_t) == 8);
 typedef struct { tm_seed_t *a; size_t n, m; } tm_seed_v;
@@ -1867,7 +1867,7 @@ typedef struct {
 
 	/* reference and query side spans */
 	struct {
-		uint16_t u, v;
+		uint16_t v, u;
 	} span;
 
 	/* attributes */
@@ -2046,17 +2046,17 @@ size_t tm_expand_seed(tm_ref_state_t s, v4i32_t uofs, v4i32_t vofs, tm_seed_t *q
 		v4i32_t const u = _sub_v4i32(uofs, w);
 		v4i32_t const v = _add_v4i32(vofs, _add_v4i32(w, w));
 
-		/* save */
+		/* save: u in upper and v in lower */
 		_storeu_v4i32(&q[i],     _lo_v4i32(u, v));
 		_storeu_v4i32(&q[i + 2], _hi_v4i32(u, v));
 	}
 
-/*
+
 	fprintf(stderr, "bin(%p)\n", s.bin);
 	for(size_t i = 0; i < m.cnt; i++) {
 		fprintf(stderr, "(%u, %u)\n", q[i].v, q[i].u);
 	}
-*/
+
 	return(m.cnt);
 }
 
@@ -2083,7 +2083,7 @@ size_t tm_collect_seed(tm_ref_sketch_t const *ref, uint8_t const *query, size_t 
 		tm_ref_next_t n = tm_ref_match_next(s, *p);
 		s = n.state;
 
-/*
+
 		debug("(%r, %u) -- (%u) -> (%r, %u), link(%u, %u, %d), prefix(%u), cnt(%zu), (%u, %u, %u)",
 			tm_kmer_to_str, &s.bin->kmer, _ptr_diff(s.bin, ref), *p,
 			tm_kmer_to_str, &n.state.bin->kmer, _ptr_diff(n.state.bin, ref),
@@ -2096,7 +2096,7 @@ size_t tm_collect_seed(tm_ref_sketch_t const *ref, uint8_t const *query, size_t 
 			0xfff & (uint16_t)_mm_extract_epi16(n.squash.v.v1, 1),
 			0xfff & (uint16_t)_mm_extract_epi16(n.squash.v.v1, 2)
 		);
-*/
+
 
 		/* skip current bin if not matching */
 		if(!s.unmatching) {
@@ -2123,7 +2123,7 @@ tm_triplet_t tm_load_sqiv(tm_sqiv_t const *sqiv, size_t i, uint64_t mask)
 	tm_sqiv_t const *p = &sqiv[i];
 	uint32_t sd = _loadu_u32(&p->dst);
 
-	if((i & mask) == mask) { sd = 0; }
+	if((i & mask) == mask) { debug("leave, i(%zu)", i); sd = 0; }
 
 	/* determine source and destination indices */
 	return((tm_triplet_t){
@@ -2145,16 +2145,27 @@ size_t tm_squash_seed(tm_sqiv_t const *sqiv, size_t icnt, size_t intv, tm_seed_v
 		tm_triplet_t sq = tm_load_sqiv(sqiv, i, mask);
 
 		/* former half */
-		for(size_t i = 0; i < sq.d; i += 4) {
-			v32i8_t const v = _loadu_v32i8(&sp[i]);
-			_storeu_v32i8(&dp[i], v);
+/*
+		for(size_t j = 0; j < sq.d; j += 4) {
+			v32i8_t const v = _loadu_v32i8(&sp[j]);
+			_storeu_v32i8(&dp[j], v);
+		}
+*/
+		for(size_t j = 0; j < sq.d; j++) {
+			dp[j] = sp[j];
+			debug("j(%zu), v(%u), u(%u)")
 		}
 
 		/* latter half */
 		dp -= sq.s - sq.d;
-		for(size_t i = sq.s; i < sq.c; i += 4) {
-			v32i8_t const v = _loadu_v32i8(&sp[i]);
-			_storeu_v32i8(&dp[i], v);
+/*
+		for(size_t j = sq.s; j < sq.c; j += 4) {
+			v32i8_t const v = _loadu_v32i8(&sp[j]);
+			_storeu_v32i8(&dp[j], v);
+		}
+*/
+		for(size_t j = sq.s; j < sq.c; j++) {
+			dp[j] = sp[j];
 		}
 
 		/* forward pointers */
@@ -2171,19 +2182,22 @@ size_t tm_squash_seed(tm_sqiv_t const *sqiv, size_t icnt, size_t intv, tm_seed_v
 static _force_inline
 int64_t tm_chain_test_ptr(tm_seed_t const *p, tm_seed_t const *t)
 {
+	debug("check tail, test(%ld)", (int64_t)((ptrdiff_t)(t - p - 1)));
 	return((int64_t)((ptrdiff_t)(t - p - 1)));
 }
 
 static _force_inline
-tm_seed_t *tm_chain_find_first(tm_seed_t *p, tm_seed_t *t, uint64_t lb, uint64_t window)
+tm_seed_t *tm_chain_find_first(uint64_t ruv, tm_seed_t *p, tm_seed_t *t, uint64_t lb, uint64_t window)
 {
 	/* constants */
 	uint64_t const umask = 0xffffffff00000000;	/* extract upper */
 	uint64_t const tmask = 0x8000000080000000;	/* extract two sign bit pair */
 
 	/* load bounds */
-	uint64_t const uv = _loadu_u64(p);			/* (ulb, vlb) */
+	uint64_t const uv = ruv;					/* (ulb, vlb) */
 	uint64_t ub = (uv & umask) + window;		/* (uub, vub - vlb) */
+
+	debug("uub(%lu), vwlen(%lu)", ub>>32, ub & 0xffffffff);
 
 	int64_t cont = 0;		/* continuous flag */
 	while(1) {
@@ -2191,7 +2205,11 @@ tm_seed_t *tm_chain_find_first(tm_seed_t *p, tm_seed_t *t, uint64_t lb, uint64_t
 		if((cont | tm_chain_test_ptr(++p, t)) < 0) { return(NULL); }
 
 		uint64_t const v = _loadu_u64(p) - lb;	/* 1: (u, v - vlb) for inclusion test */
-		if(((ub - v) & tmask) == 0) { break; }	/* 2,3: break if chainable (first chainable seed found) */
+		debug("test inclusion, pv(%lu), pu(%lu), tv(%lu), tu(%lu), u(%lu), {v - vlb}(%lu), test(%lu)", p->v, p->u, t->v, t->u, v>>32, v & 0xffffffff, (ub - v) & tmask);
+		if(((ub - v) & tmask) == 0) {			/* 2,3: break if chainable (first chainable seed found) */
+			debug("chainable");
+			break;
+		}
 
 		/* unchainable; test if out of uub */
 		cont = ub - v;		/* save diff for testing MSb */
@@ -2208,6 +2226,7 @@ tm_seed_t *tm_chain_find_alt(tm_seed_t *p, tm_seed_t *t, uint64_t lb)
 	/* calculate bounds */
 	uint64_t rv = _loadu_u64(p) - lb;
 	uint64_t ub = rv + (rv<<32);
+	debug("u(%lu), {v - vlb}(%lu), uub(%lu), vub(%lu)", rv>>32, rv & 0xffffffff, ub>>32, ub & 0xffffffff);
 
 	/* keep nearest seed */
 	tm_seed_t *n = p;
@@ -2215,12 +2234,14 @@ tm_seed_t *tm_chain_find_alt(tm_seed_t *p, tm_seed_t *t, uint64_t lb)
 	int64_t cont = 0;
 	while((cont | tm_chain_test_ptr(++p, t)) >= 0) {
 		uint64_t const v = _loadu_u64(p) - lb;	/* 1: (u, v - vlb) for inclusion test */
+		debug("u(%lu), {v - vlb}(%lu), uub(%lu), vub(%lu), test(%lu), term(%lu)", v>>32, v & 0xffffffff, ub>>32, ub & 0xffffffff, (ub - v) & tmask, (int64_t)(ub - v) < 0);
 		cont = ub - v;
-		if((ub - v) & tmask) { continue; }		/* skip if unchainable */
+		if((ub - v) & tmask) { debug("unchainable"); continue; }		/* skip if unchainable */
 
 		/* chainable; test if the seed is nearer than the previous */
 		uint64_t const w = v + (v<<32);			/* 2,3: (u + v - vlb, v - vlb) */
-		if((ub - w) & tmask) { break; }			/* 4,5: further than previous */
+		debug("{u + v - vlb}(%lu), {v - vlb}(%lu)", w>>32, w & 0xffffffff);
+		if((ub - w) & tmask) { debug("further; terminate"); break; }			/* 4,5: further than previous */
 
 		/* nearer seed found */
 		ub = w;			/* update bounds */
@@ -2230,15 +2251,17 @@ tm_seed_t *tm_chain_find_alt(tm_seed_t *p, tm_seed_t *t, uint64_t lb)
 }
 
 static _force_inline
-tm_seed_t *tm_chain_find_nearest(tm_seed_t *p, tm_seed_t *t, uint64_t window)
+tm_seed_t *tm_chain_find_nearest(uint64_t ruv, tm_seed_t *p, tm_seed_t *t, uint64_t window)
 {
 	/* load root positions */
 	uint64_t const umask = 0xffffffff00000000;	/* extract upper */
-	uint64_t const uv = _loadu_u64(p);			/* (ulb, vlb) */
+	uint64_t const uv = ruv;					/* (ulb, vlb) */
 	uint64_t lb = (uv & ~umask);				/* (0, vlb) */
 
+	debug("ulb(%lu), vlb(%lu)", uv>>32, lb);
+
 	/* find first chainable seed */
-	tm_seed_t *n = tm_chain_find_first(p, t, lb, window);
+	tm_seed_t *n = tm_chain_find_first(ruv, p, t, lb, window);
 	if(n == NULL) { return(NULL); }				/* we expect control paths are kept isolated */
 
 	/* then inspect alternative chainable seeds */
@@ -2279,7 +2302,7 @@ size_t tm_chain_seed(tm_idx_profile_t const *profile, tm_seed_t *seed, size_t sc
 	uint64_t const window = profile->chain.window.all;	/* window sizes */
 
 	v2i32_t const inc = _set_v2i32(1);
-	v2i32_t const min_scnt = _load_v2i32(&profile->chain.min_scnt);
+	v2i32_t const min_cnt = _load_v2i32(&profile->chain.min_scnt);
 
 	/* src pointers */
 	tm_seed_t *p = seed - 1, *t = &seed[scnt];
@@ -2294,26 +2317,28 @@ size_t tm_chain_seed(tm_idx_profile_t const *profile, tm_seed_t *seed, size_t sc
 
 		/* root found; keep seed on xmm register */
 		v2i32_t const root = _loadu_v2i32(p);	/* we expect this won't be spilled */
-		v2i32_t scnt = _zero_v2i32();
+		v2i32_t cnt = _zero_v2i32();
 
 		/* iteratively link nearest seed */
 		tm_seed_t *s = p;
+		uint64_t ruv = _loadu_u64(s);
 		while(1) {
-			tm_seed_t *n = tm_chain_find_nearest(s, t, window);
+			tm_seed_t *n = tm_chain_find_nearest(ruv, s, t, window);
 			if(n == NULL) { break; }
 
 			/* increment seed count */
-			scnt = _add_v2i32(scnt, inc);
+			cnt = _add_v2i32(cnt, inc);
 
-			n->u += chained;	/* mark chained */
-			s = n;				/* save last chained seed */
+			s = n;					/* save last chained seed */
+			ruv = _loadu_u64(s);	/* before flag set */
+			s->u += chained;		/* mark chained */
 		}
 
 		debugblock({
-			debug("%r ---> %r, scnt(%u)", tm_seed_to_str, p, tm_seed_to_str, s, _ext_v2i32(scnt, 0));
+			debug("%r ---> %r, cnt(%u)", tm_seed_to_str, p, tm_seed_to_str, s, _ext_v2i32(cnt, 0));
 		});
 
-		q += tm_chain_record(root, _loadu_v2i32(s), scnt, min_scnt, q);
+		q += tm_chain_record(root, _loadu_v2i32(s), cnt, min_cnt, q);
 	}
 
 	/* update chain count */
@@ -2485,12 +2510,16 @@ size_t tm_seed_and_sort(tm_ref_sketch_t const *ref, uint8_t const *query, size_t
 	}
 
 	/* sort seeds by u-coordinates for chaining */
-	radix_sort_seed(kv_ptr(*seed), kv_cnt(*seed));
-/*
+	fprintf(stderr, "raw:\n");
 	for(size_t i = 0; i < kv_cnt(*seed); i++) {
 		fprintf(stderr, "(%u, %u)\n", kv_ptr(*seed)[i].v, kv_ptr(*seed)[i].u);
 	}
-*/
+	radix_sort_seed(kv_ptr(*seed), kv_cnt(*seed));
+
+	fprintf(stderr, "sorted:\n");
+	for(size_t i = 0; i < kv_cnt(*seed); i++) {
+		fprintf(stderr, "(%u, %u)\n", kv_ptr(*seed)[i].v, kv_ptr(*seed)[i].u);
+	}
 	return(kv_cnt(*seed));
 }
 
