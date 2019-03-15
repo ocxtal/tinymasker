@@ -70,7 +70,8 @@ typedef struct rbread_s {
 	{ \
 		if(rb->s._ctx.avail_in < sizeof(uint64_t) && rb->eof == 0) { \
 			/* copy to the head then fill */ \
-			_storeu_u64(rb->ibuf, _loadu_u64(rb->s._ctx.next_in)); \
+			uint64_t const _remaining = _loadu_u64(rb->s._ctx.next_in); \
+			_storeu_u64(rb->ibuf, _remaining); \
 			rb->s._ctx.next_in = (_type_t *)&rb->ibuf[rb->s._ctx.avail_in]; \
 			rb->s._ctx.avail_in += fread((void *)rb->s._ctx.next_in, sizeof(char), rb->bulk_size, rb->fp); \
 			if(feof(rb->fp)) { rb->eof = 1; } \

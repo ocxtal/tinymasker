@@ -260,10 +260,10 @@ void pt_init_static(pt_t *pt, uint32_t nth)
 }
 #define pt_init_size(_nth)		( sizeof(pt_t) + (_nth) * sizeof(pt_thread_t) )
 #define pt_init(_nth) ({ \
-	size_t nth = ((_nth) == 0) ? 1 : (_nth); \
-	pt_t *pt = calloc(1, pt_init_size(nth)); \
-	pt_init_static(pt, nth); \
-	pt; \
+	size_t nth_fixed = ((_nth) == 0) ? 1 : (_nth); \
+	pt_t *_pt = calloc(1, pt_init_size(nth_fixed)); \
+	pt_init_static(_pt, nth_fixed); \
+	_pt; \
 })
 
 /**
