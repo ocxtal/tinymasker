@@ -42,7 +42,6 @@ VERSION = $(shell $(GIT) describe --tags || grep "define TM_VERSION" $(SRCDIR)/t
 
 # rules
 all: $(TARGET)
-	echo $(CFLAGS)
 
 $(TARGET): $(OBJS_INTL)
 	$(CC) -o $(TARGET) $(OFLAGS) $(CFLAGS) $(OBJS_INTL) $(LDFLAGS)
