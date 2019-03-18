@@ -167,9 +167,6 @@ void bseq_init_work(bseq_work_t *w, bseq_file_t *fp, bseq_metam_v const *seq, ui
 	w->cvl = _from_v16i8_v32i8(_loadu_v16i8(&fp->conv[0]));
 	w->cvh = _from_v16i8_v32i8(_loadu_v16i8(&fp->conv[16]));
 
-	_print_v32i8(w->cvl);
-	_print_v32i8(w->cvh);
-
 	w->dv = _set_v32i8(fp->delim[1]);
 	w->sv = _set_v32i8(' ');
 	w->tv = _set_v32i8('\t');
@@ -297,13 +294,13 @@ void bseq_fixup_name(bseq_work_t *w, bseq_file_t *fp)
 	/* fill terminators */
 	w->s->nlen = q - p;
 	w->s->hlen = (t + 1) - p;				/* might have further spaces at the head of comment */
-	debug("nlen(%u), hlen(%u)", w->s->nlen, w->s->hlen);
+	// debug("nlen(%u), hlen(%u)", w->s->nlen, w->s->hlen);
 
 	w->q[q] = '\0';
 	w->q[t] = '\0';							/* string terminator; keep q[n] initialized (invariant condition) */
 	w->n = t;
 
-	debug("name(%lu, %s), comment(%lu, %s), n(%lu)", bseq_name_len(w->s), &w->q[p], bseq_comment_len(w->s), &w->q[q + 1], w->n);
+	// debug("name(%lu, %s), comment(%lu, %s), n(%lu)", bseq_name_len(w->s), &w->q[p], bseq_comment_len(w->s), &w->q[q + 1], w->n);
 	return;
 }
 
@@ -313,7 +310,7 @@ void bseq_fixup_seq(bseq_work_t *w, bseq_file_t *fp)
 	w->s->seq   = (uint8_t *)w->n - fp->acc;
 	w->s->slen  = fp->acc;
 	w->s->u.ptr = NULL;
-	debug("seq(%p), slen(%lu)", w->s->seq, w->s->slen);
+	// debug("seq(%p), slen(%lu)", w->s->seq, w->s->slen);
 	return;
 }
 
