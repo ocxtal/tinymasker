@@ -1,4 +1,28 @@
 #define DEBUG_KMER
+#define _printu_v16i8(a) { \
+	uint8_t _buf[16]; \
+	_storeu_v16i8(_buf, a); \
+	debug("(v16i8_t) %s(%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d)", \
+		#a, \
+		_buf[15] - 128, \
+		_buf[14] - 128, \
+		_buf[13] - 128, \
+		_buf[12] - 128, \
+		_buf[11] - 128, \
+		_buf[10] - 128, \
+		_buf[9] - 128, \
+		_buf[8] - 128, \
+		_buf[7] - 128, \
+		_buf[6] - 128, \
+		_buf[5] - 128, \
+		_buf[4] - 128, \
+		_buf[3] - 128, \
+		_buf[2] - 128, \
+		_buf[1] - 128, \
+		_buf[0] - 128); \
+}
+
+
 /**
  * @file tinymasker.c
  * @brief fast repeat masking tool
@@ -728,19 +752,19 @@ typedef struct {
 			uint64_t all;
 		} window;
 		uint32_t min_scnt;
-		uint32_t reserved;
+		uint32_t squash_intv;
 	} chain;
 
 	/* filtering */
 	struct {
-		uint8_t score_matrix[16];		/* match-mismatch score matrix */
-		struct {
-			uint8_t cv[16], pv[16], gv[16];	/* p = 0, p = 1, gap */
-		} init;
+		uint8_t score_matrix[16];	/* match-mismatch score matrix */
+		uint8_t gap[16];			/* gap */
+		uint8_t init[16];			/* p = 0 */
 
 		/* extension test if < test_cnt, do inward extension if longer than uspan_thresh */
-		uint32_t test_cnt;
-		int32_t min_score;		/* discard if sum of extension scores is smaller than min_score */
+		uint16_t test_cnt;
+		uint16_t uspan_thresh;
+		int32_t min_score;			/* discard if sum of extension scores is smaller than min_score */
 	} filter;
 
 	/* extension */
@@ -950,7 +974,7 @@ void tm_idx_score_foreach(tm_idx_profile_t *profile, void *opaque, tm_idx_score_
 {
 	for(size_t i = 0; i < DZ_MAT_SIZE; i++) {
 		for(size_t j = 0; j < DZ_MAT_SIZE; j++) {
-			 fp(opaque, &profile->extend.score_matrix[i * DZ_MAT_SIZE + j], i, j);
+			fp(opaque, &profile->extend.score_matrix[i * DZ_MAT_SIZE + j], i, j);
 		}
 	}
 	return;
@@ -1014,6 +1038,7 @@ void tm_idx_override_default(tm_idx_profile_t *profile, tm_idx_conf_t const *con
 		int64_t const m = conf->match;
 		int64_t const x = -((int64_t)conf->mismatch);
 
+		debug("m(%ld), x(%ld)", m, x);
 		tm_idx_fill_score(profile, m, x);
 	}
 
@@ -1065,38 +1090,61 @@ void tm_idx_calc_filter_score(tm_idx_profile_t *profile)
 	);
 
 	/* take average */
-	int64_t const mave = c[0].acc / c[0].cnt;
+	int64_t const mave = (int64_t)c[0].acc / (int64_t)c[0].cnt;
 	int64_t const m = (c[0].min == mave
 		? c[0].min
 		: MAX2(1, mave * 3 / 4)
 	);
+	debug("(%ld, %ld, %ld, %zu)", c[0].acc, c[0].max, c[0].min, c[0].cnt);
 
-	int64_t const xave = c[1].acc / c[1].cnt;
-	int64_t const x = (c[1].min == mave
-		? c[1].min
+	int64_t const xave = (int64_t)c[1].acc / (int64_t)c[1].cnt;
+	int64_t const x = (c[1].max == xave
+		? c[1].max
 		: MIN2(-1, xave * 3 / 4)
 	);
+	debug("(%ld, %ld, %ld, %zu)", c[1].acc, c[1].max, c[1].min, c[1].cnt);
+
+	debug("mave(%ld), m(%ld), xave(%ld), x(%ld)", mave, m, xave, x);
 
 	for(size_t i = 0; i < 16; i++) {
-		profile->filter.score_matrix[i] = (i == 0) ? x : m;
+		profile->filter.score_matrix[i] = (i == 0) ? x : m;		/* signed */
 	}
+	return;
+}
+
+static _force_inline
+void tm_idx_calc_filter_gap(tm_idx_profile_t *profile)
+{
+	int32_t const ge = (profile->extend.gev + profile->extend.geh) / 2;
+	v16i8_t const gv = _set_v16i8(-ge);			/* signed; negated without offset */
+	_storeu_v16i8(profile->filter.gap, gv);
+
+	debug("ge(%d)", (int8_t)ge);
+	_print_v16i8(gv);
 	return;
 }
 
 static _force_inline
 void tm_idx_calc_filter_ivec(tm_idx_profile_t *profile)
 {
-	/* FIXME; initial vectors and gap vector */
-	_unused(profile);
-
+	int32_t const s = 2 * profile->filter.gap[1] - profile->filter.score_matrix[1];
+	for(size_t i = 0; i < 8; i++) {
+		profile->filter.init[8 + i] = 128 + s *  i;
+		profile->filter.init[7 - i] = 128 + s * (i + 1);
+	}
 	return;
 }
 
 static _force_inline
 void tm_idx_calc_filter_thresh(tm_idx_profile_t *profile)
 {
-	int64_t min_score = profile->extend.min_score / 4;
+	uint32_t const test_cnt = profile->chain.min_scnt * 3;
+	int32_t const min_score = profile->extend.min_score / 4;
+	uint32_t const uspan_thresh = profile->chain.window.sep.u * 2;
+
+	profile->filter.test_cnt  = test_cnt;
 	profile->filter.min_score = MAX2(0, min_score);
+	profile->filter.uspan_thresh = uspan_thresh;
 	return;
 }
 
@@ -1104,6 +1152,7 @@ static _force_inline
 void tm_idx_calc_filter_params(tm_idx_profile_t *profile)
 {
 	tm_idx_calc_filter_score(profile);
+	tm_idx_calc_filter_gap(profile);
 	tm_idx_calc_filter_ivec(profile);
 	tm_idx_calc_filter_thresh(profile);
 	return;
@@ -1119,6 +1168,12 @@ void *tm_idx_malloc(void *unused, size_t size)
 static _force_inline
 void tm_idx_finalize_profile(tm_idx_profile_t *profile)
 {
+	/* calc squash interval */
+	uint32_t const u = profile->chain.window.sep.u;
+	profile->chain.squash_intv = 0x40000000>>_lzcnt_u32(u);		/* divide by 2 */
+	debug("wu(%u), intv(%u)", u, profile->chain.squash_intv);
+
+	/* instanciate dz */
 	dz_allocator_t alloc = {
 		.ctx = NULL,
 		.fp = tm_idx_malloc
@@ -1815,15 +1870,16 @@ typedef struct {
 	uint32_t r, q;
 } tm_pair_t;
 
-/*
- * seed
- * u = 2 * r  - q'
- * v = 2 * q' - r
- *     where q' = q + 0x10000 for forward and 0x20010000 - q for reverse
- *
- * q' = (2 * v + u) / 3
- * r  = (2 * u + v) / 3
- */
+static _force_inline
+tm_pair_t tm_add_pair(tm_pair_t a, tm_pair_t b)
+{
+	return((tm_pair_t){
+		.r = a.r + b.r,
+		.q = a.q + b.q
+	});
+}
+
+/* seed; see comment below for the definition */
 typedef struct {
 	uint32_t v, u;
 } tm_seed_t;
@@ -1833,45 +1889,81 @@ typedef struct { tm_seed_t *a; size_t n, m; } tm_seed_v;
 #define tm_seed_upos(x)			( (x).u )
 KRADIX_SORT_INIT(seed, tm_seed_t, tm_seed_upos, 4);
 
+
 static _force_inline
-tm_pair_t tm_seed_to_pos(tm_seed_t const *p)
+tm_pair_t tm_seed_decode(tm_seed_t const *p)
 {
 	/* remove chained flag */
-	uint32_t const u = p->u & 0x7fffffff, v = p->v;
+	uint32_t const u = p->u, v = p->v;
 
-	/* convert to r-q corrdinates */
-	uint32_t const r = (2 * u + v) / 3U;
-	uint32_t const q = (2 * v + u) / 3U;
+	/*
+	 * convert to r-q corrdinates;
+	 * u = 2 * r - q + 0x10000 + d
+	 * v = 2 * q - r - 0x20000 - 2 * d
+	 *     where d = 0 for forward and 0x40000000 for reverse
+	 *
+	 * 2 * u + v = 3 * r
+	 * 2 * v + u = 3 * (q - 0x10000 - d)
+	 */
+	uint32_t const r  = (2 * u + v) / 3U;
+	uint32_t const qt = (2 * v + u) & 0x7fffffff, q = (qt + 0x80030000) / 3U;
+	// debug("r(%x), qt(%x), q(%x)", r, qt, q);
 
 	/* subtract offset */
 	return((tm_pair_t){
 		.r = r,
-		.q = q - 0x10000	/* leaves direction flag at bit 31 */
+		.q = q	/* leaves direction flag at bit 30 */
 	});
+}
+
+static _force_inline
+uint64_t tm_seed_dir(tm_seed_t const *s)
+{
+	return(1 - (s->v>>31));
 }
 
 static char *tm_seed_to_str(tm_seed_t const *s)
 {
-	tm_pair_t p = tm_seed_to_pos(s);
-	return(xbprintf("seed(%x, %x), pos(%x, %x, %x)", s->v, s->u, p.q>>30, p.q & 0x3fffffff, p.r));
+	tm_pair_t p = tm_seed_decode(s);
+	return(xbprintf("seed(%x, %x), pos(%x, %u, %u)", s->v, s->u, p.q>>30, p.q & 0x3fffffff, p.r));
 }
 
 
 typedef struct {
-	uint16_t dst, src, cnt, unused;	/* upper 4bits must be cleared */
+	uint16_t dst, src, cnt, unused;	/* upper 4bits must be cleared before use (overlaps with plen) */
 } tm_sqiv_t;
 _static_assert(sizeof(tm_sqiv_t) == 8);
 typedef struct { tm_sqiv_t *a; size_t n, m; } tm_sqiv_v;
 
+
+
 /* chain */
+
+typedef struct {
+	uint16_t v, u;
+} tm_span_t;
+
+static _force_inline
+tm_pair_t tm_span_decode(tm_span_t const *s)
+{
+	uint32_t const u = s->u, v = s->v;
+
+	uint32_t const r = (2 * u + v) / 3U;
+	uint32_t const q = (2 * v + u) / 3U;
+
+	// debug("v(%x), u(%u), r(%u), q(%u)", v, u, r, q);
+	return((tm_pair_t){
+		.r = r,
+		.q = q
+	});
+}
+
 typedef struct {
 	/* base seed position; converted to u-v coordinate */
 	tm_seed_t pos;
 
 	/* reference and query side spans */
-	struct {
-		uint16_t v, u;
-	} span;
+	tm_span_t span;
 
 	/* attributes */
 	union {
@@ -1887,6 +1979,16 @@ typedef struct { tm_chain_t *a; size_t n, m; } tm_chain_v;
 
 #define tm_chain_attr(x)		( (x).attr.scnt )
 KRADIX_SORT_INIT(chain, tm_chain_t, tm_chain_attr, 4);
+
+
+static char *tm_chain_to_str(tm_chain_t const *c)
+{
+	tm_pair_t p = tm_seed_decode(&c->pos);
+	tm_pair_t s = tm_span_decode(&c->span);
+	uint32_t const q = p.q & 0x3fffffff, r = p.r;
+	return(xbprintf("seed(%x, %x), dir(%u), (%u, %u) -- (%u, %u) --> (%u, %u)", c->pos.v, c->pos.u, p.q>>30, q, r, s.q, s.r, q + s.q, r + s.r));
+}
+
 
 
 /* alignment result */
@@ -2031,7 +2133,7 @@ size_t tm_save_sqiv(tm_ref_squash_t sq, tm_sqiv_t *r)
 static _force_inline
 size_t tm_expand_seed(tm_ref_state_t s, v4i32_t uofs, v4i32_t vofs, tm_seed_t *q)
 {
-	v4i32_t const wmask = _set_v4i32(0x40007fff);		/* leave lower 15bits */
+	v4i32_t const wmask = _set_v4i32(0xc000ffff);		/* leave lower 15bits and direction flag */
 
 	tm_ref_match_t m = tm_ref_get_arr(s);
 	for(size_t i = 0; i < m.cnt; i += 4) {
@@ -2046,8 +2148,8 @@ size_t tm_expand_seed(tm_ref_state_t s, v4i32_t uofs, v4i32_t vofs, tm_seed_t *q
 		});
 		v4i32_t const w = _and_v4i32(z, wmask);			/* disjoin forward and reverse */
 
-		v4i32_t const u = _sub_v4i32(uofs, w);
-		v4i32_t const v = _add_v4i32(vofs, _add_v4i32(w, w));
+		v4i32_t const u = _sub_v4i32(uofs, w);					/* 2 * r - q + 0x10000 */
+		v4i32_t const v = _add_v4i32(vofs, _add_v4i32(w, w));	/* 2 * q - r - 0x20000 */
 
 		/* save: u in upper and v in lower */
 		_storeu_v4i32(&q[i],     _lo_v4i32(u, v));
@@ -2057,7 +2159,7 @@ size_t tm_expand_seed(tm_ref_state_t s, v4i32_t uofs, v4i32_t vofs, tm_seed_t *q
 /*
 	fprintf(stderr, "bin(%p)\n", s.bin);
 	for(size_t i = 0; i < m.cnt; i++) {
-		fprintf(stderr, "(%u, %u)\n", q[i].v, q[i].u);
+		fprintf(stderr, "(%x, %x)\n", q[i].v, q[i].u);
 	}
 */
 	return(m.cnt);
@@ -2068,7 +2170,7 @@ size_t tm_collect_seed(tm_ref_sketch_t const *ref, uint8_t const *query, size_t 
 {
 	/* load coordinate constants */
 	v4i32_t const uinc = _set_v4i32(2), vinc = _set_v4i32(-1);
-	v4i32_t uofs = _set_v4i32(0x20000), vofs = _set_v4i32(0x10000);
+	v4i32_t uofs = _set_v4i32(0x10000), vofs = _set_v4i32(-0x20000);
 
 	tm_seed_t *q = tm_seed_reserve(seed, kv_ptr(*seed));
 	tm_sqiv_t *r = tm_sqiv_reserve(sqiv, kv_ptr(*sqiv));
@@ -2140,7 +2242,7 @@ tm_triplet_t tm_load_sqiv(tm_sqiv_t const *sqiv, size_t i, uint64_t mask)
 }
 
 static _force_inline
-size_t tm_squash_seed(tm_sqiv_t const *sqiv, size_t icnt, size_t intv, tm_seed_v *seed)
+size_t tm_squash_seed(size_t intv, tm_sqiv_t const *sqiv, size_t icnt, tm_seed_v *seed)
 {
 	tm_seed_t *dp = kv_ptr(*seed);
 	tm_seed_t const *sp = dp;
@@ -2155,12 +2257,6 @@ size_t tm_squash_seed(tm_sqiv_t const *sqiv, size_t icnt, size_t intv, tm_seed_v
 			v32i8_t const v = _loadu_v32i8(&sp[j]);
 			_storeu_v32i8(&dp[j], v);
 		}
-/*
-		for(size_t j = 0; j < sq.d; j++) {
-			dp[j] = sp[j];
-			debug("i(%zu), j(%zu), v(%u), u(%u)", i, j, sp[j].v, sp[j].u);
-		}
-*/
 
 		/* latter half */
 		dp -= sq.s - sq.d;
@@ -2168,12 +2264,6 @@ size_t tm_squash_seed(tm_sqiv_t const *sqiv, size_t icnt, size_t intv, tm_seed_v
 			v32i8_t const v = _loadu_v32i8(&sp[j]);
 			_storeu_v32i8(&dp[j], v);
 		}
-/*
-		for(size_t j = sq.s; j < sq.c; j++) {
-			dp[j] = sp[j];
-			debug("i(%zu), j(%zu), v(%u), u(%u)", i, j, sp[j].v, sp[j].u);
-		}
-*/
 
 		/* forward pointers */
 		sp += sq.c;
@@ -2282,24 +2372,24 @@ tm_seed_t *tm_chain_find_nearest(uint64_t ruv, tm_seed_t *p, tm_seed_t *t, uint6
 }
 
 static _force_inline
-size_t tm_chain_record(v2i32_t root, v2i32_t tail, v2i32_t scnt, v2i32_t min_scnt, tm_chain_t *q)
+size_t tm_chain_record(v2i32_t root, v2i32_t tail, v2i32_t cnt, v2i32_t min_cnt, tm_chain_t *q)
 {
 	/* avoid use of general-purpose register to minimize spills */
 	v2i32_t const span = _sub_v2i32(tail, root);
 
 	/* FIXME: raw SSE operations */
 	v4i32_t const chain = ({
-		__m128i const x = _mm_shufflelo_epi16(span.v1, 0xd4);	/* (uint32_t [4]){ -, -, -, (vspan, uspan) } */
-		__m128i const y = _mm_blend_epi16(x, scnt.v1, 0x0c);	/* (uint32_t [4]){ -, -, scnt, (vspan, uspan) } */
-		__m128i const z = _mm_unpacklo_epi64(root.v1, y);		/* (uint32_t [4]){ scnt, (vspan, uspan), vpos, upos } */
+		__m128i const x = _mm_shufflelo_epi16(span.v1, 0xd8);	/* (uint32_t [4]){ -, -, -, (uspan, vspan) } */
+		__m128i const y = _mm_unpacklo_epi32(x, cnt.v1);		/* (uint32_t [4]){ -, -, cnt, (uspan, vspan) } */
+		__m128i const z = _mm_unpacklo_epi64(root.v1, y);		/* (uint32_t [4]){ cnt, (uspan, vspan), upos, vpos } */
 		((v4i32_t){ .v1 = z });
 	});
 	_storeu_v4i32(q, chain);
 
-	/* forward if scnt > min_scnt */
-	v2i32_t const inc = _seta_v2i32(0, 1);		/* kept on register */
-	v2i32_t const fwd = _and_v2i32(inc, _gt_v2i32(scnt, min_scnt));
-	return(_ext_v2i32(fwd, 0));				/* movq */
+	/* forward if cnt > min_cnt */
+	v2i32_t const fv = _gt_v2i32(min_cnt, cnt);
+	uint32_t const fwd = _ext_v2i32(fv, 0);
+	return((uint32_t)(1 + fwd));
 }
 
 static _force_inline
@@ -2322,10 +2412,12 @@ size_t tm_chain_seed(tm_idx_profile_t const *profile, tm_seed_t *seed, size_t sc
 
 	/* reserve mem for chain */
 	tm_chain_t *q = kv_reserve(tm_chain_t, *chain, kv_cnt(*chain) + scnt);
+	// debug("scnt(%zu)", scnt);
 
 	/* for each seed */
 	while(++p < t) {
 		/* skip chained seed to find next root */
+		// debug("u(%u), chained(%lu)", p->u, p->u >= chained);
 		if(p->u >= chained) { continue; }
 
 		/* root found; keep seed on xmm register */
@@ -2347,14 +2439,15 @@ size_t tm_chain_seed(tm_idx_profile_t const *profile, tm_seed_t *seed, size_t sc
 			s->u += chained;		/* mark chained */
 		}
 
-/*
+
 		debugblock({
-			if(_ext_v2i32(cnt, 0) > _ext_v2i32(min_cnt, 0)) {
+			if(_ext_v2i32(cnt, 0) >= _ext_v2i32(min_cnt, 0)) {
 				debug("%r ---> %r, cnt(%u)", tm_seed_to_str, p, tm_seed_to_str, s, _ext_v2i32(cnt, 0));
 			}
 		});
-*/
-		q += tm_chain_record(root, _loadu_v2i32(s), cnt, min_cnt, q);
+
+		v2i32_t const tail = (v2i32_t){ .v1 = _mm_cvtsi64_si128(ruv) };
+		q += tm_chain_record(root, tail, cnt, min_cnt, q);
 	}
 
 	/* update chain count */
@@ -2363,101 +2456,210 @@ size_t tm_chain_seed(tm_idx_profile_t const *profile, tm_seed_t *seed, size_t sc
 	return(ccnt);
 }
 
-static _force_inline
-v16i8_t tm_load_forward(uint8_t const *ptr)
-{
-	return(_loadu_v16i8(ptr));
-}
 
-static _force_inline
-v16i8_t tm_load_reverse(uint8_t const *ptr)
-{
-	static uint8_t const revcomp[16] __attribute__(( aligned(16) )) = {
-		0
-	};
 
-	v16i8_t const rc = _load_v16i8(revcomp);
-	v16i8_t const v = _loadu_v16i8(ptr);
-	return(_shuf_v16i8(rc, v));
-}
+/* filter */
 
 typedef struct {
-	uint8_t const *ptr;
-	v16i8_t (*load)(uint8_t const *);
-	ptrdiff_t fwd;
-} tm_filter_t;
+	v32i8_t (*r)(uint8_t const *);
+	v32i8_t (*q)(uint8_t const *);
+} tm_filter_load_t;
+
+typedef struct {
+	uint8_t const *r;
+	uint8_t const *q;
+} tm_filter_seq_t;
+
+typedef struct {
+	uint8_t r[32], q[32];
+} tm_filter_work_t;
+
+
+/* 4-bit encoding for reference side; return in reversed orientation */
+static v32i8_t tm_filter_load_rf(uint8_t const *p) {
+	/* reverse, no need for complement */
+	v32i8_t const v = _loadu_v32i8(p);
+	return(_swap_v32i8(v));
+}
+static v32i8_t tm_filter_load_rr(uint8_t const *p) {
+	/* complement, no need for reverse */
+	static uint8_t const comp[16] __attribute__(( aligned(16) )) = {
+		0x00, 0x08, 0x04, 0x0c, 0x02, 0x0a, 0x06, 0x0e,
+		0x01, 0x09, 0x05, 0x0d, 0x03, 0x0b, 0x07, 0x0f
+	};
+
+	v32i8_t const cv = _from_v16i8_v32i8(_load_v16i8(comp));	/* rip relative */
+	v32i8_t const v = _loadu_v32i8(p - 32), w = _shuf_v32i8(cv, v);
+	return(w);
+}
+
+/* 2-bit encoding at [3:2] for query side */
+static v32i8_t tm_filter_load_qf(uint8_t const *p) {
+	/* convert to 4bit */
+	static uint8_t const conv[16] __attribute__(( aligned(16) )) = {
+		[nA] = A,
+		[nC] = C,
+		[nG] = G,
+		[nT] = T
+	};
+
+	v32i8_t const cv = _from_v16i8_v32i8(_load_v16i8(conv));
+	v32i8_t const v = _loadu_v32i8(p), w = _shuf_v32i8(cv, v);
+	return(w);
+}
+static v32i8_t tm_filter_load_qr(uint8_t const *p) {
+	/* reverse and complement */
+	static uint8_t const conv[16] __attribute__(( aligned(16) )) = {
+		[nA] = T,
+		[nC] = G,
+		[nG] = C,
+		[nT] = A
+	};
+
+	v32i8_t const cv = _from_v16i8_v32i8(_load_v16i8(conv));
+	v32i8_t const v = _loadu_v32i8(p - 32), w = _shuf_v32i8(cv, v);
+	return(_swap_v32i8(w));
+}
+
 
 static _force_inline
-int64_t tm_filter_extend(tm_idx_profile_t const *profile, tm_filter_t r, tm_filter_t q)
+void tm_filter_load_seq(tm_filter_work_t *w, tm_filter_load_t load, tm_filter_seq_t seq)
+{
+	v32i8_t const rv = load.r(seq.r);
+	v32i8_t const qv = load.q(seq.q);
+
+	_print_v32i8(rv);
+	_print_v32i8(qv);
+
+	_store_v32i8(w->r, rv);
+	_store_v32i8(w->q, qv);
+	return;
+}
+
+static _force_inline
+int64_t tm_filter_extend(tm_idx_profile_t const *profile, tm_filter_load_t load, tm_filter_seq_t seq)
 {
 	/* load sequence vectors */
-	v16i8_t rv = r.load(r.ptr), rn = r.load(r.ptr + r.fwd);
-	v16i8_t qv = q.load(q.ptr), qn = q.load(q.ptr + q.fwd);
+	tm_filter_work_t w __attribute__(( aligned(32) ));
+	tm_filter_load_seq(&w, load, seq);
 
 	/* load constants */
 	v16i8_t const score_matrix = _load_v16i8(&profile->filter.score_matrix);
-	v16i8_t dh = _load_v16i8(&profile->filter.init);
-	v16i8_t dv = _load_v16i8(&profile->filter.init);
-	v16i8_t sv = _zero_v16i8(), mv = _zero_v16i8();
+	v16i8_t const gv = _load_v16i8(&profile->filter.gap);
+	v16i8_t pv = _load_v16i8(&profile->filter.init);
+	v16i8_t cv = _add_v16i8(pv, gv);
+	v16i8_t mv = pv;
 
-	#define _calc_a(_rv, _qv, _dh, _dv) ({ \
+	/* complete p = 1 vector */
+	cv = _maxu_v16i8(cv, _bsr_v16i8(cv, 1));
+	// _printu_v16i8(pv);
+	// _printu_v16i8(cv);
+	// _printu_v16i8(mv);
+
+	#define _calc_next(_rv, _qv, _pv, _cv, _shift) ({ \
 		/* calc score profile vector with shuffling score matrix vector */ \
 		v16i8_t const match = _and_v16i8(_rv, _qv);		/* cmpeq */ \
-		v16i8_t const a = _max_v16i8( \
-			_shuf_v16i8(score_matrix, match), \
-			_max_v16i8(_dv, _dh) \
-		); \
-		a; \
+		v16i8_t const sv = _shuf_v16i8(score_matrix, match); \
+		v16i8_t const x = _add_v16i8(_pv, sv); \
+		v16i8_t const y = _add_v16i8(_cv, gv); \
+		v16i8_t const z = _maxu_v16i8(y, _shift(y, 1)); \
+		v16i8_t const n = _maxu_v16i8(x, z); \
+		n; \
 	})
 
 	/* 32 vector updates */
-	for(size_t j = 0; j < 16; j++) {
+	v16i8_t qv = _load_v16i8(&w.q[0]);		/* load query side initial vector */
+	for(size_t i = 0; i < 16; i++) {
 		/* #0 (even) */
-		v16i8_t const a0 = _calc_a(rv, qv, dh, dv);
-		v16i8_t const tdv = _sub_v16i8(a0, dh);
-		v16i8_t const tdh = _sub_v16i8(a0, dv);
-		sv = _add_v16i8(sv, tdv);
-		mv = _max_v16i8(mv, sv);
-
-		/* move rightward */
-		rv = _bsrd_v16i8(rv, rn, 1); rn = _shr_v16i8(rn, 1);
+		v16i8_t const rv = _loadu_v16i8(&w.r[23 - i]);	/* move rightward */
+		v16i8_t const ev = _calc_next(rv, qv, pv, cv, _bsl_v16i8);
+		mv = _maxu_v16i8(mv, ev);
+		// _printu_v16i8(ev);
+		// _printu_v16i8(mv);
 
 		/* #1 (odd) */
-		v16i8_t const a1 = _calc_a(rv, qv, tdh, tdv);
-		dv = _sub_v16i8(a1, tdh);
-		dh = _sub_v16i8(a1, tdv);
-		sv = _add_v16i8(sv, dh);
-		mv = _max_v16i8(mv, sv);
+		qv = _loadu_v16i8(&w.q[i - 7]);	/* move downward */
+		v16i8_t const ov = _calc_next(rv, qv, cv, ev, _bsr_v16i8);
+		mv = _maxu_v16i8(mv, ov);
+		// _printu_v16i8(ov);
+		// _printu_v16i8(mv);
 
-		/* move downward */
-		qv = _bsrd_v16i8(qv, qn, 1); qn = _shr_v16i8(qn, 1);
+		/* alias registers for the next loop */
+		pv = ev;
+		cv = ov;
 	}
 
+	// _printu_v16i8(cv);
+	// _printu_v16i8(mv);
+
 	/* fold scores */
-	int64_t const score = 0;
-	return(score);
+	return(_hmaxu_v16i8(mv) - 128LL);
 
-	#undef _calc_a
+	#undef _calc_next
 }
 
 static _force_inline
-int64_t tm_filter_extend_inward(tm_idx_profile_t const *profile, uint8_t const *ref, uint8_t const *query, tm_chain_t const *chain)
+void tm_filter_load_ptr(tm_filter_seq_t *buf, uint8_t const *ref, uint8_t const *query, tm_chain_t const *p)
 {
-	_unused(profile);
-	_unused(ref);
-	_unused(query);
-	_unused(chain);
-	return(0);
+	/* FIXME: SIMD? */
+	uint64_t const qdir = tm_seed_dir(&p->pos);
+	tm_pair_t const spos = tm_seed_decode(&p->pos);
+	tm_pair_t const span = tm_span_decode(&p->span);
+	tm_pair_t const epos = tm_add_pair(spos, span);
+	// debug("qdir(%lu), qspos(%x, %x), qepos(%x, %x)", qdir, spos.q, qdir ? 0x40010000 - spos.q : spos.q, epos.q, qdir ? 0x40010000 - epos.q : epos.q);
+
+	/* spos */
+	buf[0] = (tm_filter_seq_t){
+		.r = &ref[spos.r],
+		.q = &query[qdir ? 0x40010000 - spos.q : spos.q]
+	};
+
+	/* epos */
+	buf[1] = (tm_filter_seq_t){
+		.r = &ref[epos.r],
+		.q = &query[qdir ? 0x40010000 - epos.q : epos.q]
+	};
+	return;
 }
 
 static _force_inline
-int64_t tm_filter_extend_outward(tm_idx_profile_t const *profile, uint8_t const *ref, uint8_t const *query, tm_chain_t const *chain)
+int64_t tm_filter_core(tm_idx_profile_t const *profile, uint8_t const *ref, uint8_t const *query, tm_chain_t const *p)
 {
-	_unused(profile);
-	_unused(ref);
-	_unused(query);
-	_unused(chain);
-	return(0);
+	/* always evaluate chain with enough seeds */
+	if(p->attr.scnt >= profile->filter.test_cnt) {		/* set zero to disable filter */
+		return(1);
+	}
+
+	/* filter extension needed; convert seed position to r-q coordinates */
+	tm_filter_seq_t s[2];
+	tm_filter_load_ptr(s, ref, query, p);
+
+	/* determine query direction and load sequence fetcher */
+	static tm_filter_load_t const load[4] = {
+		/* for forward mapping */
+		{ tm_filter_load_rf, tm_filter_load_qf },
+		{ tm_filter_load_rr, tm_filter_load_qf },
+
+		/* for reverse mapping */
+		{ tm_filter_load_rf, tm_filter_load_qr },
+		{ tm_filter_load_rr, tm_filter_load_qr }
+	};
+	tm_filter_load_t const *l = &load[tm_seed_dir(&p->pos)<<1];
+
+	/* determine extension direction */
+	uint64_t const edir = p->span.u > profile->filter.uspan_thresh;
+	debug("dir(%lu, %lu), fw(%lu, %lu), rv(%lu, %lu)", tm_seed_dir(&p->pos), edir,
+		s[edir ^ 1].q - query, s[edir ^ 1].r - ref,
+		s[edir].q - query, s[edir].r - ref
+	);
+
+	/* extend forward and reverse */
+	int64_t const sf = tm_filter_extend(profile, l[0], s[edir ^ 1]);
+	int64_t const sr = tm_filter_extend(profile, l[1], s[edir]);
+	debug("filter, span(%u), scnt(%u), %s, score(%ld, %ld)", p->span.u, p->attr.scnt, p->span.u > profile->filter.uspan_thresh ? "outward" : "inward", sf, sr);
+
+	/* save when score exceeds the threshold */
+	return(sf + sr >= profile->filter.min_score);
 }
 
 static _force_inline
@@ -2477,7 +2679,7 @@ size_t tm_filter_save_chain(uint32_t rid, tm_chain_t *q, tm_chain_t const *p)
 	return(1);
 }
 
-static _force_inline
+// static _force_inline
 size_t tm_filter_chain(tm_idx_sketch_t const *si, tm_idx_profile_t const *profile, uint8_t const *query, tm_chain_t *chain, size_t ccnt)
 {
 	/* alias pointer */
@@ -2488,21 +2690,14 @@ size_t tm_filter_chain(tm_idx_sketch_t const *si, tm_idx_profile_t const *profil
 	uint8_t const *ref = tm_idx_ref_seq_ptr(si);
 
 	/* load constants */
-	uint64_t const test_cnt = profile->filter.test_cnt;
-	int64_t const min_score = profile->filter.min_score;
-	size_t const uspan_thresh =	32;		/* FIXME: profile->filter.uspan_thresh; */
+	debug("test_cnt(%lu), min_score(%ld), uspan_thresh(%zu)", profile->filter.test_cnt, profile->filter.min_score, profile->filter.uspan_thresh);
 
 	for(size_t i = 0; i < ccnt; i++) {
 		tm_chain_t const *p = &src[i];
+		debug("%r, scnt(%u)", tm_chain_to_str, p, p->attr.scnt);
 
 		/* try short extension if not heavy enough */
-		if(p->attr.scnt < test_cnt) {
-			int64_t score = (p->span.u > uspan_thresh
-				? tm_filter_extend_inward(profile, ref, query, p)		/* inward extension for long-spanning chain */
-				: tm_filter_extend_outward(profile, ref, query, p)
-			);
-			if(score < min_score) { continue; }
-		}
+		if(tm_filter_core(profile, ref, query, p)) { continue; }
 
 		/* copy and fold in reference id */
 		dst += tm_filter_save_chain(rid, dst, p);
@@ -2511,34 +2706,22 @@ size_t tm_filter_chain(tm_idx_sketch_t const *si, tm_idx_profile_t const *profil
 }
 
 static _force_inline
-size_t tm_seed_and_sort(tm_ref_sketch_t const *ref, uint8_t const *query, size_t qlen, tm_seed_v *seed, tm_sqiv_v *sqiv)
+size_t tm_seed_and_sort(tm_idx_sketch_t const *si, tm_idx_profile_t const *profile, uint8_t const *query, size_t qlen, tm_seed_v *seed, tm_sqiv_v *sqiv)
 {
 	/* enumerate seeds */
 	kv_clear(*seed);
 	kv_clear(*sqiv);
-	if(tm_collect_seed(ref, query, qlen, seed, sqiv) == 0) {
+	if(tm_collect_seed(&si->ref, query, qlen, seed, sqiv) == 0) {
 		return(0);
 	}
 
 	/* squash overlapping seeds */
-	if(tm_squash_seed(kv_ptr(*sqiv), kv_cnt(*sqiv), 16, seed) == 0) {
+	if(tm_squash_seed(profile->chain.squash_intv, kv_ptr(*sqiv), kv_cnt(*sqiv), seed) == 0) {
 		return(0);
 	}
 
 	/* sort seeds by u-coordinates for chaining */
-/*
-	fprintf(stderr, "raw:\n");
-	for(size_t i = 0; i < kv_cnt(*seed); i++) {
-		fprintf(stderr, "(%u, %u)\n", kv_ptr(*seed)[i].v, kv_ptr(*seed)[i].u);
-	}
-*/
 	radix_sort_seed(kv_ptr(*seed), kv_cnt(*seed));
-/*
-	fprintf(stderr, "sorted:\n");
-	for(size_t i = 0; i < kv_cnt(*seed); i++) {
-		fprintf(stderr, "(%u, %u)\n", kv_ptr(*seed)[i].v, kv_ptr(*seed)[i].u);
-	}
-*/
 	return(kv_cnt(*seed));
 }
 
@@ -2571,13 +2754,15 @@ size_t tm_collect_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *seq, 
 	/* collect chain for each reference sequence */
 	for(size_t i = 0; i < idx->sketch.cnt; i++) {
 		/* collect seeds */
-		if(tm_seed_and_sort(&si[i]->ref, seq, slen, &self->seed.arr, &self->seed.sqiv) == 0) { continue; }
+		if(tm_seed_and_sort(si[i], pf[si[i]->h.pid], seq, slen, &self->seed.arr, &self->seed.sqiv) == 0) { continue; }
 
 		/* chain and filter */
 		tm_seed_t *seed = kv_ptr(self->seed.arr);
 		size_t scnt = kv_cnt(self->seed.arr);
 		tm_chain_and_filter(si[i], pf[si[i]->h.pid], seq, seed, scnt, &self->chain.arr);
 	}
+
+	debug("ccnt(%zu)", kv_cnt(self->chain.arr));
 	return(kv_cnt(self->chain.arr));
 }
 
@@ -3067,43 +3252,43 @@ static void tm_conf_profile(opt_t *opt, tm_conf_t *conf, char const *arg) {
 /* indexing */
 static void tm_conf_kmer(opt_t *opt, tm_conf_t *conf, char const *arg) {
 	size_t k = mm_atoi(arg, 0);
-	oassert(opt, k >= 3 && k <= 7, "k must be inside [3,7].");
+	oassert(opt, k >= 3 && k <= 7, "k-mer size (-k) must be >= 3 and <= 7.");
 
 	conf->fallback.kmer = k;
 }
 static void tm_conf_chain(opt_t *opt, tm_conf_t *conf, char const *arg) {
 	size_t w = mm_atoi(arg, 0);
-	oassert(opt, w >= 1 && w <= 64, "w must be inside [2,64].");
+	oassert(opt, w >= 1 && w <= 256, "chain window size (-w) must be >= 2 and <= 256.");
 
 	conf->fallback.window = w;
 }
 static void tm_conf_ccnt(opt_t *opt, tm_conf_t *conf, char const *arg) {
 	size_t c = mm_atoi(arg, 0);
-	oassert(opt, c >= 1, "c must be inside greater than zero.");
+	oassert(opt, c >= 1 && c <= 1024, "minimum seed count (-c) must be >= 1 and <= 1024.");
 
 	conf->fallback.min_scnt = c;
 }
 static void tm_conf_match(opt_t *opt, tm_conf_t *conf, char const *arg) {
 	int64_t m = mm_atoi(arg, 0);
-	oassert(opt, m >= 1 && m <= 7, "match award (-a) must be inside [1,7] (%s).", arg);
+	oassert(opt, m >= 1 && m <= 7, "match award (-a) must be >= 1 and <= 7 (%s).", arg);
 
 	conf->fallback.match = m;
 }
 static void tm_conf_mismatch(opt_t *opt, tm_conf_t *conf, char const *arg) {
 	int64_t x = mm_atoi(arg, 0);
-	oassert(opt, x >= 1 && x <= 7, "mismatch penalty (-b) must be inside [1,7] (%s).", arg);
+	oassert(opt, x >= 1 && x <= 7, "mismatch penalty (-b) must be >= 1 and <= 7 (%s).", arg);
 
 	conf->fallback.mismatch = x;
 }
 static void tm_conf_gap_open(opt_t *opt, tm_conf_t *conf, char const *arg) {
 	int64_t gi = mm_atoi(arg, 0);
-	oassert(opt, gi >= 1 && gi <= 7, "gap open penalty (-p) must be inside [1,7] (%s).", arg);
+	oassert(opt, gi >= 1 && gi <= 7, "gap open penalty (-p) must be >= 1 and <= 7 (%s).", arg);
 
 	conf->fallback.gap_open = gi;
 }
 static void tm_conf_gap_extend(opt_t *opt, tm_conf_t *conf, char const *arg) {
 	int64_t ge = mm_atoi(arg, 0);
-	oassert(opt, ge >= 1 && ge <= 7, "gap extension penalty (-q) must be inside [1,7] (%s).", arg);
+	oassert(opt, ge >= 1 && ge <= 7, "gap extension penalty (-q) must be >= 1 and <= 7 (%s).", arg);
 
 	conf->fallback.gap_extend = ge;
 }
@@ -3129,9 +3314,9 @@ uint64_t tm_conf_restore_default(tm_conf_t *conf)
 			.kmer = 3,
 			.window = 32,
 			.match = 2,
-			.mismatch = -3,
-			.gap_open = -5,
-			.gap_extend = -1,
+			.mismatch = 3,
+			.gap_open = 5,
+			.gap_extend = 1,
 			.min_score = 0
 		},
 		.print = {
@@ -3375,7 +3560,7 @@ int main_scan_error(tm_conf_t *conf, int error_code, char const *file)
 	case ERROR_OPEN_QSEQ: error("failed to open sequence file `%s'. Please check file path and format.", file); break;
 
 	/* argument missing */
-	case ERROR_NO_ARG: error("argument is not enough. a reference and at least one query files are required."); break;
+	case ERROR_NO_ARG: error("argument is not enough. a reference and at least one query file are required."); break;
 
 	/* index loading */
 	case ERROR_OPEN_IDX: error("failed to open index file `%s'. Please check file path and permission.", file); break;
