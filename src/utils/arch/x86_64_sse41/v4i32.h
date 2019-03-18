@@ -171,12 +171,12 @@ typedef struct v4i32_s {
 )
 
 /* transpose */
-#define _lo_v4i32(a, b) ( \
+#define _lo_v4i32(b, a) ( \
 	(v4i32_t) { \
 		_mm_unpacklo_epi32((a).v1, (b).v1) \
 	} \
 )
-#define _hi_v4i32(a, b) ( \
+#define _hi_v4i32(b, a) ( \
 	(v4i32_t) { \
 		_mm_unpackhi_epi32((a).v1, (b).v1) \
 	} \

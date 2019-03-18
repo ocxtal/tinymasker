@@ -119,6 +119,8 @@ typedef struct v16i8_s {
 #define _subus_v16i8(...)	_a_v16u8(subs, _e_vv, __VA_ARGS__)
 #define _max_v16i8(...)		_a_v16i8(max, _e_vv, __VA_ARGS__)
 #define _min_v16i8(...)		_a_v16i8(min, _e_vv, __VA_ARGS__)
+#define _maxu_v16i8(...)	_a_v16u8(max, _e_vv, __VA_ARGS__)
+#define _minu_v16i8(...)	_a_v16u8(min, _e_vv, __VA_ARGS__)
 
 /* shuffle */
 #define _shuf_v16i8(...)	_a_v16i8(shuffle, _e_vv, __VA_ARGS__)
@@ -196,17 +198,16 @@ typedef struct v16i8_s {
 )
 
 /* horizontal max */
-#define _hmax_v16i8(a) ({ \
-	__m128i _vmax = _mm_max_epi8((a).v1, \
-		_mm_srli_si128((a).v1, 8)); \
-	_vmax = _mm_max_epi8(_vmax, \
-		_mm_srli_si128(_vmax, 4)); \
-	_vmax = _mm_max_epi8(_vmax, \
-		_mm_srli_si128(_vmax, 2)); \
-	_vmax = _mm_max_epi8(_vmax, \
-		_mm_srli_si128(_vmax, 1)); \
-	(int8_t)_mm_extract_epi8(_vmax, 0); \
+#define _hmax_core_v16i8(a, _op) ({ \
+	__m128i _vmax = _op((a).v1, _mm_srli_si128((a).v1, 8)); \
+	_vmax = _op(_vmax, _mm_srli_si128(_vmax, 4)); \
+	_vmax = _op(_vmax, _mm_srli_si128(_vmax, 2)); \
+	_vmax = _op(_vmax, _mm_srli_si128(_vmax, 1)); \
+	_mm_extract_epi8(_vmax, 0); \
 })
+#define _hmax_v16i8(a)		( (int8_t)_hmax_core_v16i8(a, _mm_max_epi8) )
+#define _hmaxu_v16i8(a)		( (uint8_t)_hmax_core_v16i8(a, _mm_max_epu8) )
+
 
 /* convert */
 #define _cvt_v16i16_v16i8(a) ( \

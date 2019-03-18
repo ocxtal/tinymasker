@@ -171,12 +171,12 @@ typedef struct v4i32_s {
 )
 
 /* transpose */
-#define _lo_v4i32(a, b) ( \
+#define _lo_v4i32(b, a) ( \
 	(v4i32_t) { \
 		_mm_unpacklo_epi32((a).v1, (b).v1) \
 	} \
 )
-#define _hi_v4i32(a, b) ( \
+#define _hi_v4i32(b, a) ( \
 	(v4i32_t) { \
 		_mm_unpackhi_epi32((a).v1, (b).v1) \
 	} \
@@ -189,13 +189,13 @@ typedef struct v4i32_s {
 #define _km_v4i32(i4, i3, i2, i1)	( (i1) | ((i2)<<2) | ((i3)<<4) | ((i4)<<6) )
 
 /* debug print */
-#ifdef _LOG_H_INCLUDED
+// #ifdef _LOG_H_INCLUDED
 #define _print_v4i32(a) { \
 	debug("(v4i32_t) %s(%d, %d, %d, %d)", #a, _ext_v4i32(a, 3), _ext_v4i32(a, 2), _ext_v4i32(a, 1), _ext_v4i32(a, 0)); \
 }
-#else
-#define _print_v4i32(x)		;
-#endif
+// #else
+// #define _print_v4i32(x)		;
+// #endif
 
 #endif /* _V4I32_H_INCLUDED */
 /**

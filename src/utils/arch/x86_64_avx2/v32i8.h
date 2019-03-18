@@ -101,6 +101,8 @@ typedef struct v32i8_s {
 #define _subus_v32i8(...)	_a_v32u8(subs, _e_vv, __VA_ARGS__)
 #define _max_v32i8(...)		_a_v32i8(max, _e_vv, __VA_ARGS__)
 #define _min_v32i8(...)		_a_v32i8(min, _e_vv, __VA_ARGS__)
+#define _maxu_v32i8(...)	_a_v32u8(max, _e_vv, __VA_ARGS__)
+#define _minu_v32i8(...)	_a_v32u8(min, _e_vv, __VA_ARGS__)
 
 /* shuffle */
 #define _shuf_v32i8(...)	_a_v32i8(shuffle, _e_vv, __VA_ARGS__)
@@ -187,18 +189,23 @@ typedef struct v32i8_s {
 	} \
 )
 
+#if 0
 /* horizontal max (reduction max) */
-#define _hmax_v32i8(a) ({ \
-	__m128i _t = _mm_max_epi8( \
+#define _hmax_core_v32i8(a, _op) ({ \
+	__m128i _t = _op( \
 		_mm256_castsi256_si128((a).v1), \
 		_mm256_extracti128_si256((a).v1, 1) \
 	); \
-	_t = _mm_max_epi8(_t, _mm_srli_si128(_t, 8)); \
-	_t = _mm_max_epi8(_t, _mm_srli_si128(_t, 4)); \
-	_t = _mm_max_epi8(_t, _mm_srli_si128(_t, 2)); \
-	_t = _mm_max_epi8(_t, _mm_srli_si128(_t, 1)); \
-	(int8_t)_mm_extract_epi8(_t, 0); \
+	_t = _op(_t, _mm_srli_si128(_t, 8)); \
+	_t = _op(_t, _mm_srli_si128(_t, 4)); \
+	_t = _op(_t, _mm_srli_si128(_t, 2)); \
+	_t = _op(_t, _mm_srli_si128(_t, 1)); \
+	_mm_extract_epi8(_t, 0); \
 })
+#define _hmax_v32i8(a)		( (int8_t)_hmax_core_v32i8(a, _mm_max_epi8) )
+#define _hmaxu_v32i8(a)		( (uint8_t)_hmax_core_v32i8(a, _mm_max_epu8) )
+#endif
+
 
 /* convert */
 #define _cvt_v32i16_v32i8(a) ( \

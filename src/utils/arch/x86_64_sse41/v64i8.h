@@ -147,6 +147,8 @@ typedef struct v64i8_s {
 #define _subus_v64i8(...)	_a_v64u8(subs, _e_vv, __VA_ARGS__)
 #define _max_v64i8(...)		_a_v64i8(max, _e_vv, __VA_ARGS__)
 #define _min_v64i8(...)		_a_v64i8(min, _e_vv, __VA_ARGS__)
+#define _maxu_v64i8(...)	_a_v64u8(max, _e_vv, __VA_ARGS__)
+#define _minu_v64i8(...)	_a_v64u8(min, _e_vv, __VA_ARGS__)
 
 /* shuffle */
 #define _shuf_v64i8(...)	_a_v64i8(shuffle, _e_vv, __VA_ARGS__)
