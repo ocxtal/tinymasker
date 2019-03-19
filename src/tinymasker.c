@@ -2863,7 +2863,7 @@ dz_state_t const *tm_extend_wrap(dz_arena_t *mem, dz_profile_t const *profile, t
 	};
 
 	/* extend */
-	return(dz_extend_core(mem, profile, q, &r, dz_root(profile), 1));		/* always use root */
+	return(dz_extend_core(mem, profile, q, &r, (dz_state_t const **)&profile->root, 1));		/* always use root */
 }
 
 static _force_inline
@@ -2904,12 +2904,12 @@ tm_aln_t tm_extend_core(tm_scan_t *self, tm_idx_profile_t const *pf, tm_idx_sket
 	debug("reverse: qpos(%zu, %zx), rpos(%zu, %zx)", rpos.q, rpos.q, rpos.r, rpos.r);
 
 	/* reference reverse */
-	dz_pack_query_reverse(q, pf->extend.dz, qconv[1], (char const *)&query[rpos.q], rpos.q);
+	dz_pack_query_reverse_core(q, pf->extend.dz, qconv[1], (char const *)&query[rpos.q], rpos.q);
 	dz_state_t const *r = tm_extend_wrap(self->extend.fill, pf->extend.dz, sk, rpos.r, q);
 	tm_pair_t const spos = tm_calc_max_wrap(r);
 
 	/* forward */
-	dz_pack_query_forward(q, pf->extend.dz, qconv[0], (char const *)&query[spos.q], qlen - spos.q);
+	dz_pack_query_forward_core(q, pf->extend.dz, qconv[0], (char const *)&query[spos.q], qlen - spos.q);
 	dz_state_t const *f = tm_extend_wrap(self->extend.fill, pf->extend.dz, sk, spos.r, q);
 
 	/* traceback */
