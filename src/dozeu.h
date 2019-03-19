@@ -133,12 +133,12 @@ enum dz_alphabet_query {
 #endif
 
 #if (defined(DEBUG) || (defined(UNITTEST) && UNITTEST != 0)) && !defined(__cplusplus)
-#  include "log.h"
+#  include "utils/log.h"
 #  if !defined(UNITTEST_UNIQUE_ID)
 #    define UNITTEST_ALIAS_MAIN		0
 #    define UNITTEST_UNIQUE_ID		3213
 #  endif
-#  include "unittest.h"
+#  include "utils/unittest.h"
 unittest_config( .name = "dozeu" );
 unittest() { debug("hello"); }
 #else
