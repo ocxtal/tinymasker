@@ -2904,7 +2904,7 @@ tm_aln_t tm_extend_core(tm_scan_t *self, tm_idx_profile_t const *pf, tm_idx_sket
 	debug("reverse: qpos(%zu, %zx), rpos(%zu, %zx)", rpos.q, rpos.q, rpos.r, rpos.r);
 
 	/* reference reverse */
-	dz_pack_query_reverse_core(q, pf->extend.dz, qconv[1], (char const *)&query[rpos.q], rpos.q);
+	dz_pack_query_reverse_core(q, pf->extend.dz, qconv[1], (char const *)query, rpos.q);
 	dz_state_t const *r = tm_extend_wrap(self->extend.fill, pf->extend.dz, sk, rpos.r, q);
 	tm_pair_t const spos = tm_calc_max_wrap(r);
 
