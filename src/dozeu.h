@@ -136,12 +136,12 @@ enum dz_alphabet_query {
 #endif
 
 #if (defined(DEBUG) || (defined(UNITTEST) && UNITTEST != 0)) && !defined(__cplusplus)
-#  include "log.h"
+#  include "utils/log.h"
 #  if !defined(UNITTEST_UNIQUE_ID)
 #    define UNITTEST_ALIAS_MAIN		0
 #    define UNITTEST_UNIQUE_ID		3213
 #  endif
-#  include "unittest.h"
+#  include "utils/unittest.h"
 unittest_config( .name = "dozeu" );
 unittest() { debug("hello"); }
 #else
@@ -656,13 +656,14 @@ dz_ref_fetcher_t dz_init_fetcher(dz_profile_t const *profile, dz_ref_t const *re
 
 	/* init state */
 	fetcher.rstate.ch  = DZ_HEAD_RCH;
-	fetcher.rstate.rem = ref->dir * ref->len;
+	fetcher.rstate.rem = ref->dir * ref->len + ref->dir;
 	return(fetcher);
 }
 
 static __dz_vectorize
 uint64_t dz_fetch_next(dz_ref_fetcher_t *fetcher)
 {
+	fetcher->rstate.rem -= fetcher->dir;
 	if(fetcher->rstate.rem == 0) {
 		return(1);
 	}
@@ -697,8 +698,6 @@ uint64_t dz_fetch_next(dz_ref_fetcher_t *fetcher)
 		debug("ch(%x), rem(%d), dir(%d)", c, fetcher->rstate.rem, fetcher->dir);
 
 	#endif
-
-	fetcher->rstate.rem -= fetcher->dir;
 	return(0);			/* 1 if reached tail */
 }
 
@@ -2698,11 +2697,14 @@ int64_t dz_calc_max_rpos_core(dz_state_t const *ff)
 {
 	/* max-scoring column */
 	dz_cap_t const *pcap = ff->max.cap;
+	if(pcap == NULL) { return(0); }
 
 	/* cap->rrem overlaps tail->rsave.rlen */
 	dz_tail_t const *tail = dz_restore_tail(ff);
-	int32_t rpos = (pcap == dz_ccap(tail)) ? 0 : pcap->rstate.rem;
-	return((int64_t)rpos);			/* signed expansion */
+	int32_t const rpos = (pcap == dz_ccap(tail)) ? 0 : pcap->rstate.rem;
+
+	debug("rpos(%d), rlen(%d)", rpos, tail->rsave.len);
+	return((int64_t)(tail->rsave.len - rpos));				/* signed expansion */
 }
 
 static __dz_vectorize
@@ -2720,8 +2722,10 @@ uint64_t dz_finalize_qpos(size_t p, uint64_t eq)
 static __dz_vectorize
 uint64_t dz_calc_max_qpos_core(dz_state_t const *ff)
 {
-	/* load max score */
 	dz_cap_t const *pcap = ff->max.cap;
+	if(pcap == NULL) { return(0); }
+
+	/* load max score */
 	__m128i const maxv = _mm_set1_epi16(dz_add_ofs(ff->max.inc));
 
 	/* load query pointer */
@@ -2746,12 +2750,10 @@ static __dz_vectorize
 uint64_t dz_calc_max_pos_core(dz_state_t const *ff)
 {
 	dz_cap_t const *pcap = ff->max.cap;
-
 	if(pcap == NULL) {
 		/* is root */
 		debug("pcap == NULL");
-		dz_tail_t const *tail = dz_restore_tail(ff);
-		return(((uint64_t)tail->rsave.len)<<32);
+		return(0);
 	}
 
 	debug("ff(%p), pcap(%p)", ff, pcap);
@@ -2780,6 +2782,110 @@ uint64_t dz_calc_max_pos(dz_t *self, dz_forefront_t const *ff)
 	return(dz_calc_max_pos_core(dz_cstate(ff)));
 }
 
+
+#if defined(UNITTEST) && UNITTEST != 0
+
+unittest( "calc_max.small" ) {
+	struct dz_s *dz = dz_init(DZ_UNITTEST_SCORE_PARAMS);
+	ut_assert(dz != NULL);
+
+	struct dz_query_s *q = dz_pack_query(dz, dz_unittest_query, dz_unittest_query_length);
+	struct dz_forefront_s const *forefronts[5] = { NULL };
+
+	/*
+	 * AG---TTTT------CTGA
+	 *   \ /    \    /
+	 *    C      CATT
+	 */
+	forefronts[0] = dz_extend(dz, q, dz_root(dz), 1, dz_ut_sel("AG", "\x0\x2", "\x1\x4", "MA"), 2, 1);
+	ut_assert(dz_calc_max_rpos(dz, forefronts[0]) == 2);
+	ut_assert(dz_calc_max_qpos(dz, forefronts[0]) == 2);
+	ut_assert(dz_calc_max_pos(dz, forefronts[0]) == ((2LL<<32) | 2LL));
+
+	forefronts[1] = dz_extend(dz, q, &forefronts[0], 1, dz_ut_sel("C", "\x1", "\x2", "T"), 1, 2);
+	ut_assert(dz_calc_max_rpos(dz, forefronts[1]) == 1);
+	ut_assert(dz_calc_max_qpos(dz, forefronts[1]) == 3);
+	ut_assert(dz_calc_max_pos(dz, forefronts[1]) == ((1LL<<32) | 3LL));
+
+	forefronts[2] = dz_extend(dz, q, &forefronts[0], 2, dz_ut_sel("TTTT", "\x3\x3\x3\x3", "\x8\x8\x8\x8", "LVQT"), 4, 3);
+	ut_assert(dz_calc_max_rpos(dz, forefronts[2]) == 4);
+	ut_assert(dz_calc_max_qpos(dz, forefronts[2]) == 7);
+	ut_assert(dz_calc_max_pos(dz, forefronts[2]) == ((4LL<<32) | 7LL));
+
+	forefronts[3] = dz_extend(dz, q, &forefronts[2], 1, dz_ut_sel("CATG", "\x1\x0\x3\x2", "\x2\x1\x8\x4", "CKAM"), 4, 4);
+	ut_assert(dz_calc_max_rpos(dz, forefronts[3]) == 3);
+	ut_assert(dz_calc_max_qpos(dz, forefronts[3]) == 10);
+	ut_assert(dz_calc_max_pos(dz, forefronts[3]) == ((3LL<<32) | 10LL));
+
+	forefronts[4] = dz_extend(dz, q, &forefronts[2], 2, dz_ut_sel("CTGA", "\x1\x3\x2\x0", "\x2\x8\x4\x1", "QLTL"), 4, 5);
+	ut_assert(dz_calc_max_rpos(dz, forefronts[4]) == 4);
+	ut_assert(dz_calc_max_qpos(dz, forefronts[4]) == 15);
+	ut_assert(dz_calc_max_pos(dz, forefronts[4]) == ((4LL<<32) | 15LL));
+
+	dz_destroy(dz);
+}
+
+unittest( "calc_max.small.revcomp" ) {
+	struct dz_s *dz = dz_init(DZ_UNITTEST_SCORE_PARAMS);
+	ut_assert(dz != NULL);
+
+	struct dz_query_s *q = dz_pack_query(dz, dz_unittest_query, dz_unittest_query_length);
+	struct dz_forefront_s const *forefronts[5] = { NULL };
+
+	/*
+	 * AG---TTTT------CTGA
+	 *   \ /    \    /
+	 *    C      CATT
+	 */
+	forefronts[0] = dz_extend(dz, q, dz_root(dz), 1, dz_ut_sel(&"CT"[2], &"\x1\x3"[2], &"\x2\x8"[2], &"AM"[2]), -2, 1);
+	ut_assert(dz_calc_max_rpos(dz, forefronts[0]) == -2, "%ld", dz_calc_max_rpos(dz, forefronts[0]));
+	ut_assert(dz_calc_max_qpos(dz, forefronts[0]) == 2);
+	ut_assert(dz_calc_max_pos(dz, forefronts[0]) == ((int64_t)(((uint64_t)-2LL)<<32) | 2LL));
+
+	forefronts[1] = dz_extend(dz, q, &forefronts[0], 1, dz_ut_sel(&"G"[1], &"\x2"[1], &"\x4"[1], &"T"[1]), -1, 2);
+	ut_assert(dz_calc_max_rpos(dz, forefronts[1]) == -1, "%ld", dz_calc_max_rpos(dz, forefronts[1]));
+	ut_assert(dz_calc_max_qpos(dz, forefronts[1]) == 3);
+	ut_assert(dz_calc_max_pos(dz, forefronts[1]) == ((int64_t)(((uint64_t)-1LL)<<32) | 3LL));
+
+	forefronts[2] = dz_extend(dz, q, &forefronts[0], 2, dz_ut_sel(&"AAAA"[4], &"\x0\x0\x0\x0"[4], &"\x1\x1\x1\x1"[4], &"TQVL"[4]), -4, 3);
+	ut_assert(dz_calc_max_rpos(dz, forefronts[2]) == -4, "%ld", dz_calc_max_rpos(dz, forefronts[2]));
+	ut_assert(dz_calc_max_qpos(dz, forefronts[2]) == 7);
+	ut_assert(dz_calc_max_pos(dz, forefronts[2]) == ((int64_t)(((uint64_t)-4LL)<<32) | 7LL));
+
+	forefronts[3] = dz_extend(dz, q, &forefronts[2], 1, dz_ut_sel(&"CATG"[4], &"\x1\x0\x3\x2"[4], &"\x2\x1\x8\x4"[4], &"MAKC"[4]), -4, 4);
+	ut_assert(dz_calc_max_rpos(dz, forefronts[3]) == -3, "%lu", dz_calc_max_rpos(dz, forefronts[3]));
+	ut_assert(dz_calc_max_qpos(dz, forefronts[3]) == 10);
+	ut_assert(dz_calc_max_pos(dz, forefronts[3]) == ((int64_t)(((uint64_t)-3LL)<<32) | 10LL));
+
+	forefronts[4] = dz_extend(dz, q, &forefronts[2], 2, dz_ut_sel(&"TCAG"[4], &"\x3\x1\x0\x2"[4], &"\x8\x2\x1\x4"[4], &"LTLQ"[4]), -4, 5);
+	ut_assert(dz_calc_max_rpos(dz, forefronts[4]) == -4);
+	ut_assert(dz_calc_max_qpos(dz, forefronts[4]) == 15);
+	ut_assert(dz_calc_max_pos(dz, forefronts[4]) == ((int64_t)(((uint64_t)-4LL)<<32) | 15LL));
+
+	dz_destroy(dz);
+}
+
+unittest( "calc_max.null" ) {
+	struct dz_s *dz = dz_init(DZ_UNITTEST_SCORE_PARAMS);
+	ut_assert(dz != NULL);
+
+	struct dz_query_s *q = dz_pack_query(dz, dz_unittest_query, dz_unittest_query_length);
+	struct dz_forefront_s const *forefront = NULL;
+
+	forefront = dz_extend(dz, q, dz_root(dz), 1, dz_ut_sel("TT", "\x3\x3", "\x8\x8", "KC"), 2, 1);
+	ut_assert(dz_calc_max_rpos(dz, forefront) == 0);
+	ut_assert(dz_calc_max_qpos(dz, forefront) == 0);
+	ut_assert(dz_calc_max_pos(dz, forefront) == 0);
+
+	forefront = dz_extend(dz, q, dz_root(dz), 1, dz_ut_sel(&"AA"[2], &"\x0\x0"[2], &"\x1\x1"[2], &"KC"[2]), -2, 1);
+	ut_assert(dz_calc_max_rpos(dz, forefront) == 0, "%ld", dz_calc_max_rpos(dz, forefront));
+	ut_assert(dz_calc_max_qpos(dz, forefront) == 0);
+	ut_assert(dz_calc_max_pos(dz, forefront) == 0);
+
+	dz_destroy(dz);
+}
+
+#endif
 
 
 /* traceback */
