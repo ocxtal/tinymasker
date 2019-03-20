@@ -1999,7 +1999,7 @@ typedef struct {
 	/* stats */
 	uint32_t min_weight;
 	int64_t score;
-	dz_alignment_t *aln;
+	dz_alignment_t const *aln;
 
 	/* positions */
 	tm_pair_t pos, span;
@@ -2817,12 +2817,38 @@ uint64_t tm_extend_is_covered(tm_scan_t *self, tm_chain_t const *chain)
 	return(0);				/* possiblilty remains for better alignment */
 }
 
+
 static _force_inline
-void tm_extend_record(tm_scan_t *self, tm_chain_t const *chain, tm_aln_t aln)
+tm_pair_t tm_calc_span(dz_alignment_t const *aln)
+{
+	return((tm_pair_t){
+		.r = aln->ref_length,
+		.q = aln->query_length
+	});
+}
+
+static _force_inline
+void tm_extend_record(tm_scan_t *self, tm_chain_t const *chain, dz_alignment_t const *aln)
 {
 	_unused(chain);
 
-	kv_push(tm_aln_t, self->extend.arr, aln);
+	tm_pair_t const span = tm_calc_span(aln);
+	tm_aln_t a = {
+		/* coordinates */
+		.qmax = 0,				/* spos.q + span.q, */
+		.pos  = { 0, 0 },		/* FIXME */
+		.span = span,
+
+		/* path */
+		.path = { .ptr = aln->path, .len = aln->path_length },
+
+		/* stats */
+		.min_weight = 0,
+		.score = aln->score,
+		.aln = aln				/* save original */
+	};
+
+	kv_push(tm_aln_t, self->extend.arr, a);
 	rbt_insert_aln(kv_ptr(self->extend.arr), kv_cnt(self->extend.arr) - 1);
 	return;
 }
@@ -2834,12 +2860,6 @@ void tm_extend_clear(tm_scan_t *self)
 	dz_arena_flush(self->extend.trace);
 	return;
 }
-
-typedef struct {
-	uint8_t const *ptr;
-	uint32_t len;
-	uint32_t dir;
-} tm_extend_ref_t;
 
 static _force_inline
 dz_state_t const *tm_extend_wrap(dz_arena_t *mem, dz_profile_t const *profile, tm_idx_sketch_t const *sk, uint32_t rspos, dz_query_t const *q)
@@ -2856,11 +2876,12 @@ dz_state_t const *tm_extend_wrap(dz_arena_t *mem, dz_profile_t const *profile, t
 	dz_ref_t r = {
 		.ptr = (char const *)&ref[rpos],
 		.len = rdir ? rpos : rlen - rpos,
-		.dir = rdir,
+		.dir = rdir ? -1 : 1,
 
 		.id  = 0,	/* rid is always zero */
 		.init_s = INT16_MIN
 	};
+	debug("ref(%p), rlen(%zu, %u), rdir(%lu), rpos(%zu)", ref, rlen, r.len, rdir, rpos);
 
 	/* extend */
 	return(dz_extend_core(mem, profile, q, &r, (dz_state_t const **)&profile->root, 1));		/* always use root */
@@ -2869,27 +2890,25 @@ dz_state_t const *tm_extend_wrap(dz_arena_t *mem, dz_profile_t const *profile, t
 static _force_inline
 tm_pair_t tm_calc_max_wrap(dz_state_t const *r)
 {
+	if(r->max.cap == NULL) {
+		return((tm_pair_t){
+			.r = 0,
+			.q = 0
+		});
+	}
+
 	/* get downward max */
 	uint64_t const spos = dz_calc_max_pos_core(r);
 	uint64_t const rspos = spos>>32;
 	uint64_t const qspos = spos & 0xffffffff;
 	return((tm_pair_t){
-		.r = rspos,
-		.q = qspos
+		.r = -rspos,
+		.q =  qspos
 	});
 }
 
 static _force_inline
-tm_pair_t tm_calc_span(dz_alignment_t const *aln)
-{
-	return((tm_pair_t){
-		.r = aln->ref_length,
-		.q = aln->query_length
-	});
-}
-
-static _force_inline
-tm_aln_t tm_extend_core(tm_scan_t *self, tm_idx_profile_t const *pf, tm_idx_sketch_t const *sk, uint8_t const *query, size_t qlen, tm_pair_t rpos)
+dz_alignment_t const *tm_extend_core(tm_scan_t *self, tm_idx_profile_t const *pf, tm_idx_sketch_t const *sk, uint8_t const *query, size_t qlen, tm_pair_t rpos)
 {
 	/* flush working memory */
 	dz_arena_flush(self->extend.fill);
@@ -2899,37 +2918,30 @@ tm_aln_t tm_extend_core(tm_scan_t *self, tm_idx_profile_t const *pf, tm_idx_sket
 		{ .single = dz_query_conv_single_forward, .bulk = dz_query_conv_bulk_forward },
 		{ .single = dz_query_conv_single_reverse, .bulk = dz_query_conv_bulk_reverse },
 	};
-	dz_query_t *q = dz_pack_query_alloc_mem(self->extend.fill, pf->extend.dz, (char const *)query, qlen);
-
 	debug("reverse: qpos(%zu, %zx), rpos(%zu, %zx)", rpos.q, rpos.q, rpos.r, rpos.r);
+
+	dz_query_t *q = dz_pack_query_alloc_mem(self->extend.fill, pf->extend.dz, (char const *)query, qlen);
 
 	/* reference reverse */
 	dz_pack_query_reverse_core(q, pf->extend.dz, qconv[1], (char const *)query, rpos.q);
 	dz_state_t const *r = tm_extend_wrap(self->extend.fill, pf->extend.dz, sk, rpos.r, q);
+	if(r == NULL) { return(NULL); }
+
 	tm_pair_t const spos = tm_calc_max_wrap(r);
+	debug("qspos(%u), rspos(%u, %x, %u), qlen(%zu)", spos.q, spos.r, spos.r, spos.r & 0x3fffffff, qlen);
 
 	/* forward */
 	dz_pack_query_forward_core(q, pf->extend.dz, qconv[0], (char const *)&query[spos.q], qlen - spos.q);
 	dz_state_t const *f = tm_extend_wrap(self->extend.fill, pf->extend.dz, sk, spos.r, q);
+	if(f == NULL || f->max.score == 0) { return(NULL); }
+
+
+	// debug("forward: qpos(%zu, %zx), rpos(%zu, %zx)", spos.q, spos.q, spos.r, spos.r);
 
 	/* traceback */
-	dz_alignment_t *aln = dz_trace_core(self->extend.trace, pf->extend.dz, f);
-	tm_pair_t const span = tm_calc_span(aln);
-
-	return((tm_aln_t){
-		/* coordinates */
-		.qmax = spos.q + span.q,
-		.pos  = spos,
-		.span = span,
-
-		/* path */
-		.path = { .ptr = aln->path, .len = aln->path_length },
-
-		/* stats */
-		.min_weight = 0,
-		.score = aln->score,
-		.aln = aln				/* save original */
-	});
+	dz_alignment_t const *aln = dz_trace_core(self->extend.trace, pf->extend.dz, f);
+	debug("f(%p), aln(%p)", f, aln);
+	return(aln);
 }
 
 static _force_inline
@@ -2955,8 +2967,8 @@ size_t tm_extend_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *query,
 		debug("%r, rid(%u), pid(%u)", tm_chain_to_str, q, q->attr.stat.rid, s->h.pid);
 
 		/* extend */
-		tm_aln_t aln = tm_extend_core(self, p, s, query, qlen, caln.pos);
-		if(aln.score <= p->extend.min_score) { continue; }
+		dz_alignment_t const *aln = tm_extend_core(self, p, s, query, qlen, caln.pos);
+		if(aln == NULL || aln->score <= p->extend.min_score) { continue; }
 
 		tm_extend_record(self, q, aln);
 		if(tm_extend_is_complete(self)) { break; }
