@@ -29,7 +29,7 @@ SRCS = tinymasker.c toml.c re.c
 
 SRCS_INTL = $(addprefix $(SRCDIR)/, $(SRCS))
 OBJS_INTL = $(SRCS_INTL:c=o)
-DEPS_INTL = $(SRCS_INTL:c=deps)
+DEPS_INTL = $(SRCS_INTL:c=dep)
 
 # default version string is parsed from git tags, otherwise extracted from the source
 VERSION = $(shell $(GIT) describe --tags || grep "define TM_VERSION" $(SRCDIR)/tinymasker.c | grep -o '".*"' | sed 's/"//g')
@@ -52,13 +52,13 @@ debug: $(SRCS_INTL)
 clean:
 	$(RM) -f $(TARGET) $(TARGET).debug $(OBJS_INTL)
 
-deps: $(DEPS_INTL)
-	$(CAT) $^ > $(SRCDIR)/Makefile.deps
+dep: $(DEPS_INTL)
+	$(CAT) $^ > $(SRCDIR)/Makefile.dep
 
 $(DEPS_INTL): $(SRCS_INTL)
-	$(CC) -MM -MT $(@:deps=o) $(CFLAGS) $(@:deps=c) > $@
+	$(CC) -MM -MT $(@:dep=o) $(CFLAGS) $(@:dep=c) > $@
 
 
 # dependencies
--include $(SRCDIR)/Makefile.deps
+-include $(SRCDIR)/Makefile.dep
 -include $(SRCDIR)/Makefile.util

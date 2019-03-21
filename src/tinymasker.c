@@ -1,4 +1,4 @@
-#define DEBUG_KMER
+// #define DEBUG_KMER
 #define _printu_v16i8(a) { \
 	uint8_t _buf[16]; \
 	_storeu_v16i8(_buf, a); \
@@ -1907,14 +1907,27 @@ tm_pair_t tm_seed_decode(tm_seed_t const *p)
 	 */
 	uint32_t const rt = (2 * v + u) & 0x7fffffff, r = (rt + 0x80030000) / 3U;
 	uint32_t const q  = (2 * u + v) / 3U;
-	// debug("r(%x), qt(%x), q(%x)", r, qt, q);
+
+	uint32_t const vv = v & 0x3fffffff;
+	uint32_t const uu = u & 0x3fffffff;
+	uint32_t const rt2 = 2 * vv + uu, rr = rt2 + 0x30000, r2 = (rr - 0xc0000000) / 3U;
+	uint32_t const qt2 = 2 * uu + vv, qq = qt2 & 0x3fffffff, q2 = qq / 3U;
+	debug("r(%x), q(%x), v(%x), u(%x), r2(%x, %x, %x), q2(%x, %x, %x)", r, q, vv, uu, rt2, rr, r2, qt2, qq, q2);
 
 	/* subtract offset */
 	return((tm_pair_t){
-		.r = r,		/* leaves direction flag at bit 30 */
-		.q = q
+		.r = r2,		/* leaves direction flag at bit 30 */
+		.q = q2
 	});
 }
+
+#if 0
+static _force_inline
+tm_chain_t tm_chain_decode(tm_chain_t const *p)
+{
+	return((tm_chain_t){ 0 });
+}
+#endif
 
 static _force_inline
 uint64_t tm_seed_dir(tm_seed_t const *s)
@@ -1959,24 +1972,32 @@ tm_pair_t tm_span_decode(tm_span_t const *s)
 
 typedef struct {
 	/* base seed position; converted to u-v coordinate */
-	tm_seed_t pos;
+	struct {
+		uint32_t q, r;
+	} pos;
 
 	/* reference and query side spans */
-	tm_span_t span;
+	struct {
+		uint16_t q, r;
+	} span;
 
 	/* attributes */
 	union {
 		struct {
-			uint32_t rid : 24;		/* reference id */
+			uint32_t dir : 1;		/* 1 if reverse complement */
+			uint32_t rid : 23;		/* reference id */
 			uint32_t weight : 8;	/* weight; calculated from seed count and sequence length */
 		} stat;
-		uint32_t scnt;				/* chained seed count */
+		struct {
+			uint32_t dir : 1;		/* 1 if reverse complement */
+			uint32_t scnt : 31;		/* chained seed count */
+		} cnt;
 	} attr;
 } tm_chain_t;
 _static_assert(sizeof(tm_chain_t) == 16);
 typedef struct { tm_chain_t *a; size_t n, m; } tm_chain_v;
 
-#define tm_chain_attr(x)		( (x).attr.scnt )
+#define tm_chain_attr(x)		( (x).attr.cnt )
 KRADIX_SORT_INIT(chain, tm_chain_t, tm_chain_attr, 4);
 
 
@@ -2441,7 +2462,10 @@ size_t tm_chain_seed(tm_idx_profile_t const *profile, tm_seed_t *seed, size_t sc
 
 		debugblock({
 			if(_ext_v2i32(cnt, 0) >= _ext_v2i32(min_cnt, 0)) {
-				debug("%r ---> %r, cnt(%u)", tm_seed_to_str, p, tm_seed_to_str, s, _ext_v2i32(cnt, 0));
+				tm_pair_t spos = tm_seed_decode(p);
+				tm_pair_t epos = tm_seed_decode(s);
+
+				// debug("%r ---> %r, cnt(%u)", tm_seed_to_str, p, tm_seed_to_str, s, _ext_v2i32(cnt, 0));
 			}
 		});
 
@@ -2460,105 +2484,96 @@ size_t tm_chain_seed(tm_idx_profile_t const *profile, tm_seed_t *seed, size_t sc
 /* filter */
 
 typedef struct {
-	v32i8_t (*r)(uint8_t const *);
-	v32i8_t (*q)(uint8_t const *);
-} tm_filter_load_t;
-
-typedef struct {
-	uint8_t const *r;
-	uint8_t const *q;
-} tm_filter_seq_t;
-
-typedef struct {
-	uint8_t r[32], q[32];
+	v16i8_t scv, gv, cv, pv;
+	uint8_t fw[64], rv[64];
 } tm_filter_work_t;
 
 
+static _force_inline
+void tm_filter_work_init(tm_filter_work_t *w, tm_idx_profile_t const *profile)
+{
+	w->scv = _load_v16i8(&profile->filter.score_matrix); 
+	w->gv  = _load_v16i8(&profile->filter.gap);
+	w->pv  = _load_v16i8(&profile->filter.init);
+
+	/* derive p = 1 vector */
+	w->cv  = _add_v16i8(w->pv, w->gv);
+	w->cv  = _maxu_v16i8(w->cv, _bsr_v16i8(w->cv, 1));
+	return;
+}
+
+
 /* 4-bit encoding for reference side; return in reversed orientation */
-static v32i8_t tm_filter_load_rf(uint8_t const *p) {
-	/* reverse, no need for complement */
+static _force_inline
+v32i8_t tm_filter_load_rf(uint8_t const *p) {
 	v32i8_t const v = _loadu_v32i8(p);
 	return(_swap_v32i8(v));
 }
-static v32i8_t tm_filter_load_rr(uint8_t const *p) {
-	/* complement, no need for reverse */
-	static uint8_t const comp[16] __attribute__(( aligned(16) )) = {
-		0x00, 0x08, 0x04, 0x0c, 0x02, 0x0a, 0x06, 0x0e,
-		0x01, 0x09, 0x05, 0x0d, 0x03, 0x0b, 0x07, 0x0f
-	};
 
-	v32i8_t const cv = _from_v16i8_v32i8(_load_v16i8(comp));	/* rip relative */
-	v32i8_t const v = _loadu_v32i8(p - 32), w = _shuf_v32i8(cv, v);
-	return(w);
+static _force_inline
+v32i8_t tm_filter_load_rr(uint8_t const *p) {
+	v32i8_t const v = _loadu_v32i8(p - 32);
+	return(v);
 }
 
 /* 2-bit encoding at [3:2] for query side */
-static v32i8_t tm_filter_load_qf(uint8_t const *p) {
+static _force_inline
+v32i8_t tm_filter_load_qf(uint8_t const *p, uint64_t dir) {
 	/* convert to 4bit */
 	static uint8_t const conv[16] __attribute__(( aligned(16) )) = {
-		[nA] = A,
-		[nC] = C,
-		[nG] = G,
-		[nT] = T
+		[nA]     = A, [nC]     = C, [nG]     = G, [nT]     = T,	/* forward */
+		[nA + 1] = T, [nC + 1] = G, [nG + 1] = C, [nT + 1] = A	/* reverse-complemented */
 	};
 
 	v32i8_t const cv = _from_v16i8_v32i8(_load_v16i8(conv));
-	v32i8_t const v = _loadu_v32i8(p), w = _shuf_v32i8(cv, v);
+	v32i8_t const v = _loadu_v32i8(p), d = _set_v32i8(dir);
+	v32i8_t const w = _shuf_v32i8(cv, _add_v32i8(v, d));
 	return(w);
 }
-static v32i8_t tm_filter_load_qr(uint8_t const *p) {
+
+static _force_inline
+v32i8_t tm_filter_load_qr(uint8_t const *p, uint64_t dir) {
 	/* reverse and complement */
 	static uint8_t const conv[16] __attribute__(( aligned(16) )) = {
-		[nA] = T,
-		[nC] = G,
-		[nG] = C,
-		[nT] = A
+		[nA]     = A, [nC]     = C, [nG]     = G, [nT]     = T,	/* forward */
+		[nA + 1] = T, [nC + 1] = G, [nG + 1] = C, [nT + 1] = A	/* reverse-complemented */
 	};
 
 	v32i8_t const cv = _from_v16i8_v32i8(_load_v16i8(conv));
-	v32i8_t const v = _loadu_v32i8(p - 32), w = _shuf_v32i8(cv, v);
+	v32i8_t const v = _loadu_v32i8(p - 32), d = _set_v32i8(dir);
+	v32i8_t const w = _shuf_v32i8(cv, _add_v32i8(v, d));
 	return(_swap_v32i8(w));
 }
 
-
 static _force_inline
-void tm_filter_load_seq(tm_filter_work_t *w, tm_filter_load_t load, tm_filter_seq_t seq)
+void tm_filter_load_seq(tm_filter_work_t *w, uint8_t const *r, uint8_t const *q, tm_chain_t const *c)
 {
-	v32i8_t const rv = load.r(seq.r);
-	v32i8_t const qv = load.q(seq.q);
+	/* ref */
+	v32i8_t const rf = tm_filter_load_rf(&r[c->pos.r + c->span.r]);
+	v32i8_t const rr = tm_filter_load_rr(&r[c->pos.r]);
+	_store_v32i8(&w->fw[0], rf);
+	_store_v32i8(&w->rv[0], rr);
 
-	_print_v32i8(rv);
-	_print_v32i8(qv);
-
-	_store_v32i8(w->r, rv);
-	_store_v32i8(w->q, qv);
+	/* query */
+	uint64_t const dir = c->attr.stat.dir;
+	v32i8_t const qf = tm_filter_load_qf(&q[c->pos.q + c->span.q], dir);
+	v32i8_t const qr = tm_filter_load_qr(&q[c->pos.q], dir);
+	_store_v32i8(dir ? &w->rv[32] : &w->fw[32], qf);
+	_store_v32i8(dir ? &w->fw[32] : &w->rv[32], qr);
 	return;
 }
 
 static _force_inline
-int64_t tm_filter_extend(tm_idx_profile_t const *profile, tm_filter_load_t load, tm_filter_seq_t seq)
+int64_t tm_filter_extend_core(tm_filter_work_t *w, uint8_t const *buf)
 {
-	/* load sequence vectors */
-	tm_filter_work_t w __attribute__(( aligned(32) ));
-	tm_filter_load_seq(&w, load, seq);
-
-	/* load constants */
-	v16i8_t const score_matrix = _load_v16i8(&profile->filter.score_matrix);
-	v16i8_t const gv = _load_v16i8(&profile->filter.gap);
-	v16i8_t pv = _load_v16i8(&profile->filter.init);
-	v16i8_t cv = _add_v16i8(pv, gv);
-	v16i8_t mv = pv;
-
-	/* complete p = 1 vector */
-	cv = _maxu_v16i8(cv, _bsr_v16i8(cv, 1));
-	// _printu_v16i8(pv);
-	// _printu_v16i8(cv);
-	// _printu_v16i8(mv);
+	uint8_t const *r = &buf[32 - 8], *q = &buf[32 - 8];
+	v16i8_t const scv = w->scv, gv = w->gv;
+	v16i8_t pv = w->pv, cv = w->cv, mv = w->pv;
 
 	#define _calc_next(_rv, _qv, _pv, _cv, _shift) ({ \
 		/* calc score profile vector with shuffling score matrix vector */ \
 		v16i8_t const match = _and_v16i8(_rv, _qv);		/* cmpeq */ \
-		v16i8_t const sv = _shuf_v16i8(score_matrix, match); \
+		v16i8_t const sv = _shuf_v16i8(scv, match); \
 		v16i8_t const x = _add_v16i8(_pv, sv); \
 		v16i8_t const y = _add_v16i8(_cv, gv); \
 		v16i8_t const z = _maxu_v16i8(y, _shift(y, 1)); \
@@ -2567,17 +2582,19 @@ int64_t tm_filter_extend(tm_idx_profile_t const *profile, tm_filter_load_t load,
 	})
 
 	/* 32 vector updates */
-	v16i8_t qv = _load_v16i8(&w.q[0]);		/* load query side initial vector */
+	v16i8_t qv = _load_v16i8(q);		/* load query side initial vector */
 	for(size_t i = 0; i < 16; i++) {
 		/* #0 (even) */
-		v16i8_t const rv = _loadu_v16i8(&w.r[23 - i]);	/* move rightward */
+		r--;
+		v16i8_t const rv = _loadu_v16i8(r);	/* move rightward */
 		v16i8_t const ev = _calc_next(rv, qv, pv, cv, _bsl_v16i8);
 		mv = _maxu_v16i8(mv, ev);
 		// _printu_v16i8(ev);
 		// _printu_v16i8(mv);
 
 		/* #1 (odd) */
-		qv = _loadu_v16i8(&w.q[i - 7]);	/* move downward */
+		q++;
+		qv = _loadu_v16i8(q);	/* move downward */
 		v16i8_t const ov = _calc_next(rv, qv, cv, ev, _bsr_v16i8);
 		mv = _maxu_v16i8(mv, ov);
 		// _printu_v16i8(ov);
@@ -2588,9 +2605,6 @@ int64_t tm_filter_extend(tm_idx_profile_t const *profile, tm_filter_load_t load,
 		cv = ov;
 	}
 
-	// _printu_v16i8(cv);
-	// _printu_v16i8(mv);
-
 	/* fold scores */
 	return(_hmaxu_v16i8(mv) - 128LL);
 
@@ -2598,67 +2612,15 @@ int64_t tm_filter_extend(tm_idx_profile_t const *profile, tm_filter_load_t load,
 }
 
 static _force_inline
-void tm_filter_load_ptr(tm_filter_seq_t *buf, uint8_t const *ref, uint8_t const *query, tm_chain_t const *p)
+int64_t tm_filter_extend(tm_filter_work_t *w, uint8_t const *r, uint8_t const *q, tm_chain_t const *c)
 {
-	/* FIXME: SIMD? */
-	uint64_t const rdir = tm_seed_dir(&p->pos);
-	tm_pair_t const spos = tm_seed_decode(&p->pos);
-	tm_pair_t const span = tm_span_decode(&p->span);
-	tm_pair_t const epos = tm_add_pair(spos, span);
-	// debug("qdir(%lu), qspos(%x, %x), qepos(%x, %x)", qdir, spos.q, qdir ? 0x40010000 - spos.q : spos.q, epos.q, qdir ? 0x40010000 - epos.q : epos.q);
+	/* load sequences */
+	tm_filter_load_seq(w, r, q, c);
 
-	/* spos */
-	buf[0] = (tm_filter_seq_t){
-		.r = &ref[rdir ? 0x40010000 - spos.r : spos.r],
-		.q = &query[spos.q]
-	};
-
-	/* epos */
-	buf[1] = (tm_filter_seq_t){
-		.r = &ref[rdir ? 0x40010000 - epos.r : epos.r],
-		.q = &query[epos.q]
-	};
-	return;
-}
-
-static _force_inline
-int64_t tm_filter_core(tm_idx_profile_t const *profile, uint8_t const *ref, uint8_t const *query, tm_chain_t const *p)
-{
-	/* always evaluate chain with enough seeds */
-	if(p->attr.scnt >= profile->filter.test_cnt) {		/* set zero to disable filter */
-		return(1);
-	}
-
-	/* filter extension needed; convert seed position to r-q coordinates */
-	tm_filter_seq_t s[2];
-	tm_filter_load_ptr(s, ref, query, p);
-
-	/* determine query direction and load sequence fetcher */
-	static tm_filter_load_t const load[4] = {
-		/* for forward mapping */
-		{ tm_filter_load_rf, tm_filter_load_qf },
-		{ tm_filter_load_rr, tm_filter_load_qf },
-
-		/* for reverse mapping */
-		{ tm_filter_load_rf, tm_filter_load_qr },
-		{ tm_filter_load_rr, tm_filter_load_qr }
-	};
-	tm_filter_load_t const *l = &load[tm_seed_dir(&p->pos)<<1];
-
-	/* determine extension direction */
-	uint64_t const edir = p->span.u > profile->filter.uspan_thresh;
-	debug("dir(%lu, %lu), fw(%lu, %lu), rv(%lu, %lu)", tm_seed_dir(&p->pos), edir,
-		s[edir ^ 1].q - query, s[edir ^ 1].r - ref,
-		s[edir].q - query, s[edir].r - ref
-	);
-
-	/* extend forward and reverse */
-	int64_t const sf = tm_filter_extend(profile, l[0], s[edir ^ 1]);
-	int64_t const sr = tm_filter_extend(profile, l[1], s[edir]);
-	debug("filter, span(%u), scnt(%u), %s, score(%ld, %ld)", p->span.u, p->attr.scnt, p->span.u > profile->filter.uspan_thresh ? "outward" : "inward", sf, sr);
-
-	/* save when score exceeds the threshold */
-	return(sf + sr >= profile->filter.min_score);
+	/* extend */
+	int64_t const fw = tm_filter_extend_core(w, w->fw);
+	int64_t const rv = tm_filter_extend_core(w, w->rv);
+	return(fw + rv);
 }
 
 static _force_inline
@@ -2666,13 +2628,15 @@ size_t tm_filter_save_chain(uint32_t rid, tm_chain_t *q, tm_chain_t const *p)
 {
 	/* load */
 	v16i8_t v = _loadu_v16i8(p);
+	uint32_t const dir = p->attr.cnt.dir;
 
 	/* calc weight */
-	ZCNT_RESULT size_t zc = _lzcnt_u32(p->attr.scnt);
+	ZCNT_RESULT size_t zc = _lzcnt_u32(p->attr.cnt.scnt);
 	uint32_t const weight = 32 - zc;
 
 	/* save */
 	_storeu_v16i8(q, v);
+	q->attr.stat.dir = dir;
 	q->attr.stat.rid = rid;
 	q->attr.stat.weight = weight;
 
@@ -2690,15 +2654,17 @@ size_t tm_filter_chain(tm_idx_sketch_t const *si, tm_idx_profile_t const *profil
 	uint32_t const rid = tm_idx_ref_rid(si);
 	uint8_t const *ref = tm_idx_ref_seq_ptr(si);
 
-	/* load constants */
-	debug("test_cnt(%lu), min_score(%ld), uspan_thresh(%zu), rid(%u)", profile->filter.test_cnt, profile->filter.min_score, profile->filter.uspan_thresh, rid);
+	/* init working buffer (load score vectors on xmm) */
+	tm_filter_work_t w __attribute__(( aligned(32) ));
+	tm_filter_work_init(&w, profile);
 
+	debug("test_cnt(%lu), min_score(%ld), uspan_thresh(%zu), rid(%u)", profile->filter.test_cnt, profile->filter.min_score, profile->filter.uspan_thresh, rid);
 	for(size_t i = 0; i < ccnt; i++) {
 		tm_chain_t const *p = &src[i];
-		debug("%r, scnt(%u)", tm_chain_to_str, p, p->attr.scnt);
+		debug("%r, scnt(%u)", tm_chain_to_str, p, p->attr.cnt.scnt);
 
 		/* try short extension if not heavy enough */
-		if(!tm_filter_core(profile, ref, query, p)) { continue; }
+		if(!tm_filter_extend(&w, ref, query, p)) { continue; }
 
 		/* copy and fold in reference id */
 		dst += tm_filter_save_chain(rid, dst, p);
@@ -2888,22 +2854,19 @@ dz_state_t const *tm_extend_wrap(dz_arena_t *mem, dz_profile_t const *profile, t
 }
 
 static _force_inline
-tm_pair_t tm_calc_max_wrap(dz_state_t const *r)
+tm_pair_t tm_calc_max_wrap(dz_state_t const *r, tm_pair_t rpos)
 {
 	if(r->max.cap == NULL) {
-		return((tm_pair_t){
-			.r = 0,
-			.q = 0
-		});
+		return(rpos);
 	}
 
 	/* get downward max */
-	uint64_t const spos = dz_calc_max_pos_core(r);
-	uint64_t const rspos = spos>>32;
-	uint64_t const qspos = spos & 0xffffffff;
+	int64_t const spos = dz_calc_max_pos_core(r);
+	int64_t const rspos = spos>>32;			/* signed expansion */
+	int64_t const qspos = spos & 0xffffffff;
 	return((tm_pair_t){
-		.r = -rspos,
-		.q =  qspos
+		.r = rpos.r + rspos,
+		.q = rpos.q - qspos
 	});
 }
 
@@ -2927,7 +2890,7 @@ dz_alignment_t const *tm_extend_core(tm_scan_t *self, tm_idx_profile_t const *pf
 	dz_state_t const *r = tm_extend_wrap(self->extend.fill, pf->extend.dz, sk, rpos.r, q);
 	if(r == NULL) { return(NULL); }
 
-	tm_pair_t const spos = tm_calc_max_wrap(r);
+	tm_pair_t const spos = tm_calc_max_wrap(r, rpos);
 	debug("qspos(%u), rspos(%u, %x, %u), qlen(%zu)", spos.q, spos.r, spos.r, spos.r & 0x3fffffff, qlen);
 
 	/* forward */
