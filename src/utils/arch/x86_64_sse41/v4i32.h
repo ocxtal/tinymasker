@@ -88,7 +88,7 @@ typedef struct v4i32_s {
 )
 #define _swap_v4i32(x) ( \
 	(v4i32_t) { \
-		_mm_shuffle_epi32((x).v1, 0xe1) \
+		_mm_shuffle_epi32((x).v1, 0xb1) \
 	} \
 )
 
