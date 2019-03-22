@@ -116,6 +116,22 @@ enum alphabet_2bit {
 #include "bseq.h"
 
 
+/* SIMD supplementary */
+#define _mm_blendv_epi32(x, y, z) ({ \
+	__m128 const _x = _mm_castsi128_ps(x); \
+	__m128 const _y = _mm_castsi128_ps(y); \
+	__m128 const _z = _mm_castsi128_ps(z); \
+	__m128 const _w = _mm_blendv_ps(_x, _y, _z); \
+	_mm_castps_si128(_w); \
+})
+#define _mm_shuffle2_epi32(x, y, z) ({ \
+	__m128 const _x = _mm_castsi128_ps(x); \
+	__m128 const _y = _mm_castsi128_ps(y); \
+	__m128 const _w = _mm_shuffle_ps(_x, _y, z); \
+	_mm_castps_si128(_w); \
+})
+
+
 /* index data structure; we expect each repeat sequence is shorter than 32kbp */
 typedef struct {
 	uint32_t kbits;
@@ -1890,6 +1906,7 @@ typedef struct { tm_seed_t *a; size_t n, m; } tm_seed_v;
 KRADIX_SORT_INIT(seed, tm_seed_t, tm_seed_upos, 4);
 
 
+#if 0
 static _force_inline
 tm_pair_t tm_seed_decode(tm_seed_t const *p)
 {
@@ -1920,6 +1937,8 @@ tm_pair_t tm_seed_decode(tm_seed_t const *p)
 		.q = q2
 	});
 }
+#endif
+
 
 #if 0
 static _force_inline
@@ -1937,8 +1956,11 @@ uint64_t tm_seed_dir(tm_seed_t const *s)
 
 static char *tm_seed_to_str(tm_seed_t const *s)
 {
-	tm_pair_t p = tm_seed_decode(s);
-	return(xbprintf("seed(%x, %x), pos(%x, %u, %u)", s->v, s->u, p.r>>30, p.q & 0x3fffffff, p.r));
+	// tm_pair_t p = tm_seed_decode(s);
+	uint32_t const u = s->u & 0x7fffffff, v = s->v, dir = (u & 0x80000000) != 0;
+	uint32_t const rt = (2 * v + u), r = (rt + 0xc0030000) / 3U;
+	uint32_t const qt = (2 * u + v), q = (qt & 0x7fffffff) / 3U;
+	return(xbprintf("seed(%x, %x), pos(%x, %x, %x)", s->v, s->u, dir, q, r));
 }
 
 
@@ -1952,6 +1974,7 @@ typedef struct { tm_sqiv_t *a; size_t n, m; } tm_sqiv_v;
 
 /* chain */
 
+#if 0
 typedef struct {
 	uint16_t v, u;
 } tm_span_t;
@@ -1969,44 +1992,48 @@ tm_pair_t tm_span_decode(tm_span_t const *s)
 		.q = q
 	});
 }
+#endif
 
 typedef struct {
 	/* base seed position; converted to u-v coordinate */
-	struct {
-		uint32_t q, r;
-	} pos;
+	uint32_t qpos;
+	uint16_t rpos;
+	uint8_t dir, unused;
 
 	/* reference and query side spans */
-	struct {
-		uint16_t q, r;
-	} span;
+	uint32_t qspan, rspan;
+} tm_chain_raw_t;
 
-	/* attributes */
+typedef struct {
+	uint32_t qpos;
+	uint16_t rpos;
+	uint8_t dir, unused;
+
+	uint32_t qspan;
 	union {
 		struct {
-			uint32_t dir : 1;		/* 1 if reverse complement */
-			uint32_t rid : 23;		/* reference id */
+			uint32_t rid : 24;		/* reference id */
 			uint32_t weight : 8;	/* weight; calculated from seed count and sequence length */
-		} stat;
-		struct {
-			uint32_t dir : 1;		/* 1 if reverse complement */
-			uint32_t scnt : 31;		/* chained seed count */
-		} cnt;
+		} sep;
+		uint32_t all;
 	} attr;
 } tm_chain_t;
-_static_assert(sizeof(tm_chain_t) == 16);
 typedef struct { tm_chain_t *a; size_t n, m; } tm_chain_v;
 
-#define tm_chain_attr(x)		( (x).attr.cnt )
+_static_assert(sizeof(tm_chain_t) == 16);
+_static_assert(sizeof(tm_chain_t) == sizeof(tm_chain_raw_t));
+
+#define tm_chain_attr(x)		( (x).attr.all )
 KRADIX_SORT_INIT(chain, tm_chain_t, tm_chain_attr, 4);
 
 
+static char *tm_chain_raw_to_str(tm_chain_raw_t const *c)
+{
+	return(xbprintf("dir(%u), (%u, %u) -- (%u, %u) --> (%u, %u)", c->dir & 0x01, c->qpos & 0x3fffffff, c->rpos, c->qspan, c->rspan, (c->qpos & 0x3fffffff) + c->qspan, c->rpos + c->rspan));
+}
 static char *tm_chain_to_str(tm_chain_t const *c)
 {
-	tm_pair_t p = tm_seed_decode(&c->pos);
-	tm_pair_t s = tm_span_decode(&c->span);
-	uint32_t const q = p.q & 0x3fffffff, r = p.r;
-	return(xbprintf("seed(%x, %x), dir(%u), (%u, %u) -- (%u, %u) --> (%u, %u)", c->pos.v, c->pos.u, p.q>>30, q, r, s.q, s.r, q + s.q, r + s.r));
+	return(xbprintf("dir(%u), pos(%u, %u), qspan(%u), rid(%u), weight(%u)", c->dir & 0x01, c->qpos & 0x3fffffff, c->rpos, c->qspan, c->attr.sep.rid, c->attr.sep.weight));
 }
 
 
@@ -2190,7 +2217,7 @@ size_t tm_collect_seed(tm_ref_sketch_t const *ref, uint8_t const *query, size_t 
 {
 	/* load coordinate constants */
 	v4i32_t const uinc = _set_v4i32(2), vinc = _set_v4i32(-1);
-	v4i32_t uofs = _set_v4i32(0x10000), vofs = _set_v4i32(-0x20000);	/* query offsets */
+	v4i32_t uofs = _set_v4i32(0x10000), vofs = _set_v4i32(0x80000000 - 0x20000);	/* query offsets */
 
 	tm_seed_t *q = tm_seed_reserve(seed, kv_ptr(*seed));
 	tm_sqiv_t *r = tm_sqiv_reserve(sqiv, kv_ptr(*sqiv));
@@ -2391,6 +2418,7 @@ tm_seed_t *tm_chain_find_nearest(uint64_t ruv, tm_seed_t *p, tm_seed_t *t, uint6
 	return(tm_chain_find_alt(n, t, lb));
 }
 
+#if 0
 static _force_inline
 size_t tm_chain_record(v2i32_t root, v2i32_t tail, v2i32_t cnt, v2i32_t min_cnt, tm_chain_t *q)
 {
@@ -2413,6 +2441,78 @@ size_t tm_chain_record(v2i32_t root, v2i32_t tail, v2i32_t cnt, v2i32_t min_cnt,
 }
 
 static _force_inline
+void tm_chain_record(v2i32_t root, v2i32_t tail, v2i32_t cnt, tm_chain_t *q)
+{
+	/* avoid use of general-purpose register to minimize spills */
+	v2i32_t const span = _sub_v2i32(tail, root);
+
+	/* FIXME: raw SSE operations */
+	v4i32_t const chain = ({
+		__m128i const x = _mm_shufflelo_epi16(span.v1, 0xd8);	/* (uint32_t [4]){ -, -, -, (uspan, vspan) } */
+		__m128i const y = _mm_unpacklo_epi32(x, cnt.v1);		/* (uint32_t [4]){ -, -, cnt, (uspan, vspan) } */
+		__m128i const z = _mm_unpacklo_epi64(root.v1, y);		/* (uint32_t [4]){ cnt, (uspan, vspan), upos, vpos } */
+		((v4i32_t){ .v1 = z });
+	});
+	_storeu_v4i32(q, chain);
+	return;
+}
+#endif
+
+static _force_inline
+size_t tm_chain_calc_fwd(v2i32_t cnt, v2i32_t min_cnt)
+{
+	/* forward if cnt > min_cnt */
+	v2i32_t const fv = _gt_v2i32(min_cnt, cnt);
+	uint32_t const fwd = _ext_v2i32(fv, 0);
+	return((uint32_t)(1 + fwd));
+}
+
+#define _print_v4i32x(a) { \
+	debug("(v4i32_t) %s(%x, %x, %x, %x)", #a, _ext_v4i32(a, 3), _ext_v4i32(a, 2), _ext_v4i32(a, 1), _ext_v4i32(a, 0)); \
+}
+
+static _force_inline
+v4i32_t tm_chain_compose(v2i32_t spos, v2i32_t epos)
+{
+	v2i64_t const coef = _set_v2i64(0x55555556);	/* 0.3333... */
+	v4i32_t const ofs  = _seta_v4i32(0, 0x80000000, 0, 0xc0030000);
+
+	v4i32_t const a = _lo_v4i32(epos, spos);	/* 1; (ue, us, ve, vs) */
+	v4i32_t const b = _add_v4i32(				/* 3; (ye, ys, xe, xs) = (2*ue + ve, 2*us + vs, 2*ve + ue, 2*vs + us) */
+		_add_v4i32(a, a),						/* 2; (2*ue, 2*us, 2*ve, 2*vs) */
+		_shuf_v4i32(a, _km_v4i32(1, 0, 3, 2))	/* 2; (ve, vs, ue, us) */
+	);
+
+	/* decode span */
+	v4i32_t const c = _sub_v4i32(_bsr_v4i32(b, 1), b);	/* 4,5; (-ye, ye - ys, -xe, xe - xs) */
+	v4i32_t const span = (v4i32_t){
+		_mm_mul_epu32(coef.v1, c.v1)			/* 6-; (qspan, -, rspan, -) */
+	};
+	// _print_v4i32x(span);
+
+	/* decode pos */
+	v4i32_t const e = _bsr_v4i32(c, 1);			/* 6; (-, -ye, -, -xe) */
+	v4i32_t const f = (v4i32_t){
+		_mm_blendv_epi32(b.v1, e.v1, spos.v1)	/* 7; (-, ys, -, dir ? -xe : xs) */
+	};
+	v4i32_t const g = _add_v4i32(f, ofs);		/* 8; (-, ys + 0x80000000, -, (dir ? -xe : xs) + 0x30000) */
+	v4i32_t const pos = (v4i32_t){
+		_mm_mul_epu32(coef.v1, g.v1)			/* 9-; (qpos, 0, rpos, -) */
+	};
+	// _print_v4i32x(e);
+	// _print_v4i32x(f);
+	// _print_v4i32x(g);
+	_print_v4i32x(pos);
+
+	/* fold pos and span */
+	v4i32_t const h = (v4i32_t){
+		_mm_shuffle2_epi32(pos.v1, span.v1, 0xdd)		/* 15; (qspan, rspan, qpos, rpos) */
+	};
+	_print_v4i32x(h);
+	return(h);		/* (qspan, rspan, qpos, rpos) */
+}
+
+static _force_inline
 size_t tm_chain_seed(tm_idx_profile_t const *profile, tm_seed_t *seed, size_t scnt, tm_chain_v *chain)
 {
 	/*
@@ -2425,7 +2525,7 @@ size_t tm_chain_seed(tm_idx_profile_t const *profile, tm_seed_t *seed, size_t sc
 	uint64_t const window = profile->chain.window.all;	/* window sizes */
 
 	v2i32_t const inc = _seta_v2i32(0, 1);
-	v2i32_t const min_cnt = _load_v2i32(&profile->chain.min_scnt);
+	v2i32_t const min_cnt = _load_v2i32(&profile->chain.min_scnt);		/* shifted left by 16 bits */
 
 	/* src pointers */
 	tm_seed_t *p = seed - 1, *t = &seed[scnt];
@@ -2459,18 +2559,19 @@ size_t tm_chain_seed(tm_idx_profile_t const *profile, tm_seed_t *seed, size_t sc
 			s->u += chained;		/* mark chained */
 		}
 
-
 		debugblock({
 			if(_ext_v2i32(cnt, 0) >= _ext_v2i32(min_cnt, 0)) {
-				tm_pair_t spos = tm_seed_decode(p);
-				tm_pair_t epos = tm_seed_decode(s);
-
-				// debug("%r ---> %r, cnt(%u)", tm_seed_to_str, p, tm_seed_to_str, s, _ext_v2i32(cnt, 0));
+				debug("%r ---> %r, cnt(%u)", tm_seed_to_str, p, tm_seed_to_str, s, _ext_v2i32(cnt, 0));
 			}
 		});
 
 		v2i32_t const tail = (v2i32_t){ .v1 = _mm_cvtsi64_si128(ruv) };
-		q += tm_chain_record(root, tail, cnt, min_cnt, q);
+		if(tm_chain_calc_fwd(cnt, min_cnt) == 0) { continue; }		/* skip if short */
+
+		/* save */
+		v4i32_t const c = tm_chain_compose(root, tail);
+		_store_v4i32(q, c);
+		q++;
 	}
 
 	/* update chain count */
@@ -2546,20 +2647,33 @@ v32i8_t tm_filter_load_qr(uint8_t const *p, uint64_t dir) {
 }
 
 static _force_inline
-void tm_filter_load_seq(tm_filter_work_t *w, uint8_t const *r, uint8_t const *q, tm_chain_t const *c)
+void tm_filter_load_seq(tm_filter_work_t *w, uint8_t const *r, uint8_t const *q, tm_chain_raw_t const *c)
 {
+	/* load positions */
+	uint64_t const dir = c->dir;
+	uint64_t const rpos = c->rpos, rspan = c->rspan;
+	uint64_t const qpos = c->qpos & 0x3fffffff, qspan = c->qspan;
+	debug("rpos(%x), rspan(%x), qpos(%x), qspan(%x), dir(%x)", rpos, rspan, qpos, qspan, dir);
+
 	/* ref */
-	v32i8_t const rf = tm_filter_load_rf(&r[c->pos.r + c->span.r]);
-	v32i8_t const rr = tm_filter_load_rr(&r[c->pos.r]);
+	v32i8_t const rf = tm_filter_load_rf(&r[rpos + rspan]);
+	v32i8_t const rr = tm_filter_load_rr(&r[rpos]);
 	_store_v32i8(&w->fw[0], rf);
 	_store_v32i8(&w->rv[0], rr);
 
 	/* query */
-	uint64_t const dir = c->attr.stat.dir;
-	v32i8_t const qf = tm_filter_load_qf(&q[c->pos.q + c->span.q], dir);
-	v32i8_t const qr = tm_filter_load_qr(&q[c->pos.q], dir);
-	_store_v32i8(dir ? &w->rv[32] : &w->fw[32], qf);
-	_store_v32i8(dir ? &w->fw[32] : &w->rv[32], qr);
+	v32i8_t const qf = tm_filter_load_qf(&q[qpos + qspan], dir);
+	v32i8_t const qr = tm_filter_load_qr(&q[qpos], dir);
+
+	uint8_t *qfp = (dir & 0x01) ? &w->rv[32] : &w->fw[32];
+	uint8_t *qrp = (dir & 0x01) ? &w->fw[32] : &w->rv[32];
+	_store_v32i8(qfp, qf);
+	_store_v32i8(qrp, qr);
+
+	_print_v32i8(rf);
+	_print_v32i8(rr);
+	_print_v32i8(qf);
+	_print_v32i8(qr);
 	return;
 }
 
@@ -2582,7 +2696,7 @@ int64_t tm_filter_extend_core(tm_filter_work_t *w, uint8_t const *buf)
 	})
 
 	/* 32 vector updates */
-	v16i8_t qv = _load_v16i8(q);		/* load query side initial vector */
+	v16i8_t qv = _loadu_v16i8(q);		/* load query side initial vector */
 	for(size_t i = 0; i < 16; i++) {
 		/* #0 (even) */
 		r--;
@@ -2612,7 +2726,7 @@ int64_t tm_filter_extend_core(tm_filter_work_t *w, uint8_t const *buf)
 }
 
 static _force_inline
-int64_t tm_filter_extend(tm_filter_work_t *w, uint8_t const *r, uint8_t const *q, tm_chain_t const *c)
+int64_t tm_filter_extend(tm_filter_work_t *w, uint8_t const *r, uint8_t const *q, tm_chain_raw_t const *c)
 {
 	/* load sequences */
 	tm_filter_load_seq(w, r, q, c);
@@ -2620,27 +2734,27 @@ int64_t tm_filter_extend(tm_filter_work_t *w, uint8_t const *r, uint8_t const *q
 	/* extend */
 	int64_t const fw = tm_filter_extend_core(w, w->fw);
 	int64_t const rv = tm_filter_extend_core(w, w->rv);
+	debug("fw(%ld), rv(%ld), score(%ld)", fw, rv, fw + rv);
 	return(fw + rv);
 }
 
 static _force_inline
-size_t tm_filter_save_chain(uint32_t rid, tm_chain_t *q, tm_chain_t const *p)
+size_t tm_filter_save_chain(uint32_t rid, tm_chain_t *q, tm_chain_raw_t const *p)
 {
 	/* load */
 	v16i8_t v = _loadu_v16i8(p);
-	uint32_t const dir = p->attr.cnt.dir;
+	debug("p(%p), %r", p, tm_chain_raw_to_str, p);
 
 	/* calc weight */
-	ZCNT_RESULT size_t zc = _lzcnt_u32(p->attr.cnt.scnt);
+	ZCNT_RESULT size_t zc = _lzcnt_u32(p->rspan);
 	uint32_t const weight = 32 - zc;
 
 	/* save */
 	_storeu_v16i8(q, v);
-	q->attr.stat.dir = dir;
-	q->attr.stat.rid = rid;
-	q->attr.stat.weight = weight;
+	q->attr.sep.rid = rid;			/* overwrite */
+	q->attr.sep.weight = weight;
 
-	debug("q(%p), rid(%u), weight(%u)", q, rid, weight);
+	debug("q(%p), %r, rid(%u), weight(%u)", q, tm_chain_to_str, q, rid, weight);
 	return(1);
 }
 
@@ -2648,10 +2762,10 @@ static _force_inline
 size_t tm_filter_chain(tm_idx_sketch_t const *si, tm_idx_profile_t const *profile, uint8_t const *query, tm_chain_t *chain, size_t ccnt)
 {
 	/* alias pointer */
-	tm_chain_t const *src = chain;
+	tm_chain_raw_t const *src = (tm_chain_raw_t const *)chain;
 	tm_chain_t *dst = chain;
 
-	uint32_t const rid = tm_idx_ref_rid(si);
+	uint32_t const rid = tm_idx_ref_rid(si);		/* FIXME: kept on xmm? */
 	uint8_t const *ref = tm_idx_ref_seq_ptr(si);
 
 	/* init working buffer (load score vectors on xmm) */
@@ -2660,11 +2774,11 @@ size_t tm_filter_chain(tm_idx_sketch_t const *si, tm_idx_profile_t const *profil
 
 	debug("test_cnt(%lu), min_score(%ld), uspan_thresh(%zu), rid(%u)", profile->filter.test_cnt, profile->filter.min_score, profile->filter.uspan_thresh, rid);
 	for(size_t i = 0; i < ccnt; i++) {
-		tm_chain_t const *p = &src[i];
-		debug("%r, scnt(%u)", tm_chain_to_str, p, p->attr.cnt.scnt);
+		tm_chain_raw_t const *p = &src[i];
+		debug("%r", tm_chain_raw_to_str, p);
 
 		/* try short extension if not heavy enough */
-		if(!tm_filter_extend(&w, ref, query, p)) { continue; }
+		if(tm_filter_extend(&w, ref, query, p) < profile->filter.min_score) { continue; }
 
 		/* copy and fold in reference id */
 		dst += tm_filter_save_chain(rid, dst, p);
@@ -2739,11 +2853,11 @@ size_t tm_collect_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *seq, 
 /* X-drop DP extension */
 
 static _force_inline
-tm_aln_t tm_chain_as_aln(tm_chain_t const *chain)
+tm_aln_t tm_chain_as_aln(tm_chain_t const *c)
 {
 	return((tm_aln_t){
-		.pos  = tm_seed_decode(&chain->pos),
-		.span = tm_span_decode(&chain->span),
+		.pos  = { .q = c->qpos,  .r = c->rpos },
+		.span = { .q = c->qspan, .r = c->qspan },
 		.qmax = 0
 	});
 }
@@ -2763,7 +2877,7 @@ uint64_t tm_extend_is_covered(tm_scan_t *self, tm_chain_t const *chain)
 {
 	/* convert chain position to (pseudo) alignment range */
 	tm_aln_t const caln = tm_chain_as_aln(chain);
-	uint32_t const weight = chain->attr.stat.weight;
+	uint32_t const weight = chain->attr.sep.weight;
 
 	/* for each overlapping alignment */
 	tm_aln_t const *v = kv_ptr(self->extend.arr);
@@ -2828,26 +2942,22 @@ void tm_extend_clear(tm_scan_t *self)
 }
 
 static _force_inline
-dz_state_t const *tm_extend_wrap(dz_arena_t *mem, dz_profile_t const *profile, tm_idx_sketch_t const *sk, uint32_t rspos, dz_query_t const *q)
+dz_state_t const *tm_extend_wrap(dz_arena_t *mem, dz_profile_t const *profile, tm_idx_sketch_t const *sk, uint32_t dir, uint32_t rspos, dz_query_t const *q)
 {
 	/* get reference sequence */
 	uint8_t const *ref = tm_idx_ref_seq_ptr(sk);
 	size_t const rlen = tm_idx_ref_seq_len(sk);
 
-	/* determine direction */
-	uint64_t const rdir = (rspos & 0xc0000000) != 0;
-	size_t const rpos = rdir ? 0x40010000 - rspos : rspos;
-
 	/* reference reverse */
 	dz_ref_t r = {
-		.ptr = (char const *)&ref[rpos],
-		.len = rdir ? rpos : rlen - rpos,
-		.dir = rdir ? -1 : 1,
+		.ptr = (char const *)&ref[rspos],
+		.len = dir ? rspos : rlen - rspos,
+		.dir = dir ? -1 : 1,
 
 		.id  = 0,	/* rid is always zero */
 		.init_s = INT16_MIN
 	};
-	debug("ref(%p), rlen(%zu, %u), rdir(%lu), rpos(%zu)", ref, rlen, r.len, rdir, rpos);
+	debug("ref(%p), rlen(%zu, %u), rdir(%lu), rpos(%zu)", ref, rlen, r.len, r.dir, rspos);
 
 	/* extend */
 	return(dz_extend_core(mem, profile, q, &r, (dz_state_t const **)&profile->root, 1));		/* always use root */
@@ -2871,33 +2981,34 @@ tm_pair_t tm_calc_max_wrap(dz_state_t const *r, tm_pair_t rpos)
 }
 
 static _force_inline
-dz_alignment_t const *tm_extend_core(tm_scan_t *self, tm_idx_profile_t const *pf, tm_idx_sketch_t const *sk, uint8_t const *query, size_t qlen, tm_pair_t rpos)
+dz_alignment_t const *tm_extend_core(tm_scan_t *self, tm_idx_profile_t const *pf, tm_idx_sketch_t const *sk, uint8_t const *query, size_t qlen, tm_chain_t const *c)
 {
 	/* flush working memory */
 	dz_arena_flush(self->extend.fill);
+
+	/* load root position */
+	uint32_t const qrpos = c->qpos & 0x3fffffff, rrpos = c->rpos, dir = c->dir;
+	debug("reverse: dir(%u), qpos(%zu, %zx), rpos(%zu, %zx)", dir, qrpos, qrpos, rrpos, rrpos);
 
 	/* query-side profile */
 	static dz_query_conv_t const qconv[2] = {
 		{ .single = dz_query_conv_single_forward, .bulk = dz_query_conv_bulk_forward },
 		{ .single = dz_query_conv_single_reverse, .bulk = dz_query_conv_bulk_reverse },
 	};
-	debug("reverse: qpos(%zu, %zx), rpos(%zu, %zx)", rpos.q, rpos.q, rpos.r, rpos.r);
-
 	dz_query_t *q = dz_pack_query_alloc_mem(self->extend.fill, pf->extend.dz, (char const *)query, qlen);
 
 	/* reference reverse */
-	dz_pack_query_reverse_core(q, pf->extend.dz, qconv[1], (char const *)query, rpos.q);
-	dz_state_t const *r = tm_extend_wrap(self->extend.fill, pf->extend.dz, sk, rpos.r, q);
+	dz_pack_query_reverse_core(q, pf->extend.dz, qconv[1], (char const *)query, qrpos);
+	dz_state_t const *r = tm_extend_wrap(self->extend.fill, pf->extend.dz, sk, dir ^ 0x01, rrpos, q);
 	if(r == NULL) { return(NULL); }
 
-	tm_pair_t const spos = tm_calc_max_wrap(r, rpos);
+	tm_pair_t const spos = tm_calc_max_wrap(r, (tm_pair_t){ .r = rrpos, .q = qrpos });
 	debug("qspos(%u), rspos(%u, %x, %u), qlen(%zu)", spos.q, spos.r, spos.r, spos.r & 0x3fffffff, qlen);
 
 	/* forward */
 	dz_pack_query_forward_core(q, pf->extend.dz, qconv[0], (char const *)&query[spos.q], qlen - spos.q);
-	dz_state_t const *f = tm_extend_wrap(self->extend.fill, pf->extend.dz, sk, spos.r, q);
+	dz_state_t const *f = tm_extend_wrap(self->extend.fill, pf->extend.dz, sk, dir, spos.r, q);
 	if(f == NULL || f->max.score == 0) { return(NULL); }
-
 
 	// debug("forward: qpos(%zu, %zx), rpos(%zu, %zx)", spos.q, spos.q, spos.r, spos.r);
 
@@ -2919,18 +3030,18 @@ size_t tm_extend_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *query,
 	/* for each chain try extension */
 	for(size_t i = 0; i < ccnt; i++) {
 		tm_chain_t const *q = &chain[i];
-		if(q->attr.stat.weight < self->extend.min_weight) { break; }
+		if(q->attr.sep.weight < self->extend.min_weight) { break; }
 
 		/* skip if already covered (and there is no possibility that this chain surpasses the previous ones) */
 		if(tm_extend_is_covered(self, q)) { continue; }
 
-		tm_aln_t const caln = tm_chain_as_aln(q);
-		tm_idx_sketch_t const *s = sk[q->attr.stat.rid];
+		// tm_aln_t const caln = tm_chain_as_aln(q);
+		tm_idx_sketch_t const *s  = sk[q->attr.sep.rid];
 		tm_idx_profile_t const *p = pf[s->h.pid];
-		debug("%r, rid(%u), pid(%u)", tm_chain_to_str, q, q->attr.stat.rid, s->h.pid);
+		debug("%r, rid(%u), pid(%u)", tm_chain_to_str, q, q->attr.sep.rid, s->h.pid);
 
 		/* extend */
-		dz_alignment_t const *aln = tm_extend_core(self, p, s, query, qlen, caln.pos);
+		dz_alignment_t const *aln = tm_extend_core(self, p, s, query, qlen, q);
 		if(aln == NULL || aln->score <= p->extend.min_score) { continue; }
 
 		tm_extend_record(self, q, aln);
