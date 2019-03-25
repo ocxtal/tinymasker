@@ -50,8 +50,10 @@
 #define UNITTEST_UNIQUE_ID		1
 #include "utils/utils.h"		/* include all */
 
-#define DZ_NUCL_4BIT
-#define DZ_MAT_SIZE				( 16 )
+#define DZ_WRAPPED_API			( 0 )
+#define DZ_REF_MAT_SIZE			( 16 )
+#define DZ_QUERY_MAT_SIZE		( 4 )
+#define DZ_TRANSPOSE_MATRIX		( 1 )
 #include "dozeu.h"
 
 
@@ -788,7 +790,7 @@ typedef struct {
 		dz_profile_t *dz;
 		int32_t min_score;
 		uint8_t giv, gev, gih, geh;
-		int8_t score_matrix[DZ_MAT_SIZE * DZ_MAT_SIZE];
+		int8_t score_matrix[DZ_QUERY_MAT_SIZE * DZ_REF_MAT_SIZE];
 	} extend;
 } tm_idx_profile_t;
 // _static_assert(sizeof(tm_idx_profile_t) == 16);
@@ -988,9 +990,9 @@ typedef void (*tm_idx_score_foreach_t)(void *opaque, int8_t *p, size_t i, size_t
 static _force_inline
 void tm_idx_score_foreach(tm_idx_profile_t *profile, void *opaque, tm_idx_score_foreach_t fp)
 {
-	for(size_t i = 0; i < DZ_MAT_SIZE; i++) {
-		for(size_t j = 0; j < DZ_MAT_SIZE; j++) {
-			fp(opaque, &profile->extend.score_matrix[i * DZ_MAT_SIZE + j], i, j);
+	for(size_t i = 0; i < DZ_QUERY_MAT_SIZE; i++) {
+		for(size_t j = 0; j < DZ_REF_MAT_SIZE; j++) {
+			fp(opaque, &profile->extend.score_matrix[i * DZ_REF_MAT_SIZE + j], i, j);
 		}
 	}
 	return;
@@ -2941,42 +2943,128 @@ void tm_extend_clear(tm_scan_t *self)
 	return;
 }
 
+
+
+/* reference fetcher and query converter for dz */
+typedef struct {
+	__m128i mv;
+	uint8_t const *p;
+	int64_t inc;
+	uint64_t conv;
+} tm_extend_fetcher_t;
+
+static __dz_vectorize
+void tm_extend_fetcher_init(tm_extend_fetcher_t *self, uint8_t const *ref, uint32_t dir)
+{
+	self->p = ref;
+	self->inc = dir ? -1LL : 1LL;
+	self->conv = dir ? 0xf7b3d591e6a2c480 : 0xfedcba9876543210;
+	return;
+}
+
+static __dz_vectorize
+dz_fill_fetch_t tm_extend_fetch_next(tm_extend_fetcher_t *self, int8_t const *score_matrix, dz_query_t const *query)
+{
+	dz_unused(query);
+
+	if(*self->p == '\0') {
+		return((dz_fill_fetch_t){
+			.is_term = 1,
+			.ch      = 0
+		});
+	}
+
+	/* fetch base and convert to 2bit */
+	uint32_t const c = *self->p;
+	uint32_t const e = (self->conv>>(4 * c)) & 0x0f;
+	self->mv = _mm_loadl_epi64((__m128i const *)&score_matrix[e * DZ_QUERY_MAT_SIZE]);	/* <<2 */
+
+	/* forward pointer */
+	self->p += self->inc;
+	return((dz_fill_fetch_t){
+		.is_term = 0,
+		.ch      = e
+	});
+}
+
+static __dz_vectorize
+__m128i tm_extend_get_profile(tm_extend_fetcher_t *self, int8_t const *score_matrix, dz_query_t const *query, size_t qidx)
+{
+	dz_unused(score_matrix);
+
+	uint8_t const *packed = dz_query_packed_array(query);
+
+	__m128i const qv = _mm_loadl_epi64((__m128i const *)&packed[qidx]);
+	__m128i const sc = _mm_shuffle_epi8(self->mv, qv);
+	return(_mm_cvtepi8_epi16(sc));
+}
+
+static __dz_vectorize
+dz_trace_match_t tm_extend_get_match(int8_t const *score_matrix, dz_query_t const *query, size_t qidx, uint32_t ch)
+{
+	uint8_t const *packed = dz_query_packed_array(query);
+
+	return((dz_trace_match_t){
+		.score = score_matrix[ch * DZ_QUERY_MAT_SIZE + packed[qidx]],
+		.match = packed[qidx] == ch
+	});
+}
+
+static
+size_t tm_extend_calc_dim(size_t qlen)
+{
+	dz_unused(qlen);
+	return(1);
+}
+
+static __dz_vectorize
+__m128i tm_extend_conv(int8_t const *score_matrix, uint32_t dir, __m128i v)
+{
+	dz_unused(score_matrix);
+
+	static uint8_t const conv[16] __attribute__(( aligned(16) )) = {
+		[nA]     = 0x00, [nC]     = 0x01, [nG]     = 0x02, [nT]     = 0x03,	/* forward */
+		[nA + 1] = 0x03, [nC + 1] = 0x02, [nG + 1] = 0x01, [nT + 1] = 0x00	/* reverse-complemented */
+	};
+	v16i8_t const cv = _load_v16i8(conv);
+	v16i8_t const d = _set_v16i8(dir);
+	v16i8_t const x = _add_v16i8((v16i8_t){ v }, d);
+	v16i8_t const y = _shuf_v16i8(cv, x);
+	return(y.v1);
+}
+
+
 static _force_inline
 dz_state_t const *tm_extend_wrap(dz_arena_t *mem, dz_profile_t const *profile, tm_idx_sketch_t const *sk, uint32_t dir, uint32_t rspos, dz_query_t const *q)
 {
-	/* get reference sequence */
+	/* use 4bit fetcher */
+	tm_extend_fetcher_t w __attribute__(( aligned(16) ));
+
 	uint8_t const *ref = tm_idx_ref_seq_ptr(sk);
-	size_t const rlen = tm_idx_ref_seq_len(sk);
+	tm_extend_fetcher_init(&w, &ref[rspos], dir);
+	debug("ref(%p), rlen(%zu), rdir(%lu), rpos(%zu)", ref, tm_idx_ref_seq_len(sk), dir, rspos);
 
-	/* reference reverse */
-	dz_ref_t r = {
-		.ptr = (char const *)&ref[rspos],
-		.len = dir ? rspos : rlen - rspos,
-		.dir = dir ? -1 : 1,
-
-		.id  = 0,	/* rid is always zero */
-		.init_s = INT16_MIN
+	dz_fetcher_t fetcher = {
+		.opaque      = (void *)&w,
+		.fetch_next  = (dz_fill_fetch_next_t)tm_extend_fetch_next,
+		.get_profile = (dz_fill_get_profile_t)tm_extend_get_profile,		/* direct conversion */
+		.get_bound   = NULL
 	};
-	debug("ref(%p), rlen(%zu, %u), rdir(%lu), rpos(%zu)", ref, rlen, r.len, r.dir, rspos);
-
-	/* extend */
-	return(dz_extend_core(mem, profile, q, &r, (dz_state_t const **)&profile->root, 1));		/* always use root */
+	return(dz_extend_core(mem, profile, q, &fetcher, (dz_state_t const **)&profile->root, 1));
 }
 
 static _force_inline
-tm_pair_t tm_calc_max_wrap(dz_state_t const *r, tm_pair_t rpos)
+tm_pair_t tm_calc_max_wrap(dz_state_t const *r, uint32_t dir, tm_pair_t rpos)
 {
 	if(r->max.cap == NULL) {
 		return(rpos);
 	}
 
 	/* get downward max */
-	int64_t const spos = dz_calc_max_pos_core(r);
-	int64_t const rspos = spos>>32;			/* signed expansion */
-	int64_t const qspos = spos & 0xffffffff;
+	dz_max_pos_t const s = dz_calc_max_pos_core(r);
 	return((tm_pair_t){
-		.r = rpos.r + rspos,
-		.q = rpos.q - qspos
+		.r = rpos.r + (dir ? -s.rpos : s.rpos),
+		.q = rpos.q - s.qpos
 	});
 }
 
@@ -2991,29 +3079,29 @@ dz_alignment_t const *tm_extend_core(tm_scan_t *self, tm_idx_profile_t const *pf
 	debug("reverse: dir(%u), qpos(%zu, %zx), rpos(%zu, %zx)", dir, qrpos, qrpos, rrpos, rrpos);
 
 	/* query-side profile */
-	static dz_query_conv_t const qconv[2] = {
-		{ .single = dz_query_conv_single_forward, .bulk = dz_query_conv_bulk_forward },
-		{ .single = dz_query_conv_single_reverse, .bulk = dz_query_conv_bulk_reverse },
+	static dz_pack_query_t const pack[2] = {
+		{ .dir = 0, .calc_dim = tm_extend_calc_dim, .conv = tm_extend_conv },
+		{ .dir = 1, .calc_dim = tm_extend_calc_dim, .conv = tm_extend_conv }
 	};
-	dz_query_t *q = dz_pack_query_alloc_mem(self->extend.fill, pf->extend.dz, (char const *)query, qlen);
+	dz_query_t *q = dz_pack_query_alloc_mem(self->extend.fill, pf->extend.dz, query, qlen, &pack[0]);
 
 	/* reference reverse */
-	dz_pack_query_reverse_core(q, pf->extend.dz, qconv[1], (char const *)query, qrpos);
+	dz_pack_query_reverse_core(q, pf->extend.dz, query, qrpos, &pack[1]);
 	dz_state_t const *r = tm_extend_wrap(self->extend.fill, pf->extend.dz, sk, dir ^ 0x01, rrpos, q);
 	if(r == NULL) { return(NULL); }
 
-	tm_pair_t const spos = tm_calc_max_wrap(r, (tm_pair_t){ .r = rrpos, .q = qrpos });
+	tm_pair_t const spos = tm_calc_max_wrap(r, dir, (tm_pair_t){ .r = rrpos, .q = qrpos });
 	debug("qspos(%u), rspos(%u, %x, %u), qlen(%zu)", spos.q, spos.r, spos.r, spos.r & 0x3fffffff, qlen);
 
 	/* forward */
-	dz_pack_query_forward_core(q, pf->extend.dz, qconv[0], (char const *)&query[spos.q], qlen - spos.q);
+	dz_pack_query_forward_core(q, pf->extend.dz, &query[spos.q], qlen - spos.q, &pack[0]);
 	dz_state_t const *f = tm_extend_wrap(self->extend.fill, pf->extend.dz, sk, dir, spos.r, q);
 	if(f == NULL || f->max.score == 0) { return(NULL); }
 
 	// debug("forward: qpos(%zu, %zx), rpos(%zu, %zx)", spos.q, spos.q, spos.r, spos.r);
 
 	/* traceback */
-	dz_alignment_t const *aln = dz_trace_core(self->extend.trace, pf->extend.dz, f);
+	dz_alignment_t const *aln = dz_trace_core(self->extend.trace, pf->extend.dz, f, (dz_trace_get_match_t)tm_extend_get_match);
 	debug("f(%p), aln(%p)", f, aln);
 	return(aln);
 }
