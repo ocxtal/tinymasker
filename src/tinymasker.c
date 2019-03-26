@@ -628,7 +628,7 @@ typedef struct {
 static _force_inline
 tm_ref_sketch_t *tm_ref_sketch(tm_ref_tbuf_t *self, tm_ref_conf_t const *conf, uint8_t const *seq, size_t slen)
 {
-	if(slen > UINT16_MAX) {
+	if(slen > INT16_MAX) {
 		return(NULL);
 	}
 
