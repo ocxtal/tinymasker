@@ -306,31 +306,31 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
  *     rbt_find_next(&it, arr, &v);
  * }
  *
- * range iterator:
- *   _cmp_head(p1, p2)			( (p1)->val < (p2)->val )
- *   _cmp_tail(p1, p2)			( (p1)->val < (p2)->val )
+ * range iterator on normal tree:
+ *   _cmp_head(p1, p2)			( (p1)->val >= (p2)->val )
+ *   _cmp_tail(p1, p2)			( (p1)->val <  (p2)->val )
  *   _cmp_iter(p1, p2)			( 1 )
  *   where head_anchor and tail_anchor containing lb and ub (for [lb, ub) range) respectively.
  *
- * range iterator for interval tree:
+ * range iterator on interval tree:
  *   max_rval is defined maximum right boundary of all the children of the node:
  *     _update(parent, child)	{ if(child->max_rval > parent->max_rval) { parent->max_rval = child->max_rval; } }
  *
- *   contained range query:
- *     _cmp_head(p1, p2)		( (p1)->val             < (p2)->val )
- *     _cmp_tail(p1, p2)		( (p1)->val             < (p2)->val + (p2)->len )
- *     _cmp_iter(p1, p2)		( (p1)->val + (p1)->len < (p2)->val + (p2)->len )
+ *   contained range query (p1 contained in p2):
+ *     _cmp_head(p1, p2)		( (p1)->val             >= (p2)->val )
+ *     _cmp_tail(p1, p2)		( (p1)->val             <  (p2)->val + (p2)->len )
+ *     _cmp_iter(p1, p2)		( (p1)->val + (p1)->len <  (p2)->val + (p2)->len )
  *     where head_anchor and tail_anchor are the same; containing lb and ub (for [lb, ub) range).
  *
- *   containing range query:
+ *   containing range query (p2 contained in p1):
  *     _cmp_head(p1, p2)		( (p1)->max_rval        >= (p2)->val + (p2)->len )
  *     _cmp_tail(p1, p2)		( (p1)->val             <= (p2)->val )
  *     _cmp_iter(p1, p2)		( (p1)->val + (p1)->len >= (p2)->val + (p2)->len )
  *
- *   intersection query:
+ *   intersection query (p1 overlaps with p2):
  *     _cmp_head(p1, p2)		( (p1)->max_rval        > (p2)->val )
  *     _cmp_tail(p1, p2)		( (p1)->val             < (p2)->val + (p2)->len )
- *     _cmp_iter(p1, p2)		( (p1)->val + (p1)->len > (p2)->val + (p2)->len )
+ *     _cmp_iter(p1, p2)		( (p1)->val + (p1)->len > (p2)->val )
  */
 #define RBT_INIT_ITER(_sfx, _bucket_t, _hdr, _cmp_head, _cmp_tail, _cmp_iter) \
 	static _force_inline \
@@ -358,6 +358,7 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
 			w->dv |= 0x01ULL;					/* mark next move is right (tentatvely) */ \
 			if(!rbt_fetch_head_intl_##_sfx(w, p, raw_idx, tail_anchor)) { \
 				/* right child not found */ \
+				debug("right child not found"); \
 				if(rbt_iter_remove_left_parents(w)) { return(1); }		/* reached tail; not found */ \
 			} \
 			_bucket_t const *node = _rbt_ptr(_bucket_t, p, _rbt_idx(w->b[-1])); \
@@ -386,6 +387,7 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
 		if(!_cmp_tail(node, tail_anchor)) { debug("head node(%u) is out of tail", _rbt_idx(w->b[-1])); return(NULL); }	/* first node is out of tail; not found */ \
 		if(!_cmp_iter(node, tail_anchor)) { \
 			/* first node is inappropriate; find next */ \
+			debug("find next"); \
 			if(rbt_fetch_next_intl_##_sfx(w, p, tail_anchor)) { return(NULL); } \
 		} \
 		/* found */ \
@@ -398,22 +400,6 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
 		if(rbt_fetch_next_intl_##_sfx(w, p, tail_anchor)) { return(NULL); } \
 		return(_rbt_ptr(_bucket_t, p, _rbt_idx(w->b[-1]))); \
 	}
-
-#define rbt_foreach(_sfx, _bucket_t, _arr, _from, _to, _body) { \
-	uint32_t const *p = (uint32_t const *)(_arr); \
-	struct rbt_iter_s _it; \
-	uint32_t const *_b = rbt_find_node_intl(&_it, p, (_from)); \
-	debug("found first leaf, dv(%lx), depth(%lu)", _it.dv, _b - _it.ibuf); \
-	uint64_t _rcnt = _tzc_u64(~_it.dv); _it.dv >>= _rcnt; _b -= _rcnt; \
-	debug("found first node, rcnt(%lu), dv(%lx), depth(%lu), node(%u, %u, %u, %u)", _rcnt, _it.dv, _b - _it.ibuf, _b[-1], _rbt_ptr(_bucket_t, _b[-1] & 0xfffffffc)[_key_ofs], _rbt_ptr(_bucket_t, _b[-1] & 0xfffffffc)[0], _rbt_ptr(_bucket_t, _b[-1] & 0xfffffffc)[1]); \
-	while(_it.dv > 1 && _key(_rbt_ptr(_bucket_t, _b[-1] & 0xfffffffc)) < (_to)) { \
-		_bucket_t *n = (_bucket_t *)_rbt_ptr(_bucket_t, _b[-1] & 0xfffffffc); \
-		debug("node(%u, %u, %u, %u)", _b[-1], _key(_rbt_ptr(_bucket_t, _b[-1] & 0xfffffffc)), _rbt_ptr(_bucket_t, _b[-1] & 0xfffffffc)[0], _rbt_ptr(_bucket_t, _b[-1] & 0xfffffffc)[1]); \
-		_body; \
-		_b = rbt_find_next_intl_##_sfx(&_it, p, _b); \
-		debug("found next node, dv(%lx), depth(%lu)", _it.dv, _b - _it.ibuf); \
-	} \
-}
 
 #if 0
 /* create node */
