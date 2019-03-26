@@ -51,6 +51,7 @@
 #include "utils/utils.h"		/* include all */
 
 #define DZ_WRAPPED_API			( 0 )
+#define DZ_CIGAR_OP				0x44494d4d
 #define DZ_REF_MAT_SIZE			( 16 )
 #define DZ_QUERY_MAT_SIZE		( 4 )
 #define DZ_TRANSPOSE_MATRIX		( 1 )
@@ -811,10 +812,10 @@ typedef struct {
 #define tm_idx_sketch(x)			( (tm_ref_sketch_t const *)&(x)->ref )
 #define tm_idx_ref_rid(x)			( (x)->h.rid )
 #define tm_idx_ref_pid(x)			( (x)->h.pid )
-#define tm_idx_ref_seq_ptr(x)		( (uint8_t const *)_add_offset((x), sizeof(tm_idx_sketch_hdr_t) + (x)->h.sofs) )
+#define tm_idx_ref_seq_ptr(x)		( (uint8_t const *)_add_offset((x), (x)->h.sofs) )
 #define tm_idx_ref_seq_len(x)		( (x)->ref.slen )
 #define tm_idx_ref_name_ptr(x)		( (uint8_t const *)_add_offset((x), sizeof(tm_idx_sketch_hdr_t) + (x)->ref.size) )
-#define tm_idx_ref_name_len(x)		( strlen(tm_idx_ref_name_ptr(x)) )
+#define tm_idx_ref_name_len(x)		( strlen((char const *)tm_idx_ref_name_ptr(x)) )
 
 
 typedef struct {
@@ -990,18 +991,20 @@ typedef void (*tm_idx_score_foreach_t)(void *opaque, int8_t *p, size_t i, size_t
 static _force_inline
 void tm_idx_score_foreach(tm_idx_profile_t *profile, void *opaque, tm_idx_score_foreach_t fp)
 {
-	for(size_t i = 0; i < DZ_QUERY_MAT_SIZE; i++) {
-		for(size_t j = 0; j < DZ_REF_MAT_SIZE; j++) {
-			fp(opaque, &profile->extend.score_matrix[i * DZ_REF_MAT_SIZE + j], i, j);
+	for(size_t q = 0; q < DZ_QUERY_MAT_SIZE; q++) {
+		for(size_t r = 0; r < DZ_REF_MAT_SIZE; r++) {
+			fp(opaque, &profile->extend.score_matrix[q * DZ_REF_MAT_SIZE + r], q, r);
 		}
 	}
 	return;
 }
 
 static
-void tm_idx_fill_score_callback(int64_t *s, int8_t *p, size_t i, size_t j)
+void tm_idx_fill_score_callback(int64_t *s, int8_t *p, size_t q, size_t r)
 {
-	*p = s[(i & j) == 0];
+	/* query in 2bit and reference in 4bit */
+	size_t const q4 = (0x8421>>(4 * q)) & 0x0f;
+	*p = s[(q4 & r) == 0];
 	return;
 }
 
@@ -1385,7 +1388,7 @@ tm_idx_sketch_t *tm_idx_save_seq(tm_ref_sketch_t *sr, uint32_t rid, uint32_t pid
 
 	/* copy sequence */
 	uint8_t *s = _add_offset(n, tm_idx_roundup(nlen));
-	for(size_t i = 0; i < slen; i++) {
+	for(size_t i = 0; i < slen; i += 16) {
 		v16i8_t const v = _loadu_v16i8(&seq[i]);
 		_storeu_v16i8(&s[i], v);
 	}
@@ -1401,8 +1404,8 @@ tm_idx_sketch_t *tm_idx_save_seq(tm_ref_sketch_t *sr, uint32_t rid, uint32_t pid
 	);
 	si->h = (tm_idx_sketch_hdr_t){
 		.size = size,
-		.rid = rid,
-		.pid = pid,
+		.rid  = rid,
+		.pid  = pid,
 		.sofs = size - tm_idx_roundup(slen)
 	};
 	return(si);
@@ -1505,7 +1508,7 @@ uint64_t tm_idx_gen_core(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, char cons
 	pt_stream(pt, mii,
 		(pt_source_t)tm_idx_fetch,
 		(pt_worker_t)tm_idx_collect,
-		(pt_drain_t)tm_idx_record
+		(pt_drain_t)tm_idx_record		/* no need for sorting */
 	);
 
 	/* check error */
@@ -2006,6 +2009,25 @@ typedef struct {
 	uint32_t qspan, rspan;
 } tm_chain_raw_t;
 
+static _force_inline
+tm_pair_t tm_chain_raw_pos(tm_chain_raw_t const *chain)
+{
+	return((tm_pair_t){
+		.q = chain->qpos & 0x3fffffff,
+		.r = chain->rpos
+	});
+}
+
+static _force_inline
+tm_pair_t tm_chain_raw_span(tm_chain_raw_t const *chain)
+{
+	return((tm_pair_t){
+		.q = chain->qspan,
+		.r = chain->rspan
+	});
+}
+
+
 typedef struct {
 	uint32_t qpos;
 	uint16_t rpos;
@@ -2038,6 +2060,14 @@ static char *tm_chain_to_str(tm_chain_t const *c)
 	return(xbprintf("dir(%u), pos(%u, %u), qspan(%u), rid(%u), weight(%u)", c->dir & 0x01, c->qpos & 0x3fffffff, c->rpos, c->qspan, c->attr.sep.rid, c->attr.sep.weight));
 }
 
+static _force_inline
+tm_pair_t tm_chain_pos(tm_chain_t const *chain)
+{
+	return((tm_pair_t){
+		.q = chain->qpos & 0x3fffffff,
+		.r = chain->rpos
+	});
+}
 
 
 /* alignment result */
@@ -2047,11 +2077,15 @@ typedef struct {
 	uint32_t qmax;
 
 	/* stats */
-	uint32_t min_weight;
-	int64_t score;
+	int32_t score;
 	dz_alignment_t const *aln;
 
 	/* positions */
+	struct {
+		uint32_t rid : 24;
+		uint32_t max_weight : 8;
+	} attr;
+	uint8_t dir, unused[3];		/* 1 if reverse */
 	tm_pair_t pos, span;
 
 	/* alignment path */
@@ -2067,15 +2101,15 @@ typedef struct { tm_aln_t *a; size_t n, m; } tm_aln_v;
 #define tm_aln_rbt_cmp(a, b)		( (a)->pos.q < (b)->pos.q )
 #define tm_aln_ivt_cmp_head(a, b)	( (a)->qmax                > (b)->pos.q )
 #define tm_aln_ivt_cmp_tail(a, b)	( (a)->pos.q               < (b)->pos.q + (b)->span.q )
-#define tm_aln_ivt_cmp_iter(a, b)	( (a)->pos.q + (a)->span.q > (b)->pos.q + (b)->span.q )
+#define tm_aln_ivt_cmp_iter(a, b)	( (a)->pos.q + (a)->span.q > (b)->pos.q )
 
 static _force_inline
 uint64_t tm_aln_ivt_update(tm_aln_t *parent, tm_aln_t *child)
 {
 	if(child == NULL) { return(1); }
 
-	uint32_t cepos = child->pos.q + child->span.q;
-	uint32_t qmax = parent->qmax;
+	uint32_t const cepos = child->pos.q + child->span.q;
+	uint32_t const qmax = parent->qmax;
 
 	if(cepos > qmax) {
 		parent->qmax = cepos;
@@ -2094,6 +2128,12 @@ RBT_INIT_ITER(aln, tm_aln_t, tm_aln_rbt_header,
 	tm_aln_ivt_cmp_iter
 );
 
+/* array of alignment; allocated in trace stack */
+typedef struct {
+	size_t cnt;
+	tm_aln_t arr[];
+} tm_alnv_t;
+
 
 /* working buffers */
 typedef struct {
@@ -2107,7 +2147,7 @@ typedef struct {
 	} chain;
 
 	struct {
-		uint32_t min_weight;	/* working variable */
+		uint32_t max_weight;	/* working variable */
 		dz_arena_t *fill, *trace;
 
 		/* result bin */
@@ -2653,19 +2693,19 @@ void tm_filter_load_seq(tm_filter_work_t *w, uint8_t const *r, uint8_t const *q,
 {
 	/* load positions */
 	uint64_t const dir = c->dir;
-	uint64_t const rpos = c->rpos, rspan = c->rspan;
-	uint64_t const qpos = c->qpos & 0x3fffffff, qspan = c->qspan;
-	debug("rpos(%x), rspan(%x), qpos(%x), qspan(%x), dir(%x)", rpos, rspan, qpos, qspan, dir);
+	tm_pair_t const pos  = tm_chain_raw_pos(c);
+	tm_pair_t const span = tm_chain_raw_span(c);
+	debug("rpos(%x), rspan(%x), qpos(%x), qspan(%x), dir(%x)", pos.r, span.r, pos.q, span.q, dir);
 
 	/* ref */
-	v32i8_t const rf = tm_filter_load_rf(&r[rpos + rspan]);
-	v32i8_t const rr = tm_filter_load_rr(&r[rpos]);
+	v32i8_t const rf = tm_filter_load_rf(&r[pos.r + span.r]);
+	v32i8_t const rr = tm_filter_load_rr(&r[pos.r]);
 	_store_v32i8(&w->fw[0], rf);
 	_store_v32i8(&w->rv[0], rr);
 
 	/* query */
-	v32i8_t const qf = tm_filter_load_qf(&q[qpos + qspan], dir);
-	v32i8_t const qr = tm_filter_load_qr(&q[qpos], dir);
+	v32i8_t const qf = tm_filter_load_qf(&q[pos.q + span.q], dir);
+	v32i8_t const qr = tm_filter_load_qr(&q[pos.q], dir);
 
 	uint8_t *qfp = (dir & 0x01) ? &w->rv[32] : &w->fw[32];
 	uint8_t *qrp = (dir & 0x01) ? &w->fw[32] : &w->rv[32];
@@ -2728,8 +2768,11 @@ int64_t tm_filter_extend_core(tm_filter_work_t *w, uint8_t const *buf)
 }
 
 static _force_inline
-int64_t tm_filter_extend(tm_filter_work_t *w, uint8_t const *r, uint8_t const *q, tm_chain_raw_t const *c)
+int64_t tm_filter_extend(tm_filter_work_t *w, tm_idx_profile_t const *profile, uint8_t const *r, uint8_t const *q, tm_chain_raw_t const *c)
 {
+	/* skip if long enough */
+	// if(c->qspan >= 128) { return(1); }
+
 	/* load sequences */
 	tm_filter_load_seq(w, r, q, c);
 
@@ -2737,7 +2780,7 @@ int64_t tm_filter_extend(tm_filter_work_t *w, uint8_t const *r, uint8_t const *q
 	int64_t const fw = tm_filter_extend_core(w, w->fw);
 	int64_t const rv = tm_filter_extend_core(w, w->rv);
 	debug("fw(%ld), rv(%ld), score(%ld)", fw, rv, fw + rv);
-	return(fw + rv);
+	return(fw + rv >= profile->filter.min_score);
 }
 
 static _force_inline
@@ -2748,13 +2791,12 @@ size_t tm_filter_save_chain(uint32_t rid, tm_chain_t *q, tm_chain_raw_t const *p
 	debug("p(%p), %r", p, tm_chain_raw_to_str, p);
 
 	/* calc weight */
-	ZCNT_RESULT size_t zc = _lzcnt_u32(p->rspan);
-	uint32_t const weight = 32 - zc;
+	ZCNT_RESULT size_t weight = _lzcnt_u32(p->rspan);
 
 	/* save */
 	_storeu_v16i8(q, v);
 	q->attr.sep.rid = rid;			/* overwrite */
-	q->attr.sep.weight = weight;
+	q->attr.sep.weight = weight;	/* negated and offsetted by 32; the larger for the longer chain */
 
 	debug("q(%p), %r, rid(%u), weight(%u)", q, tm_chain_to_str, q, rid, weight);
 	return(1);
@@ -2780,7 +2822,7 @@ size_t tm_filter_chain(tm_idx_sketch_t const *si, tm_idx_profile_t const *profil
 		debug("%r", tm_chain_raw_to_str, p);
 
 		/* try short extension if not heavy enough */
-		if(tm_filter_extend(&w, ref, query, p) < profile->filter.min_score) { continue; }
+		if(!tm_filter_extend(&w, profile, ref, query, p)) { continue; }
 
 		/* copy and fold in reference id */
 		dst += tm_filter_save_chain(rid, dst, p);
@@ -2853,13 +2895,14 @@ size_t tm_collect_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *seq, 
 
 
 /* X-drop DP extension */
+#define TM_WEIGHT_MARGIN			( 3U )
 
 static _force_inline
 tm_aln_t tm_chain_as_aln(tm_chain_t const *c)
 {
 	return((tm_aln_t){
-		.pos  = { .q = c->qpos,  .r = c->rpos },
-		.span = { .q = c->qspan, .r = c->qspan },
+		.pos  = tm_chain_pos(c),
+		.span = { .q = c->qspan, .r = c->qspan },	/* duplicate qspan because rspan is missing in chain object */
 		.qmax = 0
 	});
 }
@@ -2875,23 +2918,50 @@ uint64_t tm_extend_is_complete(tm_scan_t *self)
 }
 
 static _force_inline
-uint64_t tm_extend_is_covered(tm_scan_t *self, tm_chain_t const *chain)
+uint64_t tm_extend_test_range(tm_chain_t const *c, tm_aln_t const *p)
 {
-	/* convert chain position to (pseudo) alignment range */
-	tm_aln_t const caln = tm_chain_as_aln(chain);
-	uint32_t const weight = chain->attr.sep.weight;
+	/*
+	 * test q-range; skip if entirely covered
+	 * c->qpos > p->qpos && c->qpos + c->qspan < p->qpos + p->qspan
+	 */
+	tm_pair_t const pos = tm_chain_pos(c);
+	if((uint32_t)(pos.q - p->pos.q) < (uint32_t)(p->span.q - c->qspan)) {
+		debug("covered, (%u, %u), (%u, %u)", pos.q, pos.q + c->qspan, p->pos.q, p->pos.q + p->span.q);
+
+		if(c->attr.sep.weight + TM_WEIGHT_MARGIN > p->attr.max_weight + 1U) {
+			debug("weight not enough, weight(%u), max_weight(%u)", c->attr.sep.weight, p->attr.max_weight);
+			return(1);	/* still too shorter than overlapping alignment */
+		}
+	}
+	return(0);
+}
+
+static _force_inline
+uint64_t tm_extend_is_covered(tm_scan_t *self, tm_chain_t const *c)
+{
+	debug("%r", tm_chain_to_str, c);
 
 	/* for each overlapping alignment */
 	tm_aln_t const *v = kv_ptr(self->extend.arr);
 	if(v == NULL) { return(0); }	/* no result found */
 
+	/* init iterator */
 	rbt_iter_t it;
+	tm_aln_t const caln = tm_chain_as_aln(c);		/* convert chain position to (pseudo) alignment range */
 	rbt_init_iter_aln(&it, v, &caln);
 
 	tm_aln_t const *p = rbt_fetch_head_aln(&it, v, &caln);
 	while(p != NULL) {
-		if(p->min_weight > weight) {
+		debug("p(%p), weight(%u), (%u) --- %u --> (%u)", p, p->attr.max_weight, p->pos.q, p->span.q, p->pos.q + p->span.q);
+
+		/* overlapping and heavy enough */
+		if(c->attr.sep.weight > p->attr.max_weight) {	/* smaller weight is better */
+			debug("weight too large, weight(%u), max_weight(%u)", c->attr.sep.weight, p->attr.max_weight);
 			return(1);		/* already covered */
+		}
+
+		if(tm_extend_test_range(c, p)) {
+			return(1);		/* still too shorter than overlapping alignment */
 		}
 
 		p = rbt_fetch_next_aln(&it, v, &caln);
@@ -2901,7 +2971,7 @@ uint64_t tm_extend_is_covered(tm_scan_t *self, tm_chain_t const *chain)
 
 
 static _force_inline
-tm_pair_t tm_calc_span(dz_alignment_t const *aln)
+tm_pair_t tm_aln_span(dz_alignment_t const *aln)
 {
 	return((tm_pair_t){
 		.r = aln->ref_length,
@@ -2910,24 +2980,28 @@ tm_pair_t tm_calc_span(dz_alignment_t const *aln)
 }
 
 static _force_inline
-void tm_extend_record(tm_scan_t *self, tm_chain_t const *chain, dz_alignment_t const *aln)
+void tm_extend_record(tm_scan_t *self, tm_chain_t const *chain, tm_pair_t spos, dz_alignment_t const *aln)
 {
 	_unused(chain);
 
-	tm_pair_t const span = tm_calc_span(aln);
+	tm_pair_t const span = tm_aln_span(aln);
 	tm_aln_t a = {
 		/* coordinates */
-		.qmax = 0,				/* spos.q + span.q, */
-		.pos  = { 0, 0 },		/* FIXME */
+		.qmax = spos.q + span.q,	/* spos.q + span.q, */
+		.dir  = chain->dir,
+		.pos  = spos,
 		.span = span,
-
-		/* path */
-		.path = { .ptr = aln->path, .len = aln->path_length },
+		.attr = {
+			.rid = chain->attr.sep.rid,
+			.max_weight = chain->attr.sep.weight + TM_WEIGHT_MARGIN		/* x8 */
+		},
 
 		/* stats */
-		.min_weight = 0,
-		.score = aln->score,
-		.aln = aln				/* save original */
+		.score = aln->score,		/* copy */
+		.aln = aln,					/* save original */
+
+		/* path */
+		.path = { .ptr = aln->path, .len = aln->path_length }
 	};
 
 	kv_push(tm_aln_t, self->extend.arr, a);
@@ -2938,9 +3012,53 @@ void tm_extend_record(tm_scan_t *self, tm_chain_t const *chain, dz_alignment_t c
 static _force_inline
 void tm_extend_clear(tm_scan_t *self)
 {
+	/* clear test threshold */
+	self->extend.max_weight = 32;
+
+	/* clear rbt */
 	kv_clear(self->extend.arr);
+	kv_pushp(tm_aln_t, self->extend.arr);
+	rbt_init_static_aln(kv_ptr(self->extend.arr));
+
+	/* clear working stack */
 	dz_arena_flush(self->extend.trace);
 	return;
+}
+
+static _force_inline
+tm_alnv_t *tm_extend_finalize(tm_scan_t *self)
+{
+	/* results */
+	tm_aln_t const *src = kv_ptr(self->extend.arr);
+	size_t const cnt = kv_cnt(self->extend.arr) - 1;
+
+	/* allocate dst array */
+	tm_alnv_t *dst = dz_arena_malloc(self->extend.trace,
+		  sizeof(tm_alnv_t)			/* header */
+		+ sizeof(tm_aln_t) * cnt	/* payload */
+	);
+	dst->cnt = cnt;
+	debug("src(%p), cnt(%zu), dst(%p)", src, cnt, dst);
+
+	/* sort by qpos: traverse tree */
+	tm_aln_t const all = {
+		.pos  = { .q = 0 },
+		.span = { .q = 20 },
+		// .qmax = INT32_MAX
+	};
+
+	rbt_iter_t it;
+	rbt_init_iter_aln(&it, src, &all);
+
+	tm_aln_t const *p = rbt_fetch_head_aln(&it, src, &all);
+	tm_aln_t *q = dst->arr;
+	while(p != NULL) {
+		debug("p(%p), pos(%u, %u), span(%u, %u)", p, p->pos.q, p->pos.r, p->span.q, p->span.r);
+
+		*q++ = *p;
+		p = rbt_fetch_next_aln(&it, src, &all);
+	}
+	return(dst);
 }
 
 
@@ -2956,9 +3074,18 @@ typedef struct {
 static __dz_vectorize
 void tm_extend_fetcher_init(tm_extend_fetcher_t *self, uint8_t const *ref, uint32_t dir)
 {
-	self->p = ref;
-	self->inc = dir ? -1LL : 1LL;
+	self->p    = ref - dir;
+	self->inc  = dir ? -1LL : 1LL;
 	self->conv = dir ? 0xf7b3d591e6a2c480 : 0xfedcba9876543210;
+
+/*
+	uint8_t const *p = ref - dir;
+	while(*p != '\0') {
+		fprintf(stderr, "%c", "NACMGRSVTWYHKDBN"[*p]);
+		p += self->inc;
+	}
+	fprintf(stderr, "\n");
+*/
 	return;
 }
 
@@ -2977,7 +3104,8 @@ dz_fill_fetch_t tm_extend_fetch_next(tm_extend_fetcher_t *self, int8_t const *sc
 	/* fetch base and convert to 2bit */
 	uint32_t const c = *self->p;
 	uint32_t const e = (self->conv>>(4 * c)) & 0x0f;
-	self->mv = _mm_loadl_epi64((__m128i const *)&score_matrix[e * DZ_QUERY_MAT_SIZE]);	/* <<2 */
+	self->mv = _mm_cvtsi64x_si128(_loadu_u32(&score_matrix[e * DZ_QUERY_MAT_SIZE]));	/* <<2 */
+	// debug("p(%p), c(%x, %c), e(%x), inc(%ld)", self->p, c, "NACMGRSVTWYHKDBN"[c], e, self->inc);
 
 	/* forward pointer */
 	self->p += self->inc;
@@ -2993,10 +3121,12 @@ __m128i tm_extend_get_profile(tm_extend_fetcher_t *self, int8_t const *score_mat
 	dz_unused(score_matrix);
 
 	uint8_t const *packed = dz_query_packed_array(query);
-
-	__m128i const qv = _mm_loadl_epi64((__m128i const *)&packed[qidx]);
-	__m128i const sc = _mm_shuffle_epi8(self->mv, qv);
-	return(_mm_cvtepi8_epi16(sc));
+	__m128i const v = ({
+		__m128i const qv = _mm_loadl_epi64((__m128i const *)&packed[qidx]);
+		__m128i const sc = _mm_shuffle_epi8(self->mv, qv);
+		_mm_cvtepi8_epi16(sc);
+	});
+	return(v);
 }
 
 static __dz_vectorize
@@ -3033,16 +3163,45 @@ __m128i tm_extend_conv(int8_t const *score_matrix, uint32_t dir, __m128i v)
 	return(y.v1);
 }
 
+static _force_inline
+dz_query_t *tm_pack_query_wrap(dz_arena_t *mem, dz_profile_t const *profile, tm_idx_sketch_t const *sk, uint8_t const *query, size_t qlen, tm_pair_t dir, tm_pair_t pos)
+{
+	dz_pack_query_t const pack = {
+		.dir = 0,		/* ignored */
+		.calc_dim = tm_extend_calc_dim,
+		.conv = tm_extend_conv
+	};
+
+	/* calc reference remaining length */
+	size_t const rlen = tm_idx_ref_seq_len(sk);
+	size_t const rrem = dir.r ? pos.r : rlen - pos.r;
+
+	if(dir.q) {
+		size_t const qrem = MIN2(2 * rrem, pos.q);
+		debug("reverse: qpos(%u) --- qspan(%u) --> qspos(%u)", pos.q, qrem, pos.q - qrem);
+
+		dz_query_t *q = dz_pack_query_alloc_mem(mem, profile, &query[pos.q - qrem], qrem, &pack);
+		dz_pack_query_reverse_core(q, profile, &query[pos.q - qrem], qrem, &pack);
+		return(q);
+	} else {
+		size_t const qrem = MIN2(2 * rrem, qlen - pos.q);
+		debug("forward: qpos(%u) --- qspan(%u) --> qepos(%u)", pos.q, qrem, pos.q + qrem);
+
+		dz_query_t *q = dz_pack_query_alloc_mem(mem, profile, &query[pos.q], qrem, &pack);
+		dz_pack_query_forward_core(q, profile, &query[pos.q], qrem, &pack);
+		return(q);
+	}
+}
 
 static _force_inline
-dz_state_t const *tm_extend_wrap(dz_arena_t *mem, dz_profile_t const *profile, tm_idx_sketch_t const *sk, uint32_t dir, uint32_t rspos, dz_query_t const *q)
+dz_state_t const *tm_extend_wrap(dz_arena_t *mem, dz_profile_t const *profile, tm_idx_sketch_t const *sk, dz_query_t const *q, uint32_t rdir, tm_pair_t pos)
 {
+	uint8_t const *ref = tm_idx_ref_seq_ptr(sk);
+
 	/* use 4bit fetcher */
 	tm_extend_fetcher_t w __attribute__(( aligned(16) ));
-
-	uint8_t const *ref = tm_idx_ref_seq_ptr(sk);
-	tm_extend_fetcher_init(&w, &ref[rspos], dir);
-	debug("ref(%p), rlen(%zu), rdir(%lu), rpos(%zu)", ref, tm_idx_ref_seq_len(sk), dir, rspos);
+	tm_extend_fetcher_init(&w, &ref[pos.r], rdir);
+	debug("ref(%p, %p, %zu), rlen(%zu), rdir(%lu), rpos(%zu)", ref, &ref[pos.r], &ref[pos.r] - ref, tm_idx_ref_seq_len(sk), rdir, pos.r);
 
 	dz_fetcher_t fetcher = {
 		.opaque      = (void *)&w,
@@ -3054,7 +3213,7 @@ dz_state_t const *tm_extend_wrap(dz_arena_t *mem, dz_profile_t const *profile, t
 }
 
 static _force_inline
-tm_pair_t tm_calc_max_wrap(dz_state_t const *r, uint32_t dir, tm_pair_t rpos)
+tm_pair_t tm_calc_max_wrap(dz_state_t const *r, uint32_t rdir, tm_pair_t rpos)
 {
 	if(r->max.cap == NULL) {
 		return(rpos);
@@ -3063,47 +3222,49 @@ tm_pair_t tm_calc_max_wrap(dz_state_t const *r, uint32_t dir, tm_pair_t rpos)
 	/* get downward max */
 	dz_max_pos_t const s = dz_calc_max_pos_core(r);
 	return((tm_pair_t){
-		.r = rpos.r + (dir ? -s.rpos : s.rpos),
+		.r = rpos.r + (rdir ? -s.rpos : s.rpos),
 		.q = rpos.q - s.qpos
 	});
 }
 
+typedef struct {
+	tm_pair_t spos;
+	dz_alignment_t const *aln;
+} tm_extend_res_t;
+
 static _force_inline
-dz_alignment_t const *tm_extend_core(tm_scan_t *self, tm_idx_profile_t const *pf, tm_idx_sketch_t const *sk, uint8_t const *query, size_t qlen, tm_chain_t const *c)
+tm_extend_res_t tm_extend_core(tm_scan_t *self, tm_idx_profile_t const *pf, tm_idx_sketch_t const *sk, uint8_t const *query, size_t qlen, tm_chain_t const *c)
 {
 	/* flush working memory */
 	dz_arena_flush(self->extend.fill);
+	tm_extend_res_t const failed = { .aln  = NULL };
 
 	/* load root position */
-	uint32_t const qrpos = c->qpos & 0x3fffffff, rrpos = c->rpos, dir = c->dir;
-	debug("reverse: dir(%u), qpos(%zu, %zx), rpos(%zu, %zx)", dir, qrpos, qrpos, rrpos, rrpos);
-
-	/* query-side profile */
-	static dz_pack_query_t const pack[2] = {
-		{ .dir = 0, .calc_dim = tm_extend_calc_dim, .conv = tm_extend_conv },
-		{ .dir = 1, .calc_dim = tm_extend_calc_dim, .conv = tm_extend_conv }
-	};
-	dz_query_t *q = dz_pack_query_alloc_mem(self->extend.fill, pf->extend.dz, query, qlen, &pack[0]);
+	uint32_t const rdir = c->dir;
+	tm_pair_t const rpos = tm_chain_pos(c);
+	debug("reverse: rdir(%u), rpos(%u, %u)", rdir, rpos.q, rpos.r);
 
 	/* reference reverse */
-	dz_pack_query_reverse_core(q, pf->extend.dz, query, qrpos, &pack[1]);
-	dz_state_t const *r = tm_extend_wrap(self->extend.fill, pf->extend.dz, sk, dir ^ 0x01, rrpos, q);
-	if(r == NULL) { return(NULL); }
+	dz_query_t *qr = tm_pack_query_wrap(self->extend.fill, pf->extend.dz, sk, query, qlen, (tm_pair_t){ .r = rdir ^ 0x01, .q = 1 }, rpos);
+	dz_state_t const *r = tm_extend_wrap(self->extend.fill, pf->extend.dz, sk, qr, rdir ^ 0x01, rpos);
+	if(r == NULL) { return(failed); }
 
-	tm_pair_t const spos = tm_calc_max_wrap(r, dir, (tm_pair_t){ .r = rrpos, .q = qrpos });
-	debug("qspos(%u), rspos(%u, %x, %u), qlen(%zu)", spos.q, spos.r, spos.r, spos.r & 0x3fffffff, qlen);
+	tm_pair_t const spos = tm_calc_max_wrap(r, rdir ^ 0x01, rpos);
+	debug("reverse: rpos(%u, %u) --- score(%d) --> spos(%u, %u)", rpos.q, rpos.r, r->max.score, spos.q, spos.r);
 
 	/* forward */
-	dz_pack_query_forward_core(q, pf->extend.dz, &query[spos.q], qlen - spos.q, &pack[0]);
-	dz_state_t const *f = tm_extend_wrap(self->extend.fill, pf->extend.dz, sk, dir, spos.r, q);
-	if(f == NULL || f->max.score == 0) { return(NULL); }
-
-	// debug("forward: qpos(%zu, %zx), rpos(%zu, %zx)", spos.q, spos.q, spos.r, spos.r);
+	dz_query_t *qf = tm_pack_query_wrap(self->extend.fill, pf->extend.dz, sk, query, qlen, (tm_pair_t){ .r = rdir, .q = 0 }, spos);
+	dz_state_t const *f = tm_extend_wrap(self->extend.fill, pf->extend.dz, sk, qf, rdir, spos);
+	debug("forward: score(%d)", (f != NULL ? f->max.score : -1));
+	if(f == NULL || f->max.score == 0) { return(failed); }
 
 	/* traceback */
 	dz_alignment_t const *aln = dz_trace_core(self->extend.trace, pf->extend.dz, f, (dz_trace_get_match_t)tm_extend_get_match);
-	debug("f(%p), aln(%p)", f, aln);
-	return(aln);
+	debug("forward: spos(%u, %u) --- score(%d) --> epos(%u, %u), f(%p), aln(%p)", spos.q, spos.r, aln->score, aln->query_length + spos.q, aln->ref_length + spos.r, f, aln);
+	return((tm_extend_res_t){
+		.spos = spos,
+		.aln  = aln
+	});
 }
 
 static _force_inline
@@ -3114,11 +3275,22 @@ size_t tm_extend_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *query,
 
 	/* clear bin */
 	tm_extend_clear(self);
+/*
+	for(size_t i = 0; i < qlen; i++) {
+		fprintf(stderr, "%c", "A   C   G   T   "[query[i]]);
+	}
+	fprintf(stderr, "\n");
+	for(size_t j = 0; j < DZ_REF_MAT_SIZE; j++) {
+		for(size_t i = 0; i < DZ_QUERY_MAT_SIZE; i++) {
+			fprintf(stderr, "ref(%zu), query(%zu), score(%d)\n", j, i, pf[0]->extend.dz->matrix[j * DZ_QUERY_MAT_SIZE + i]);
+		}
+	}
+*/
 
 	/* for each chain try extension */
 	for(size_t i = 0; i < ccnt; i++) {
 		tm_chain_t const *q = &chain[i];
-		if(q->attr.sep.weight < self->extend.min_weight) { break; }
+		if(q->attr.sep.weight >= self->extend.max_weight) { break; }
 
 		/* skip if already covered (and there is no possibility that this chain surpasses the previous ones) */
 		if(tm_extend_is_covered(self, q)) { continue; }
@@ -3129,21 +3301,21 @@ size_t tm_extend_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *query,
 		debug("%r, rid(%u), pid(%u)", tm_chain_to_str, q, q->attr.sep.rid, s->h.pid);
 
 		/* extend */
-		dz_alignment_t const *aln = tm_extend_core(self, p, s, query, qlen, q);
-		if(aln == NULL || aln->score <= p->extend.min_score) { continue; }
+		tm_extend_res_t r = tm_extend_core(self, p, s, query, qlen, q);
+		if(r.aln == NULL || r.aln->score <= p->extend.min_score) { continue; }
 
-		tm_extend_record(self, q, aln);
+		tm_extend_record(self, q, r.spos, r.aln);
 		if(tm_extend_is_complete(self)) { break; }
 	}
 
 	/* anything else? */
-	return(kv_cnt(self->extend.arr));
+	return(kv_cnt(self->extend.arr) - 1);
 }
 
 
 /* evaluate all; query sequence must be encoded in 2bit and shorter than 2Gbp */
 static _force_inline
-size_t tm_scan_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *seq, size_t slen)
+tm_alnv_t *tm_scan_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *seq, size_t slen)
 {
 	tm_scan_clear(self);
 
@@ -3158,8 +3330,10 @@ size_t tm_scan_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *seq, siz
 	radix_sort_chain(cptr, ccnt);
 
 	/* convert chain to alignment */
-	size_t acnt = tm_extend_all(self, idx, seq, slen, cptr, ccnt);
-	return(acnt);
+	tm_extend_all(self, idx, seq, slen, cptr, ccnt);
+
+	/* copy alignment to dst buffer */
+	return(tm_extend_finalize(self));
 }
 
 
@@ -3193,11 +3367,78 @@ void tm_print_init_static(tm_print_t *self, tm_print_conf_t const *conf, char co
 	return;
 }
 
+static _force_inline
+void tm_print_cigar(tm_print_t *self, uint8_t const *path, size_t len)
+{
+	_unused(self);
 
+	debug("path(%p), len(%zu)", path, len);
+
+	uint8_t const *p = path, *t = &path[len];
+	v16i8_t v = _set_v16i8(*p);
+	_print_v16i8(v);
+
+	while(p < t) {
+		uint8_t const *q = p + 1;
+		while(q < t) {
+			v16i8_t const w = _loadu_v16i8(q);
+			v16i8_t const eq = _eq_v16i8(v, w);
+			_print_v16i8(w);
+			_print_v16i8(eq);
+
+			uint64_t const mask = ((v16_masku_t){ .mask = _mask_v16i8(eq) }).all;
+			ZCNT_RESULT size_t cnt = _tzcnt_u64(~mask);
+			debug("cnt(%zu)", cnt);
+
+			q += cnt;
+			if(cnt < 16) { break; }
+		}
+		printf("%zu%c", (size_t)(q - p), *p);
+
+		p = q;
+		v = _set_v16i8(*p);
+	}
+	return;
+}
+
+static _force_inline
+void tm_print_aln(tm_print_t *self, tm_idx_sketch_t const **si, bseq_meta_t const *query, tm_aln_t const *aln)
+{
+	_unused(self);
+
+	tm_idx_sketch_t const *ref = si[aln->attr.rid];
+	printf("%.*s\t%u\t%u\t%.*s\t%u\t%u\t%u\t",
+		(int)bseq_name_len(query),
+		bseq_name(query),
+		aln->pos.q,
+		aln->span.q,
+		(int)tm_idx_ref_name_len(ref),
+		tm_idx_ref_name_ptr(ref),
+		aln->pos.r,
+		aln->span.r,
+		aln->dir
+	);
+	tm_print_cigar(self, aln->path.ptr, aln->path.len);
+	printf("\n");
+	return;
+}
 
 
 
 /* multithreaded scan-and-mask */
+
+typedef struct {
+	size_t id;
+	dz_arena_t *mem;
+	bseq_batch_t seq_bin;
+} tm_mtscan_batch_t;
+
+typedef struct {
+	size_t id;
+	tm_mtscan_batch_t *batch;
+} mm_mtscan_drain_t;
+#define mtscan_drain_cmp(a, b)		( (int64_t)(a).id - (int64_t)(b).id )
+
 typedef struct {
 	tm_idx_t const *mi;
 	bseq_file_t *fp;
@@ -3206,6 +3447,7 @@ typedef struct {
 
 	/* counters */
 	size_t icnt, ocnt;
+	kvechq_t(mm_mtscan_drain_t) hq;
 
 	tm_scan_t scan[];
 } tm_mtscan_t;
@@ -3235,15 +3477,11 @@ void tm_mtscan_destroy(tm_mtscan_t *self)
 	for(size_t i = 0; i < pt_nth(self->pt); i++) {
 		tm_scan_destroy_static(&self->scan[i]);
 	}
+
+	kv_hq_destroy(self->hq);		/* sorter */
 	free(self);
 	return;
 }
-
-typedef struct {
-	size_t id;
-	dz_arena_t *mem;
-	bseq_batch_t seq_bin;
-} tm_mtscan_batch_t;
 
 static
 void *tm_mtscan_source(uint32_t tid, tm_mtscan_t *self)
@@ -3277,9 +3515,35 @@ void *tm_mtscan_worker(uint32_t tid, tm_mtscan_t *self, tm_mtscan_batch_t *batch
 	/* for each query sequence */
 	for(size_t i = 0; i < bseq_meta_cnt(&batch->seq_bin); i++) {
 		bseq_meta_t *seq = &meta[i];
-		seq->u.flag = tm_scan_all(scan, self->mi, bseq_seq(seq), bseq_seq_len(seq));
+		seq->u.ptr = tm_scan_all(scan, self->mi, bseq_seq(seq), bseq_seq_len(seq));
+
+		debugblock({
+			tm_alnv_t const *v = seq->u.ptr;
+			debug("v(%p), cnt(%zu)", v, v->cnt);
+		});
 	}
 	return(batch);
+}
+
+static _force_inline
+void tm_mtscan_drain_core(tm_mtscan_t *self, tm_mtscan_batch_t *batch)
+{
+	bseq_meta_t const *meta = bseq_meta_ptr(&batch->seq_bin);					/* query */
+	tm_idx_sketch_t const **si = (tm_idx_sketch_t const **)self->mi->sketch.arr;		/* ref */
+
+	for(size_t i = 0; i < bseq_meta_cnt(&batch->seq_bin); i++) {
+		bseq_meta_t const *seq = &meta[i];
+		tm_alnv_t const *v = seq->u.ptr;
+		debug("v(%p), cnt(%zu)", v, v->cnt);
+
+		for(size_t j = 0; j < v->cnt; j++) {
+			tm_print_aln(self->printer, si, seq, &v->arr[j]);
+		}
+	}
+
+	dz_arena_destroy(batch->mem);
+	bseq_free(&batch->seq_bin);
+	return;
 }
 
 static
@@ -3287,10 +3551,20 @@ void tm_mtscan_drain(uint32_t tid, tm_mtscan_t *self, tm_mtscan_batch_t *batch)
 {
 	_unused(tid);
 
-	self->ocnt++;
+	/* push batch to heapqueue for sorting */
+	kv_hq_push(mm_mtscan_drain_t, mtscan_drain_cmp, self->hq,
+		((mm_mtscan_drain_t){
+			.id = batch->id,
+			.batch = batch
+		})
+	);
 
-	dz_arena_destroy(batch->mem);
-	bseq_free(&batch->seq_bin);
+	/* pop */
+	while(kv_hq_cnt(self->hq) > 0 && kv_hq_head(self->hq).id == self->ocnt) {
+		self->ocnt++;
+		batch = kv_hq_pop(mm_mtscan_drain_t, mtscan_drain_cmp, self->hq).batch;
+		tm_mtscan_drain_core(self, batch);
+	}
 	return;
 }
 
@@ -3314,10 +3588,11 @@ int tm_mtscan_file(tm_mtscan_t *self, char const *fn)
 	if(self->fp == NULL) { return(1); }
 
 	/* multithreaded scan-and-mask */
+	kv_hq_clear(self->hq);
 	pt_stream(self->pt, self,
 		(pt_source_t)tm_mtscan_source,
 		(pt_worker_t)tm_mtscan_worker,
-		(pt_drain_t)tm_mtscan_drain
+		(pt_drain_t)tm_mtscan_drain		/* sort */
 	);
 
 	/* done */
