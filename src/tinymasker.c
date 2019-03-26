@@ -3104,7 +3104,7 @@ dz_fill_fetch_t tm_extend_fetch_next(tm_extend_fetcher_t *self, int8_t const *sc
 	/* fetch base and convert to 2bit */
 	uint32_t const c = *self->p;
 	uint32_t const e = (self->conv>>(4 * c)) & 0x0f;
-	self->mv = _mm_cvtsi64x_si128(_loadu_u32(&score_matrix[e * DZ_QUERY_MAT_SIZE]));	/* <<2 */
+	self->mv = _mm_cvtsi64_si128(_loadu_u32(&score_matrix[e * DZ_QUERY_MAT_SIZE]));	/* <<2 */
 	// debug("p(%p), c(%x, %c), e(%x), inc(%ld)", self->p, c, "NACMGRSVTWYHKDBN"[c], e, self->inc);
 
 	/* forward pointer */
