@@ -3043,7 +3043,7 @@ tm_alnv_t *tm_extend_finalize(tm_scan_t *self)
 	/* sort by qpos: traverse tree */
 	tm_aln_t const all = {
 		.pos  = { .q = 0 },
-		.span = { .q = 20 },
+		.span = { .q = UINT32_MAX },
 		// .qmax = INT32_MAX
 	};
 
