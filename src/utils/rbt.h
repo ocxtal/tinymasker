@@ -362,7 +362,7 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
 				if(rbt_iter_remove_left_parents(w)) { return(1); }		/* reached tail; not found */ \
 			} \
 			_bucket_t const *node = _rbt_ptr(_bucket_t, p, _rbt_idx(w->b[-1])); \
-			if(_cmp_tail(node, tail_anchor)) { debug("node(%u) is out of tail", _rbt_idx(w->b[-1])); return(1); }	/* reached tail; not found */ \
+			if(!_cmp_tail(node, tail_anchor)) { debug("node(%u) is out of tail", _rbt_idx(w->b[-1])); return(1); }	/* reached tail; not found */ \
 			if(_cmp_iter(node, tail_anchor)) { debug("found, node(%u)", _rbt_idx(w->b[-1])); break; }		/* found */ \
 			/* node does not satisfy the condition; poll the next */ \
 			debug("poll next node(%u)", _rbt_idx(w->b[-1])); \
@@ -387,7 +387,7 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
 		if(!_cmp_tail(node, tail_anchor)) { debug("head node(%u) is out of tail", _rbt_idx(w->b[-1])); return(NULL); }	/* first node is out of tail; not found */ \
 		if(!_cmp_iter(node, tail_anchor)) { \
 			/* first node is inappropriate; find next */ \
-			debug("find next"); \
+			debug("not found; go next"); \
 			if(rbt_fetch_next_intl_##_sfx(w, p, tail_anchor)) { return(NULL); } \
 		} \
 		/* found */ \

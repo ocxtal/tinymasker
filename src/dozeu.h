@@ -204,11 +204,17 @@ typedef struct dz_score_conf_s {
 
 /* external (custom) allocator for profile constructor */
 typedef void *(*dz_malloc_t)(void *ctx, size_t size);
+typedef void (*dz_free_t)(void *ctx, void *ptr);
+
 typedef struct dz_allocator_s {
 	void *ctx;
 	dz_malloc_t fp;
 } dz_allocator_t;
 
+typedef struct dz_destructor_s {
+	void *ctx;
+	dz_free_t fp;
+} dz_destructor_t;
 
 
 /*
@@ -250,6 +256,7 @@ typedef __m128i (*dz_query_conv_t)(int8_t const *score_matrix_row, uint32_t dir,
 
 typedef struct {
 	uint32_t dir;
+	uint8_t invalid;						/* invalid base */
 
 	/* we do not provide opaque pointer because we suppose all the information we need is contained in profile object */
 	dz_query_calc_dim_t calc_dim;
@@ -1533,7 +1540,7 @@ size_t dz_pack_query_forward_core(dz_query_t *q, dz_profile_t const *profile, ui
 
 		/* clear tail remainders */
 		for(size_t i = qlen + 1; i < clen; i++) {
-			a[i] = 0;		/* as -DZ_SCORE_OFS */
+			a[i] = pack->invalid;		/* as -DZ_SCORE_OFS */
 		}
 	}
 	debug("qlen(%lu), q(%s)", qlen, query);
@@ -1590,7 +1597,7 @@ size_t dz_pack_query_reverse_core(dz_query_t *q, dz_profile_t const *profile, ui
 
 		/* clear tail remainders */
 		for(size_t i = qlen + 1; i < clen; i++) {
-			a[i] = 0;		/* as -DZ_SCORE_OFS */
+			a[i] = pack->invalid;		/* as -DZ_SCORE_OFS */
 		}
 	}
 	debug("qlen(%lu), q(%s)", qlen, query);
@@ -1765,6 +1772,13 @@ dz_state_t dz_merge_state(dz_state_t const **ff, size_t fcnt)
 		state.range.sblk, state.range.eblk, state.cnt.column, state.cnt.section, state.max.score, state.max.inc
 	);
 	return(state);
+}
+
+static __dz_vectorize
+void dz_fixup_state(dz_state_t *state, dz_query_t const *query)
+{
+	state->range.eblk = MIN2(state->range.eblk, query->blen);
+	return;
 }
 
 static __dz_vectorize
@@ -2455,6 +2469,7 @@ dz_state_t const *dz_extend_core(
 	/* init working buffer */
 	dz_work_t w __attribute__(( aligned(16) ));
 	dz_load_state(&w, ff, fcnt);		/* iterate over the incoming edge objects to get the current max and range */
+	dz_fixup_state(&w.state, query);
 	// debug("(%u, %u)", w.tracker.ch, w.tracker.idx);
 
 	/* load constants */
@@ -2678,6 +2693,17 @@ dz_profile_t *dz_init_profile(dz_allocator_t *alloc, dz_score_conf_t const *conf
 	dz_init_root(profile, conf, alloc);
 	debug("profile(%p), root(%p)", profile, profile->root);
 	return(profile);
+}
+
+static __dz_vectorize
+void dz_destroy_profile(dz_destructor_t *free, dz_profile_t *profile)
+{
+	dz_tail_t const *tail = dz_restore_tail(dz_cstate(profile->root));
+	dz_cap_t const *head = dz_unwind_cap(dz_ccap(tail));
+
+	free->fp(free->ctx, (void *)head);
+	free->fp(free->ctx, profile);
+	return;
 }
 
 
