@@ -9,6 +9,10 @@
 #include "common.h"
 #include "xprintf.h"
 
+
+#if defined(DEBUG) && !defined(NDEBUG_BLOCK)
+#  define DEBUG_BLOCK
+#endif
 #if defined(DEBUG) && !defined(NDEBUG_PRINT)
 #  define DEBUG_PRINT
 #endif
@@ -24,6 +28,7 @@
 
 
 #if defined(NDEBUG)
+#  undef DEBUG_BLOCK
 #  undef DEBUG_PRINT
 #  undef DEBUG_TRAP
 #  undef DEBUG_ASSERT
@@ -52,7 +57,7 @@
  * blockwise control
  */
 #undef debugblock
-#ifdef DEBUG
+#ifdef DEBUG_BLOCK
 #define debugblock(x) { x; }
 #else
 #define debugblock(x) {}
