@@ -3362,8 +3362,8 @@ dz_fill_fetch_t tm_extend_fetch_next(tm_extend_fetcher_t *self, int8_t const *sc
 	uint32_t const c = *self->p;
 	uint32_t const e = (self->conv>>(4 * c)) & 0x0f;
 	self->mv = _mm_cvtsi64_si128(_loadu_u32(&score_matrix[e * DZ_QUERY_MAT_SIZE]));	/* <<2 */
-	debug("p(%p), c(%x, %c), e(%x), inc(%ld)", self->p, c, "NACMGRSVTWYHKDBN"[c], e, self->inc);
-	_print_v16i8((v16i8_t){ self->mv });
+	// debug("p(%p), c(%x, %c), e(%x), inc(%ld)", self->p, c, "NACMGRSVTWYHKDBN"[c], e, self->inc);
+	// _print_v16i8((v16i8_t){ self->mv });
 
 	/* forward pointer */
 	self->p += self->inc;
@@ -3382,10 +3382,10 @@ __m128i tm_extend_get_profile(tm_extend_fetcher_t *self, int8_t const *score_mat
 	__m128i const v = ({
 		__m128i const qv = _mm_loadl_epi64((__m128i const *)&packed[qidx]);
 		__m128i const sc = _mm_shuffle_epi8(self->mv, qv);
-		_print_v16i8((v16i8_t){ qv });
+		// _print_v16i8((v16i8_t){ qv });
 		_mm_cvtepi8_epi16(sc);
 	});
-	_print_v16i8((v16i8_t){ v });
+	// _print_v16i8((v16i8_t){ v });
 	return(v);
 }
 
