@@ -18,11 +18,16 @@
 #if defined(DEBUG) && !defined(NDEBUG_ASSERT)
 #  define DEBUG_ASSERT
 #endif
+#if defined(DEBUG) && !defined(NDEBUG_SCAN)
+#  define DEBUG_SCAN
+#endif
+
 
 #if defined(NDEBUG)
 #  undef DEBUG_PRINT
 #  undef DEBUG_TRAP
 #  undef DEBUG_ASSERT
+#  undef DEBUG_SCAN
 #endif
 
 /**
@@ -148,6 +153,19 @@
 #else
 #define assert(expr, ...) {}
 #endif
+
+
+/* scan memory for memory sanitizer and valgrind */
+#ifdef DEBUG_SCAN
+#define _scan_memory(_p, _l) ({ \
+	volatile size_t _cnt = 0, _len = (_l); \
+	uint8_t const *_ptr = (uint8_t const *)(_p); \
+	for(size_t _i = 0; _i < _len; _i++) { if(_ptr[_i]) { _cnt++; } } \
+})
+#else
+#define _scan_memory(_p, _l)	;
+#endif
+
 
 #endif /* #ifndef _DEBUG_H_INCLUDED */
 /**
