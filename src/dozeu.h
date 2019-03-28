@@ -1777,7 +1777,7 @@ dz_state_t dz_merge_state(dz_state_t const **ff, size_t fcnt)
 static __dz_vectorize
 void dz_fixup_state(dz_state_t *state, dz_query_t const *query)
 {
-	state->range.eblk = MIN2(state->range.eblk, query->blen);
+	state->range.eblk = dz_min2(state->range.eblk, query->blen);
 	return;
 }
 
