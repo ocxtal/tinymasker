@@ -1505,7 +1505,7 @@ tm_ref_sketch_t *tm_idx_build_sketch(tm_idx_gen_t *self, tm_ref_tbuf_t *ref, siz
 }
 
 static _force_inline
-tm_idx_sketch_t *tm_idx_save_seq(tm_ref_sketch_t *sr, uint32_t rid, uint32_t pid, char const *name, size_t nlen, uint8_t const *seq, size_t slen)
+tm_idx_sketch_t *tm_idx_save_seq(tm_ref_sketch_t *sr, uint32_t pid, char const *name, size_t nlen, uint8_t const *seq, size_t slen)
 {
 	v32i8_t const z = _zero_v32i8();
 
@@ -1535,7 +1535,7 @@ tm_idx_sketch_t *tm_idx_save_seq(tm_ref_sketch_t *sr, uint32_t rid, uint32_t pid
 	);
 	si->h = (tm_idx_sketch_hdr_t){
 		.size = size,
-		.rid  = rid,
+		.rid  = 0,
 		.pid  = pid,
 		.sofs = size - tm_idx_roundup(slen)
 	};
@@ -1587,8 +1587,8 @@ tm_idx_batch_t *tm_idx_collect(uint32_t tid, tm_idx_gen_t *self, tm_idx_batch_t 
 		}
 
 		/* copy sequence */
-		tm_idx_sketch_t *si = tm_idx_save_seq(sr,
-			bid + i, pid,	/* save reference id and profile id */
+		tm_idx_sketch_t *si = tm_idx_save_seq(
+			sr, pid,	/* save profile id */
 			bseq_name(p), bseq_name_len(p),
 			bseq_seq(p),  bseq_seq_len(p)			
 		);
@@ -1684,7 +1684,11 @@ size_t tm_idx_squash_invalid(tm_idx_sketch_t **sk, size_t scnt)
 	size_t cnt = 0;
 	for(size_t i = 0; i < scnt; i++) {
 		if(sk[i] == NULL) { continue; }
-		sk[cnt++] = sk[i];
+
+		/* copy and assign rid */
+		sk[cnt] = sk[i];
+		sk[cnt]->h.rid = cnt;
+		cnt++;
 	}
 	return(cnt);
 }
@@ -3061,7 +3065,7 @@ size_t tm_filter_chain(tm_idx_sketch_t const *si, tm_idx_profile_t const *profil
 	tm_filter_work_t w __attribute__(( aligned(32) ));
 	tm_filter_work_init(&w, profile);
 
-	debug("test_cnt(%lu), min_score(%d), uspan_thresh(%zu), rid(%u)", profile->filter.test_cnt, profile->filter.min_score, profile->filter.uspan_thresh, rid);
+	debug("test_cnt(%u), min_score(%d), uspan_thresh(%u), rid(%u)", profile->filter.test_cnt, profile->filter.min_score, profile->filter.uspan_thresh, rid);
 	for(size_t i = 0; i < ccnt; i++) {
 		tm_chain_raw_t const *p = &src[i];
 		debug("i(%zu), ccnt(%zu), %r", i, ccnt, tm_chain_raw_to_str, p);
@@ -3776,7 +3780,7 @@ void *tm_mtscan_worker(uint32_t tid, tm_mtscan_t *self, tm_mtscan_batch_t *batch
 	/* for each query sequence */
 	for(size_t i = 0; i < bseq_meta_cnt(&batch->seq_bin); i++) {
 		bseq_meta_t *seq = &meta[i];
-		fprintf(stderr, "i(%zu), seq(%s)\n", i, bseq_name(seq));
+		fprintf(stderr, "i(%zu), len(%zu), seq(%s)\n", i, bseq_seq_len(seq), bseq_name(seq));
 		seq->u.ptr = tm_scan_all(scan, self->mi, bseq_seq(seq), bseq_seq_len(seq));
 		fprintf(stderr, "done, cnt(%zu)\n", seq->u.ptr != NULL ? ((tm_alnv_t const *)seq->u.ptr)->cnt : 0);
 
