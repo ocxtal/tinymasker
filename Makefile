@@ -21,7 +21,7 @@ WFLAGS = -Wall -Wextra -Wshadow
 NWFLAGS = $(shell bash -c "if [[ $(CC) = icc* ]]; then echo '-Wno-unused-function'; else echo '-Wno-unused-function -Wno-unused-label -Wno-constant-conversion -Wno-implicit-fallthrough -Wno-missing-field-initializers'; fi")
 LDFLAGS = -lpthread $(UTIL_LDFLAGS)
 CFLAGS = -std=c99 -march=native $(UTIL_CFLAGS) $(WFLAGS) $(NWFLAGS)
-GFLAGS = -g # -DDEBUG # -fsanitize=address -fsanitize=leak
+GFLAGS = -g # -fsanitize=memory # -DDEBUG # -fsanitize=address -fsanitize=leak
 
 
 # intermediate
