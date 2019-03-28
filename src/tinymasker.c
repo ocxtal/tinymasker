@@ -1,28 +1,5 @@
 // #define DEBUG
 // #define DEBUG_KMER
-#define _printu_v16i8(a) { \
-	uint8_t _buf[16]; \
-	_storeu_v16i8(_buf, a); \
-	debug("(v16i8_t) %s(%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d)", \
-		#a, \
-		_buf[15] - 128, \
-		_buf[14] - 128, \
-		_buf[13] - 128, \
-		_buf[12] - 128, \
-		_buf[11] - 128, \
-		_buf[10] - 128, \
-		_buf[9] - 128, \
-		_buf[8] - 128, \
-		_buf[7] - 128, \
-		_buf[6] - 128, \
-		_buf[5] - 128, \
-		_buf[4] - 128, \
-		_buf[3] - 128, \
-		_buf[2] - 128, \
-		_buf[1] - 128, \
-		_buf[0] - 128); \
-}
-
 /**
  * @file tinymasker.c
  * @brief fast repeat masking tool
@@ -133,6 +110,31 @@ enum alphabet_2bit {
 	__m128 const _w = _mm_shuffle_ps(_x, _y, z); \
 	_mm_castps_si128(_w); \
 })
+
+
+/* debug supplementary */
+#define _printu_v16i8(a) { \
+	uint8_t _buf[16]; \
+	_storeu_v16i8(_buf, a); \
+	debug("(v16i8_t) %s(%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d)", \
+		#a, \
+		_buf[15] - 128, \
+		_buf[14] - 128, \
+		_buf[13] - 128, \
+		_buf[12] - 128, \
+		_buf[11] - 128, \
+		_buf[10] - 128, \
+		_buf[9] - 128, \
+		_buf[8] - 128, \
+		_buf[7] - 128, \
+		_buf[6] - 128, \
+		_buf[5] - 128, \
+		_buf[4] - 128, \
+		_buf[3] - 128, \
+		_buf[2] - 128, \
+		_buf[1] - 128, \
+		_buf[0] - 128); \
+}
 
 
 /* 1-origin coorrdinates for seed positions */
