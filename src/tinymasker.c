@@ -2404,7 +2404,7 @@ size_t tm_expand_seed(tm_ref_state_t s, v4i32_t uofs, v4i32_t vofs, tm_seed_t *q
 		int16_t const z = m.ptr[i];
 		uint32_t const w = ((int32_t)z) & mask;			/* signed expansion */
 		uint32_t const u = _ext_v4i32(uofs, 0) - w;
-		uint32_t const v = _ext_v4i32(vofs, 0) * 2 * w;
+		uint32_t const v = _ext_v4i32(vofs, 0) + 2 * w;
 		q[i].v = v;
 		q[i].u = u;
 
@@ -2453,7 +2453,7 @@ void tm_invalidate_sqiv(tm_sqiv_t *p)
 #endif
 
 static _force_inline
-size_t tm_patch_sqiv(tm_ref_state_t s, tm_sqiv_t *r)
+size_t tm_save_last_sqiv(tm_ref_state_t s, tm_sqiv_t *r)
 {
 	tm_ref_squash_t sq = tm_ref_load_squash(s.bin, -1LL, 0);	/* unmatching = -1 to insert zeros to lower 32bit */
 	_storeu_v2i32(r, sq.v);
@@ -2503,7 +2503,7 @@ size_t tm_collect_seed(tm_ref_sketch_t const *ref, uint8_t const *query, size_t 
 	}
 
 	/* save the last sqiv */
-	r += tm_patch_sqiv(s, r);
+	r += tm_save_last_sqiv(s, r);
 
 	/* update seed count */
 	size_t const scnt = q - kv_ptr(*seed);
