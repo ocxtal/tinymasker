@@ -2567,6 +2567,7 @@ void dz_init_gap_penalties(dz_profile_t *profile, dz_score_conf_t const *conf)
 	uint16_t const ge = dz_max2(conf->ins_extend, conf->del_extend);
 	profile->xt = gi + ge * conf->max_gap_len;	/* X-drop threshold */
 	profile->bonus = conf->full_length_bonus;
+	profile->init  = dz_add_ofs(DZ_CELL_MIN);
 	profile->max_gap_len = conf->max_gap_len;	/* save raw value */
 	debug("gi(%u), ge(%u), xdrop_threshold(%u), full_length_bonus(%u), max_gap_len(%u)", gi, ge, profile->xt, profile->bonus, profile->max_gap_len);
 
@@ -2846,7 +2847,7 @@ typedef struct {
 	/* match / gap counters */
 	uint32_t cnt[4];
 
-	dz_cap_t const *pcap, *cap;
+	dz_cap_t const *pcap, *ccap;
 	size_t idx;
 	uint16_t score, ie, de, rch;
 } dz_trace_work_t;
@@ -2901,7 +2902,7 @@ uint64_t dz_trace_reload_section(dz_trace_work_t *w, size_t layer)
 
 	/* merging vector; load contents to find an edge */
 	dz_head_t const *head = dz_chead(w->pcap);
-	uint16_t const prev_score = dz_trace_score(layer, w->cap, w->idx) + head->adj;
+	uint16_t const prev_score = dz_trace_score(layer, w->ccap, w->idx) + head->adj;
 	debug("head(%p), prev_score(%u)", head, prev_score);
 
 	/* load incoming vectors */
@@ -2932,11 +2933,11 @@ uint64_t dz_trace_reload_section(dz_trace_work_t *w, size_t layer)
 static __dz_vectorize
 uint64_t dz_trace_unwind_h(dz_trace_work_t *w, size_t layer)
 {
-	debug("pcap(%p), cap(%p)", w->pcap, w->cap);
+	debug("pcap(%p), cap(%p)", w->pcap, w->ccap);
 	while(1) {
-		w->cap  = w->pcap;
-		w->pcap = dz_unwind_cap(w->cap);
-		debug("pcap(%p), cap(%p), is_head(%u), is_root(%u)", w->pcap, w->cap, (uint32_t)dz_is_head(w->pcap), (uint32_t)dz_is_root(w->pcap));
+		w->ccap  = w->pcap;
+		w->pcap = dz_unwind_cap(w->ccap);
+		debug("pcap(%p), cap(%p), is_head(%u), is_root(%u)", w->pcap, w->ccap, (uint32_t)dz_is_head(w->pcap), (uint32_t)dz_is_root(w->pcap));
 
 		if(dz_likely(!dz_is_head(w->pcap))) { break; }	/* escape if not head */
 		if(dz_is_root(w->pcap)) { break; }				/* escape if root */
@@ -2954,16 +2955,16 @@ uint64_t dz_trace_unwind_h(dz_trace_work_t *w, size_t layer)
 	w->rlen++;
 	w->rch = w->pcap->tracker.ch;
 
-	debug("pcap(%p, %x), cap(%p, %x)", w->pcap, w->pcap->tracker.ch, w->cap, w->cap->tracker.ch);
+	debug("pcap(%p, %x), cap(%p, %x)", w->pcap, w->pcap->tracker.ch, w->ccap, w->ccap->tracker.ch);
 	return(0);
 }
 
 
 static __dz_vectorize
-uint64_t dz_trace_test_idx(dz_trace_work_t *w, size_t ofs)
+uint64_t dz_trace_test_idx(dz_trace_work_t *w, dz_cap_t const *cap, size_t ofs)
 {
 	size_t const vidx = dz_trace_vector_idx(w->idx - ofs);
-	return(!dz_inside(w->pcap->range.sblk, vidx, w->pcap->range.eblk));
+	return(!dz_inside(cap->range.sblk, vidx, cap->range.eblk));
 }
 
 static __dz_vectorize
@@ -2989,7 +2990,7 @@ void dz_trace_push_op(dz_trace_work_t *w, uint64_t op, uint16_t next_score)
 
 static __dz_vectorize
 uint64_t dz_trace_eat_match(dz_trace_work_t *w, dz_profile_t const *profile, dz_trace_get_match_t get_match) {
-	if(dz_trace_test_idx(w, 1)) { return(0); }
+	if(dz_trace_test_idx(w, w->pcap, 1)) { debug("test match out of range, idx(%zu)", w->idx); return(0); }
 
 	/* get diagonal score for this cell */
 	uint16_t const s = dz_trace_score(DZ_S_MATRIX, w->pcap, w->idx - 1);
@@ -3010,35 +3011,35 @@ uint64_t dz_trace_eat_match(dz_trace_work_t *w, dz_profile_t const *profile, dz_
 
 static __dz_vectorize
 uint64_t dz_trace_eat_ins(dz_trace_work_t *w) {
-	if(dz_trace_test_idx(w, 1)) { return(0); }
+	if(dz_trace_test_idx(w, w->ccap, 1)) { debug("test ins out of range, idx(%zu)", w->idx); return(0); }
 
 	/* skip if score does not match */
-	uint16_t const f = dz_trace_score(DZ_F_MATRIX, w->cap, w->idx);
-	if(dz_likely(w->score != f)) { return(0); }
+	uint16_t const f = dz_trace_score(DZ_F_MATRIX, w->ccap, w->idx);
+	if(dz_likely(w->score != f)) { debug("test ins score unmatch, idx(%zu), score(%u), f(%u)", w->idx, w->score, f); return(0); }
 	debug("ins, score(%u), f(%u)", w->score, f);
 
 	do {
-		uint16_t const x = dz_trace_score(DZ_F_MATRIX, w->cap, w->idx - 1);
+		uint16_t const x = dz_trace_score(DZ_F_MATRIX, w->ccap, w->idx - 1);
 		debug("ins, score(%u), x(%u), ie(%u)", w->score, x, w->ie);
 		if(w->score != x - w->ie) { break; }
 
 		dz_trace_push_op(w, DZ_F_MATRIX, x);
 		dz_trace_unwind_v(w, DZ_F_MATRIX);
-	} while(!dz_trace_test_idx(w, 1));
+	} while(!dz_trace_test_idx(w, w->ccap, 1));
 
 	/* eat last column */
-	dz_trace_push_op(w, DZ_F_MATRIX, dz_trace_score(DZ_S_MATRIX, w->cap, w->idx - 1));
+	dz_trace_push_op(w, DZ_F_MATRIX, dz_trace_score(DZ_S_MATRIX, w->ccap, w->idx - 1));
 	dz_trace_unwind_v(w, DZ_S_MATRIX);
 	return(1);
 }
 
 static __dz_vectorize
 uint64_t dz_trace_eat_del(dz_trace_work_t *w) {
-	if(dz_trace_test_idx(w, 0)) { return(0); }
+	if(dz_trace_test_idx(w, w->pcap, 0)) { debug("test del out of range, idx(%zu)", w->idx); return(0); }
 
 	/* skip if score does not match */
-	uint16_t const e = dz_trace_score(DZ_E_MATRIX, w->cap, w->idx);
-	if(dz_likely(w->score != e)) { return(0); }
+	uint16_t const e = dz_trace_score(DZ_E_MATRIX, w->ccap, w->idx);
+	if(dz_likely(w->score != e)) { debug("test del score unmatch, idx(%zu), score(%u), e(%u)", w->idx, w->score, e); return(0); }
 	debug("del, score(%u), f(%u)", w->score, e);
 
 	do {
@@ -3048,7 +3049,7 @@ uint64_t dz_trace_eat_del(dz_trace_work_t *w) {
 
 		dz_trace_push_op(w, DZ_E_MATRIX, x);
 		dz_trace_unwind_h(w, DZ_E_MATRIX);
-	} while(!dz_trace_test_idx(w, 0));
+	} while(!dz_trace_test_idx(w, w->pcap, 0));
 
 	/* eat last row */
 	dz_trace_push_op(w, DZ_E_MATRIX, dz_trace_score(DZ_S_MATRIX, w->pcap, w->idx));
@@ -3074,7 +3075,7 @@ void dz_trace_allocate_aln(dz_trace_work_t *w, dz_arena_t *mem, dz_state_t const
 	/* allocate aln object */
 	size_t aln_size = (sizeof(dz_alignment_t)
 		+ (ff->cnt.section + 6) * sizeof(dz_path_span_t)
-		+ dz_roundup(ff->cnt.column + idx + 1, 8) * sizeof(uint8_t)			/* +1 for tail '\0' */
+		+ dz_roundup(ff->cnt.column + idx + 16, 8) * sizeof(uint8_t)	/* +1 for tail '\0' */
 	);
 	w->aln = (dz_alignment_t *)dz_arena_malloc(mem, aln_size);
 	dz_trace_init_aln(w->aln, ff, idx);
@@ -3092,7 +3093,8 @@ void dz_trace_allocate_aln(dz_trace_work_t *w, dz_arena_t *mem, dz_state_t const
 	dz_tail_t const *tail = dz_restore_tail(ff);
 	uint32_t const id = dz_extract_id(tail);
 	dz_trace_push_span(w, id);
-	*w->path.ptr = '\0';		/* make sure readable as C string */
+	// *w->path.ptr = '\0';		/* make sure readable as C string */
+	_mm_storeu_si128((__m128i *)w->path.ptr, _mm_setzero_si128());
 	return;
 }
 
@@ -3110,7 +3112,7 @@ void dz_trace_init_work(dz_trace_work_t *w, dz_profile_t const *profile, dz_stat
 
 	/* load max column pointers */
 	w->pcap = ff->max.cap;
-	w->cap  = NULL;
+	w->ccap  = NULL;
 	w->idx  = idx;
 	w->score = dz_trace_score(DZ_S_MATRIX, w->pcap, w->idx);
 	return;
