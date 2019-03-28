@@ -173,15 +173,17 @@ static char *tm_kmer_to_str(uint32_t const *kmer)
 
 /* construct reference object */
 typedef struct {
+	uint32_t next : 8;
+	uint32_t pos  : 24;
 	uint32_t kmer;
-	uint32_t pos;
 } tm_ref_kpos_t;
 _static_assert(sizeof(tm_ref_kpos_t) == 8);
 
 typedef struct { tm_ref_kpos_t *a; size_t n, m; } tm_ref_kpos_v;
 
-#define tm_ref_kmer(x)			( (x).kmer )
-KRADIX_SORT_INIT(kmer, tm_ref_kpos_t, tm_ref_kmer, 4);
+#define tm_ref_kmer(x)			( _loadu_u64(&x) )
+// KRADIX_SORT_INIT(kmer, tm_ref_kpos_t, tm_ref_kmer, 4);
+KRADIX_SORT_INIT(kmer, tm_ref_kpos_t, tm_ref_kmer, 8);	/* sort all */
 
 typedef struct {
 	uint32_t f, r;
@@ -189,7 +191,8 @@ typedef struct {
 
 typedef struct {
 	/* constants */
-	uint32_t amask, shift, kofs;
+	uint32_t amask, shift;
+	// uint32_t kofs;
 
 	/* dst array */
 	tm_ref_kpos_t *q;
@@ -218,21 +221,30 @@ uint64_t tm_ref_is_ambiguous(uint8_t base)
 static _force_inline
 size_t tm_ref_dup_stack(tm_ref_work_t *w)
 {
-	size_t prev_size = w->size;
+	size_t const prev_size = w->size;
 
 	/* update size and branch pos */
 	w->size = w->size<<1;
-	w->branches = (w->branches>>2) | (0x01<<w->shift);
+	w->branches |= (0x01<<w->shift);
 
 	for(size_t i = 0; i < prev_size; i++) {
-		w->kmer[w->size + i] = w->kmer[i];
+		w->kmer[prev_size + i] = w->kmer[i];
 	}
 	return(prev_size);
 }
 
 static _force_inline
+uint64_t tm_ref_update_stack(tm_ref_work_t *w)
+{
+	uint64_t const shrink = (w->branches & 0x01) != 0;
+	w->branches = w->branches>>2;
+	return(shrink);
+}
+
+static _force_inline
 void tm_ref_shrink_stack(tm_ref_work_t *w)
 {
+	debug("shrink");
 	w->size = w->size>>1;
 	for(size_t i = 0; i < w->size; i++) {
 		w->kmer[i] = w->kmer[2 * i];
@@ -243,15 +255,48 @@ void tm_ref_shrink_stack(tm_ref_work_t *w)
 static _force_inline
 void tm_ref_update_kmer(tm_ref_kmer_pair_t *kmer, size_t size, uint32_t amask, uint32_t shift, uint8_t base)
 {
+	uint32_t const f = base<<6, r = (base ^ 0x03)<<shift;
 	for(size_t i = 0; i < size; i++) {
-		kmer[i].f = ((kmer[i].f<<2) | base) & amask;
-		kmer[i].r =  (kmer[i].r>>2) | ((0x03 ^ base)<<shift);
+		kmer[i].f = ((kmer[i].f<<2) | f) & amask;
+		kmer[i].r = ((kmer[i].r>>2) | r) & amask;
 	}
 	return;
 }
 
 static _force_inline
-void tm_ref_push_pos(tm_ref_work_t *w, size_t pos)
+v4i32_t tm_ref_compose_kpos(v2i32_t pos, v2i32_t kmer)
+{
+	static uint8_t const shuf[16] __attribute__(( aligned(16) )) = {
+		0, 4, 5, 6, 1, 2, 3, 0x80, 8, 12, 13, 14, 9, 10, 11, 0x80
+	};
+
+	/* fw in lower, rv in upper */
+	v16i8_t const sv = _load_v16i8(shuf);
+	v16i8_t const v = (v16i8_t){
+		_mm_unpacklo_epi32(kmer.v1, pos.v1)
+	};
+	v16i8_t const w = _shuf_v16i8(v, sv);
+
+	// _print_v16i8(v);
+	// _print_v16i8(w);
+	return((v4i32_t){ w.v1 });
+}
+
+#if 1
+static _force_inline
+void tm_ref_push_pos(tm_ref_work_t *w, v2i32_t pos)
+{
+	for(size_t i = 0; i < w->size; i++) {
+		v2i32_t const kmer = _loadu_v2i32(&w->kmer[i]);
+		v4i32_t const kpos = tm_ref_compose_kpos(pos, kmer);
+		_storeu_v4i32(w->q, kpos);
+		w->q += 2;
+	}
+	return;
+}
+#else
+static _force_inline
+void tm_ref_push_pos(tm_ref_work_t *w, v2i32_t pos)
 {
 	for(size_t i = 0; i < w->size; i++) {
 		*w->q++ = (tm_ref_kpos_t){
@@ -262,10 +307,11 @@ void tm_ref_push_pos(tm_ref_work_t *w, size_t pos)
 			.kmer = w->kmer[i].r,
 			.pos  = w->kofs - (pos + TM_SEED_POS_OFS)	/* (k - 1) - (pos + base_offset) */
 		};
-		// debug("pos(%u), kmer(%x, %x)", pos, w->kmer[i].f, w->kmer[i].r);
+		debug("pos(%u), kmer(%x, %x)", pos, w->kmer[i].f, w->kmer[i].r);
 	}
 	return;
 }
+#endif
 
 static _force_inline
 void tm_ref_push_base(tm_ref_work_t *w, uint8_t base)
@@ -274,12 +320,14 @@ void tm_ref_push_base(tm_ref_work_t *w, uint8_t base)
 	uint8_t const b2 = tm_ref_base_to_2bit(base);
 
 	if(_unlikely(tm_ref_is_ambiguous(base))) {
+		debug("ambiguous");
 		tm_ref_dup_stack(w);
 		tm_ref_update_kmer(&w->kmer[size], size, w->amask, w->shift, b2>>2);
 	}
 
 	/* push base */
-	tm_ref_update_kmer(&w->kmer[0], size, w->amask, w->shift, b2 & 0x03);
+	tm_ref_update_kmer(&w->kmer[0], size, w->amask, w->shift, b2 & 0x03);	
+	// debug("branches(%lx), b2(%x)", w->branches, b2);
 	return;
 }
 
@@ -299,9 +347,10 @@ static _force_inline
 size_t tm_ref_enumerate_kmer(size_t kbits, uint8_t const *seq, size_t slen, tm_ref_kpos_v *buf)
 {
 	tm_ref_work_t w = {
-		.amask = (0x01<<kbits) - 0x01,
-		.shift = kbits - 2,
-		.kofs  = (kbits>>1),		/* k - 1 */
+		/* place kmers at 6..kbits + 6 */
+		.amask = ((0x01<<kbits) - 0x01)<<6,
+		.shift = kbits - 2 + 6,
+		// .kofs  = (kbits>>1),		/* k - 1 */
 
 		/* make room in dst array */
 		.q = tm_ref_reserve(buf, kv_ptr(*buf)),
@@ -313,18 +362,26 @@ size_t tm_ref_enumerate_kmer(size_t kbits, uint8_t const *seq, size_t slen, tm_r
 	};
 	// debug("kbits(%zu), seq(%p), slen(%zu)", kbits, seq, slen);
 
-	/* push bases at the head */
 	size_t const k = kbits>>1;
+	v2i32_t const inc = _seta_v2i32(-1, 1);		/* rv, fw */
+	v2i32_t pos = _seta_v2i32(k - TM_SEED_POS_OFS, TM_SEED_POS_OFS);
+
+	/* push bases at the head */
 	for(size_t i = 0; i < k - 1; i++) {
 		tm_ref_push_base(&w, seq[i]);
+		pos = _add_v2i32(pos, inc);
 	}
 
 	/* body */
 	for(size_t i = k - 1; i < slen; i++) {
 		tm_ref_push_base(&w, seq[i]);			/* stack will be expanded if needed */
-		tm_ref_push_pos(&w, i + 1);				/* position of the next base to compose [,) range */
 
-		if(_unlikely(w.branches & 0x01)) {
+		/* update offset; position of the next base to compose [,) range */
+		pos = _add_v2i32(pos, inc);
+		tm_ref_push_pos(&w, pos);
+
+		/* update branch stack */
+ 		if(_unlikely(tm_ref_update_stack(&w))) {
 			tm_ref_shrink_stack(&w);			/* shrink if needed */
 		}
 
@@ -338,11 +395,40 @@ size_t tm_ref_enumerate_kmer(size_t kbits, uint8_t const *seq, size_t slen, tm_r
 
 	/* tail */
 	tm_ref_push_base(&w, '\0');
-	tm_ref_push_pos(&w, slen + 1);
+
+	pos = _add_v2i32(pos, inc);
+	tm_ref_push_pos(&w, pos);
 
 	/* done; record count */
 	kv_cnt(*buf) = w.q - kv_ptr(*buf);
 	return(kv_cnt(*buf));
+}
+
+static _force_inline
+size_t tm_ref_dedup_kmer(tm_ref_kpos_t *kptr, size_t kcnt)
+{
+	tm_ref_kpos_t const *p = kptr, *t = &kptr[kcnt];	/* src */
+	tm_ref_kpos_t *q = kptr + 1;						/* dst */
+
+	uint64_t const mask = ~0xffULL;		/* clear out next field */
+	uint64_t prev = _loadu_u64(p) & mask;
+	while(++p < t) {
+		uint64_t const kmer = _loadu_u64(p);
+		uint64_t const curr = kmer & mask;
+
+		if(curr == prev) {
+			debug("dedup, i(%zu), prev(%lx), curr(%lx, %lx)", p - kptr, prev, curr, kmer);
+			continue;
+		}		/* skip pos and kmer are the same */
+
+		/* pos or kmer changed; save */
+		_storeu_u64(q, kmer);
+		q++;
+
+		/* update for next */
+		prev = curr;
+	}
+	return(q - kptr);
 }
 
 static _force_inline
@@ -360,7 +446,24 @@ size_t tm_ref_collect_kmer(tm_ref_conf_t const *conf, uint8_t const *seq, size_t
 	size_t const kcnt = kv_cnt(*buf);
 
 	radix_sort_kmer(kptr, kcnt);
-	return(kcnt);
+/*
+	debug("kcnt(%zu)", kcnt);
+	for(size_t i = 0; i < kcnt; i++) {
+		debug("i(%zu), kmer(%x), pos(%x)", i, kptr[i].kmer, kptr[i].pos);
+	}
+*/
+	/* dedup kmers around ambiguous bases */
+	debug("kcnt(%zu)", kcnt);
+	size_t const dcnt = tm_ref_dedup_kmer(kptr, kcnt);
+	kv_cnt(*buf) = dcnt;
+
+/*
+	debug("kcnt(%zu)", dcnt);
+	for(size_t i = 0; i < dcnt; i++) {
+		debug("i(%zu), kmer(%x), pos(%x)", i, kptr[i].kmer, kptr[i].pos);
+	}
+*/
+	return(dcnt);
 }
 
 /* pack kmer-position array */
@@ -402,7 +505,8 @@ size_t tm_ref_count_kmer(tm_ref_cnt_t *p, size_t ksize, tm_ref_kpos_t const *kpo
 
 	// debug("ksize(%zx), kcnt(%zu)", ksize, kcnt);
 	for(tm_ref_kpos_t const *k = kpos, *t = &kpos[kcnt]; k < t; k++) {
-		tm_ref_cnt_t *q = &p[k->kmer>>2];
+		// tm_ref_cnt_t *q = &p[k->kmer>>2];
+		tm_ref_cnt_t *q = &p[k->kmer];
 
 		q->covered |= 1;
 		q->exist   |= 1;
@@ -457,6 +561,8 @@ size_t tm_ref_pack_kpos(tm_ref_cnt_t *p, size_t ksize, tm_ref_kpos_t const *kpos
 {
 	_unused(ksize);
 
+	uint64_t const kmask = 0xffffffff000000ff;	/* extract kmer and next fields */
+
 	/* first bin */
 	size_t const hdr = sizeof(tm_ref_bin_t);
 	size_t ofs = TM_REF_BASE_OFS;
@@ -464,7 +570,7 @@ size_t tm_ref_pack_kpos(tm_ref_cnt_t *p, size_t ksize, tm_ref_kpos_t const *kpos
 	tm_ref_kpos_t const *k = kpos, *t = &kpos[kcnt];
 	for(size_t i = 0; i < ksize && k < t; i++) {
 		if(p[i].exist == 0) { continue; }
-		while(k < t && (k->kmer>>2) < i) {
+		while(k < t && k->kmer < i) {
 			debug("something is wrong, k(%p, %p), kmer(%x)", k, t, k->kmer);
 			k++;
 		}
@@ -477,6 +583,23 @@ size_t tm_ref_pack_kpos(tm_ref_cnt_t *p, size_t ksize, tm_ref_kpos_t const *kpos
 		_storeu_v4i32(bin, _zero_v4i32());		/* clear link */
 
 		/* pack pos array */
+		#if 1
+		size_t x = 0, y = 0;
+		while(k < t && k->kmer == i) {
+			uint64_t const next = k->next>>6;
+			uint64_t const kall = _loadu_u64(k) & kmask;
+			while(y < next) {
+				bin->link[y++].tail = x;
+			}
+			while(k < t && (_loadu_u64(k) & kmask) == kall) {
+				bin->pos[x++] = k++->pos;
+			}
+		}
+		/* fill missing tail */
+		while(y < 4) { bin->link[y++].tail = x; }
+
+
+		#else
 		size_t x = 0, y = 0;
 		while(k < t && (k->kmer>>2) == i) {
 			uint32_t const kall = k->kmer;
@@ -487,9 +610,9 @@ size_t tm_ref_pack_kpos(tm_ref_cnt_t *p, size_t ksize, tm_ref_kpos_t const *kpos
 				bin->pos[x++] = k++->pos;
 			}
 		}
-
 		/* fill missing tail */
 		while(y < 4) { bin->link[y++].tail = x; }
+		#endif
 /*
 		debug("kmer(%r), ofs(%zu), cnt(%u, %zu, %zu), tail(%u, %u, %u, %u)",
 			tm_kmer_to_str, &i, ofs, p[i].cnt, x, y,
@@ -1548,14 +1671,13 @@ tm_idx_batch_t *tm_idx_collect(uint32_t tid, tm_idx_gen_t *self, tm_idx_batch_t 
 	/* load pointers */
 	tm_ref_tbuf_t *ref = &self->ref[tid];
 	bseq_meta_t *meta = bseq_meta_ptr(&batch->bin);
-	uint32_t const bid = batch->bin.base_id;
 
 	for(size_t i = 0; i < bseq_meta_cnt(&batch->bin); i++) {
 		bseq_meta_t *p = &meta[i];
 
 		p->u.ptr = NULL;		/* clear first */
 		if(bseq_seq_len(p) > INT16_MAX) {
-			fprintf(stderr, "i(%zu), len(%zu), seq(%s)\n", bid + i, bseq_seq_len(p), bseq_name(p));
+			debugblock({ fprintf(stderr, "i(%zu), len(%zu), seq(%s)\n", batch->bin.base_id + i, bseq_seq_len(p), bseq_name(p)); });
 			continue;
 		}
 
@@ -1582,7 +1704,7 @@ tm_idx_batch_t *tm_idx_collect(uint32_t tid, tm_idx_gen_t *self, tm_idx_batch_t 
 		);
 		debug("done, sr(%p)", sr);
 		if(sr == NULL) {
-			fprintf(stderr, "i(%zu), len(%zu), seq(%s)\n", bid + i, bseq_seq_len(p), bseq_name(p));
+			debugblock({ fprintf(stderr, "i(%zu), len(%zu), seq(%s)\n", batch->bin.base_id + i, bseq_seq_len(p), bseq_name(p)); });
 			continue;
 		}
 
@@ -2412,11 +2534,9 @@ size_t tm_expand_seed(tm_ref_state_t s, v4i32_t uofs, v4i32_t vofs, tm_seed_t *q
 	}
 	#endif
 
-	// fprintf(stderr, "bin(%p)\n", s.bin);
 /*
-	volatile size_t j = 0;
+	fprintf(stderr, "bin(%p), cnt(%zu)\n", s.bin, m.cnt);
 	for(size_t i = 0; i < m.cnt; i++) {
-		if(m.ptr[i]) { j++; }
 		debug("qr(%x, %x), vu(%x, %x)", (0x80000000 - 0x20000) - _ext_v4i32(vofs, 0), m.ptr[i], q[i].v, q[i].u);
 	}
 */
@@ -2551,9 +2671,9 @@ size_t tm_squash_seed(tm_sqiv_t const *sqiv, size_t icnt, tm_seed_v *seed)
 	}
 
 	// debug("sp(%zu), scnt(%zu)", sp - kv_ptr(*seed), kv_cnt(*seed));
-	if((size_t)(sp - kv_ptr(*seed)) != kv_cnt(*seed)) {
-		trap();
-	}
+	debugblock({
+		if((size_t)(sp - kv_ptr(*seed)) != kv_cnt(*seed)) { trap(); }
+	});
 
 	size_t const cnt = dp - kv_ptr(*seed);
 	kv_cnt(*seed) = cnt;
@@ -2577,7 +2697,7 @@ tm_seed_t *tm_chain_find_first(uint64_t ruv, tm_seed_t *p, tm_seed_t *t, uint64_
 	/* load bounds */
 	uint64_t const uv = ruv;					/* (ulb, vlb) */
 	uint64_t ub = (uv & umask) + window;		/* (uub, vub - vlb) */
-	// debug("uub(%lx), vwlen(%lx)", ub>>32, ub & 0xffffffff);
+	debug("uub(%lx), vwlen(%lx)", ub>>32, ub & 0xffffffff);
 
 	int64_t cont = 0;		/* continuous flag */
 	while(1) {
@@ -2585,16 +2705,16 @@ tm_seed_t *tm_chain_find_first(uint64_t ruv, tm_seed_t *p, tm_seed_t *t, uint64_
 		if((cont | tm_chain_test_ptr(++p, t)) < 0) { return(NULL); }
 
 		uint64_t const v = _loadu_u64(p) - lb;	/* 1: (u, v - vlb) for inclusion test */
-		// debug("test inclusion, pv(%lx), pu(%lx), u(%lx), {v - vlb}(%lx), test(%lx)", p->v, p->u, v>>32, v & 0xffffffff, (ub - v) & tmask);
+		debug("test inclusion, pv(%lx), pu(%lx), u(%lx), {v - vlb}(%lx), test(%lx)", p->v, p->u, v>>32, v & 0xffffffff, (ub - v) & tmask);
 
 		cont = ub - v;		/* save diff for testing MSb */
 		if(((cont | v) & tmask) == 0) {			/* 2,3: break if chainable (first chainable seed found) */
-			// debug("chainable");
+			debug("chainable");
 			break;
 		}
 
 		/* unchainable */
-		// debug("unchainable");
+		debug("unchainable");
 	}
 	return(p);
 }
@@ -2608,7 +2728,7 @@ tm_seed_t *tm_chain_find_alt(tm_seed_t *p, tm_seed_t *t, uint64_t lb)
 	/* calculate bounds */
 	uint64_t rv = _loadu_u64(p) - lb;
 	uint64_t ub = rv + (rv<<32);
-	// debug("u(%lx), {v - vlb}(%lx), uub(%lx), vub(%lx)", rv>>32, rv & 0xffffffff, ub>>32, ub & 0xffffffff);
+	debug("u(%lx), {v - vlb}(%lx), uub(%lx), vub(%lx)", rv>>32, rv & 0xffffffff, ub>>32, ub & 0xffffffff);
 
 	/* keep nearest seed */
 	tm_seed_t *n = p;
@@ -2616,18 +2736,18 @@ tm_seed_t *tm_chain_find_alt(tm_seed_t *p, tm_seed_t *t, uint64_t lb)
 	int64_t cont = 0;
 	while((cont | tm_chain_test_ptr(++p, t)) >= 0) {
 		uint64_t const v = _loadu_u64(p) - lb;	/* 1: (u, v - vlb) for inclusion test */
-		// debug("u(%lx), {v - vlb}(%lx), uub(%lx), vub(%lx), test(%lx), term(%lx)", p->u, v & 0xffffffff, ub>>32, ub & 0xffffffff, (ub - v) & tmask, (int64_t)(ub - v) < 0);
+		debug("u(%lx), {v - vlb}(%lx), uub(%lx), vub(%lx), test(%lx), term(%lx)", p->u, v & 0xffffffff, ub>>32, ub & 0xffffffff, (ub - v) & tmask, (int64_t)(ub - v) < 0);
 		cont = ub - v;
 		if((cont | v) & tmask) {		/* skip if unchainable */
-			// debug("unchainable");
+			debug("unchainable");
 			continue;
 		}
 
 		/* chainable; test if the seed is nearer than the previous */
 		uint64_t const w = v + (v<<32);			/* 2,3: (u + v - vlb, v - vlb) */
-		// debug("{u + v - vlb}(%lx), {v - vlb}(%lx)", w>>32, w & 0xffffffff);
+		debug("{u + v - vlb}(%lx), {v - vlb}(%lx)", w>>32, w & 0xffffffff);
 		if((ub - w) & tmask) {			/* 4,5: further than previous */
-			// debug("further; terminate");
+			debug("further; terminate");
 			break;
 		}
 
@@ -2645,7 +2765,7 @@ tm_seed_t *tm_chain_find_nearest(uint64_t ruv, tm_seed_t *p, tm_seed_t *t, uint6
 	uint64_t const umask = 0xffffffff00000000;	/* extract upper */
 	uint64_t const uv = ruv;					/* (ulb, vlb) */
 	uint64_t lb = (uv & ~umask);				/* (0, vlb) */
-	// debug("ulb(%lx), vlb(%lx)", uv>>32, lb);
+	debug("ulb(%lx), vlb(%lx)", uv>>32, lb);
 
 	/* find first chainable seed */
 	tm_seed_t *n = tm_chain_find_first(ruv, p, t, lb, window);
@@ -3100,6 +3220,12 @@ size_t tm_seed_and_sort(tm_idx_sketch_t const *si, tm_idx_profile_t const *profi
 	size_t const scnt = kv_cnt(*seed);
 
 	radix_sort_seed(sptr, scnt);
+/*
+	debug("scnt(%zu)", scnt);
+	for(size_t i = 0; i < scnt; i++) {
+		debug("i(%zu), %r", i, tm_seed_to_str, &sptr[i]);
+	}
+*/
 	return(scnt);
 }
 
@@ -3780,11 +3906,17 @@ void *tm_mtscan_worker(uint32_t tid, tm_mtscan_t *self, tm_mtscan_batch_t *batch
 	/* for each query sequence */
 	for(size_t i = 0; i < bseq_meta_cnt(&batch->seq_bin); i++) {
 		bseq_meta_t *seq = &meta[i];
-		fprintf(stderr, "i(%zu), len(%zu), seq(%s)\n", i, bseq_seq_len(seq), bseq_name(seq));
-		seq->u.ptr = tm_scan_all(scan, self->mi, bseq_seq(seq), bseq_seq_len(seq));
-		fprintf(stderr, "done, cnt(%zu)\n", seq->u.ptr != NULL ? ((tm_alnv_t const *)seq->u.ptr)->cnt : 0);
 
+		/* print info */
 		debugblock({
+			fprintf(stderr, "begin, tid(%u), i(%zu), len(%zu), seq(%s)\n", tid, i, bseq_seq_len(seq), bseq_name(seq));
+		});
+
+		seq->u.ptr = tm_scan_all(scan, self->mi, bseq_seq(seq), bseq_seq_len(seq));
+
+		/* print info */
+		debugblock({
+			fprintf(stderr, "done, tid(%u), i(%zu), cnt(%zu)\n", tid, i, seq->u.ptr != NULL ? ((tm_alnv_t const *)seq->u.ptr)->cnt : 0);
 			tm_alnv_t const *v = seq->u.ptr;
 			debug("v(%p), cnt(%zu)", v, v != NULL ? v->cnt : 0);
 		});
