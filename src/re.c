@@ -118,6 +118,7 @@ transition(struct re_nfa_s *nfa, size_t from, size_t to, uint16_t type)
         } else {
                 assert(false);
         }
+        return(NULL);
 }
 
 static void
@@ -563,6 +564,7 @@ charmatch(char const **s, struct transition_s const *tr, char const *begin)
         case NFA_CHAR:    return **s == tr->c && ++*s;
         default:          assert(false);
         }
+        return false;
 }
 
 static char const *
