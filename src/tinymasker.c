@@ -691,7 +691,7 @@ tm_ref_sketch_t *tm_ref_build_index(tm_ref_conf_t const *conf, uint8_t const *se
 	if(size > UINT32_MAX) { trap(); }
 
 	/* malloc; use entire page */
-	size_t const rounded_size = _roundup(size + conf->margin.head + conf->margin.tail, 4096);
+	size_t const rounded_size = _roundup(size + conf->margin.head + MAX2(16, conf->margin.tail), 4096);
 	void *base = malloc(rounded_size);
 	if(base == NULL) { return(NULL); }		/* wrapped malloc traps allocation failure */
 
