@@ -783,30 +783,6 @@ tm_ref_state_t tm_ref_match_init(tm_ref_sketch_t const *ref)
 	});
 }
 
-#if 0
-static _force_inline
-tm_ref_squash_t tm_ref_load_squash(tm_ref_bin_t const *bin, uint64_t unmatching, uint8_t next)
-{
-	static int8_t const scatter[16] __attribute__(( aligned(16) )) = {
-		0, 0, 0, 0, 0x80, 0x80, 0x80, 0x80,
-		0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80
-	};
-	static int8_t const shuf[16] __attribute__(( aligned(16) )) = {
-		-2, -1, 2, 3, 14, 15, 0x80, 0x80,
-		0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80
-	};
-
-	v16i8_t const tv = _load_v16i8(scatter);
-	v16i8_t const sv = _load_v16i8(shuf);
-
-	v2i64_t const nv = _seta_v2i64(0, (unmatching & 0xc0) | next);		/* 0xff when unmatching; clears src and dst columns */
-	v16i8_t const mv = _shuf_v16i8(nv, tv);
-
-	v16i8_t const w = _loadu_v16i8(bin->link);
-	v16i8_t const v = _shuf_v16i8(w, _add_v16i8(mv, sv));
-	return((tm_ref_squash_t){ .v = v });
-}
-#else
 static _force_inline
 tm_ref_squash_t tm_ref_load_squash(tm_ref_bin_t const *bin, uint64_t unmatching, uint8_t next)
 {
@@ -824,7 +800,6 @@ tm_ref_squash_t tm_ref_load_squash(tm_ref_bin_t const *bin, uint64_t unmatching,
 	v16i8_t const v = _shuf_v16i8(w, iv);
 	return((tm_ref_squash_t){ .v = v });
 }
-#endif
 
 static _force_inline
 tm_ref_next_t tm_ref_match_next(tm_ref_state_t s, uint64_t keep, uint8_t next)
