@@ -531,6 +531,9 @@ tm_ref_kpos_t const *tm_ref_pack_kpos_core(tm_ref_bin_t *bin, uint64_t kmer, tm_
 	/* first clear header; sizeof(tm_ref_bin_t) == sizeof(v4i32) */
 	_storeu_v4i32(bin, _zero_v4i32());
 
+	/* skip missing k-mers (won't be executed) */
+	while(k < t && k->kmer < kmer) { trap(); k++; }
+
 	/* pack pos array */
 	size_t x = 0, y = 0;
 	while(k < t && k->kmer == kmer) {
@@ -562,9 +565,6 @@ size_t tm_ref_pack_kpos(tm_ref_cnt_t *p, size_t ksize, tm_ref_kpos_t const *kpos
 	tm_ref_kpos_t const *k = kpos, *t = &kpos[kcnt];
 	for(size_t i = 0; i < ksize && k < t; i++) {
 		if(p[i].exist == 0) { continue; }
-
-		/* skip missing k-mers (won't be executed) */
-		while(k < t && k->kmer < i) { trap(); k++; }
 
 		/* save current offset; slice bin from the offset */
 		p[i].ofs = ofs;
