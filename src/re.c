@@ -457,13 +457,13 @@ atom(char const **s)
 }
 
 static bool
-searchclass(uint16_t const *class, int n, uint8_t c)
+searchclass(uint16_t const *class, size_t n, uint8_t c)
 {
-        int lo = 0;
-        int hi = n - 1;
+        int64_t lo = 0;
+        int64_t hi = n - 1;
 
         while (lo <= hi) {
-                int m = (lo + hi) / 2;
+                int64_t m = (lo + hi) / 2;
                 if      (c < L(class[m])) hi = m - 1;
                 else if (c > H(class[m])) lo = m + 1;
                 else                      return true;
@@ -491,7 +491,7 @@ charclass(char const **s)
                 *s += 1;
 
         uint8_t n = 0;
-        for (int i = 0; (*s)[i] != '\0'; ++n) {
+        for (size_t i = 0; (*s)[i] != '\0'; ++n) {
                 if ((*s)[i] == ']' && i != 0)
                         break;
                 if ((*s)[i + 1] == '-' && (*s)[i + 2] != '\0' && (*s)[i + 2] != ']')
@@ -504,7 +504,7 @@ charclass(char const **s)
         if (class == NULL)
                 return NULL;
 
-        for (int i = 0; i < n; ++i, ++*s) {
+        for (size_t i = 0; i < n; ++i, ++*s) {
                 if ((*s)[1] == '-' && (*s)[2] != '\0' && (*s)[2] != ']') {
                         class[i] = ((*s)[0] << 8) + (*s)[2];
                         *s += 2;
@@ -523,9 +523,9 @@ charclass(char const **s)
 
         qsort(class, n, sizeof *class, classcmp);
         
-        for (int i = 0; i < n; ++i) {
+        for (size_t i = 0; i < n; ++i) {
                 uint8_t high = H(class[i]);
-                int j = i + 1;
+                size_t j = i + 1;
                 while (j < n && L(class[j]) <= high + 1) {
                         if (H(class[j]) > high)
                                 high = H(class[j]);
@@ -571,8 +571,8 @@ static char const *
 domatch(struct st_s const *state, char const *string, char const *begin)
 {
         struct frame_s *stack = malloc(8 * sizeof *stack);
-        int capacity = 8;
-        int i = 0;
+        size_t capacity = 8;
+        size_t i = 0;
 
         if (stack == NULL)
                 goto end;
