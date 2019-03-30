@@ -184,7 +184,6 @@ _static_assert(sizeof(tm_ref_kpos_t) == 8);
 typedef struct { tm_ref_kpos_t *a; size_t n, m; } tm_ref_kpos_v;
 
 #define tm_ref_kmer(x)			( _loadu_u64(&x) )
-// KRADIX_SORT_INIT(kmer, tm_ref_kpos_t, tm_ref_kmer, 4);
 KRADIX_SORT_INIT(kmer, tm_ref_kpos_t, tm_ref_kmer, 8);	/* sort all */
 
 typedef struct {
@@ -194,7 +193,6 @@ typedef struct {
 typedef struct {
 	/* constants */
 	uint32_t amask, shift;
-	// uint32_t kofs;
 
 	/* dst array */
 	tm_ref_kpos_t *q;
@@ -227,7 +225,7 @@ size_t tm_ref_dup_stack(tm_ref_work_t *w)
 
 	/* update size and branch pos */
 	w->size = w->size<<1;
-	w->branches |= (0x01<<w->shift);
+	w->branches |= 0x01<<w->shift;
 
 	for(size_t i = 0; i < prev_size; i++) {
 		w->kmer[prev_size + i] = w->kmer[i];
@@ -284,7 +282,6 @@ v4i32_t tm_ref_compose_kpos(v2i32_t pos, v2i32_t kmer)
 	return((v4i32_t){ w.v1 });
 }
 
-#if 1
 static _force_inline
 void tm_ref_push_pos(tm_ref_work_t *w, v2i32_t pos)
 {
@@ -296,24 +293,6 @@ void tm_ref_push_pos(tm_ref_work_t *w, v2i32_t pos)
 	}
 	return;
 }
-#else
-static _force_inline
-void tm_ref_push_pos(tm_ref_work_t *w, v2i32_t pos)
-{
-	for(size_t i = 0; i < w->size; i++) {
-		*w->q++ = (tm_ref_kpos_t){
-			.kmer = w->kmer[i].f,
-			.pos  = pos + TM_SEED_POS_OFS				/* pos + base_offset */
-		};
-		*w->q++ = (tm_ref_kpos_t){
-			.kmer = w->kmer[i].r,
-			.pos  = w->kofs - (pos + TM_SEED_POS_OFS)	/* (k - 1) - (pos + base_offset) */
-		};
-		debug("pos(%u), kmer(%x, %x)", pos, w->kmer[i].f, w->kmer[i].r);
-	}
-	return;
-}
-#endif
 
 static _force_inline
 void tm_ref_push_base(tm_ref_work_t *w, uint8_t base)
@@ -351,8 +330,7 @@ size_t tm_ref_enumerate_kmer(size_t kbits, uint8_t const *seq, size_t slen, tm_r
 	tm_ref_work_t w = {
 		/* place kmers at 6..kbits + 6 */
 		.amask = ((0x01<<kbits) - 0x01)<<6,
-		.shift = kbits - 2 + 6,
-		// .kofs  = (kbits>>1),		/* k - 1 */
+		.shift = kbits - 2 + 6,			/* k - 1 + offset */
 
 		/* make room in dst array */
 		.q = tm_ref_reserve(buf, kv_ptr(*buf)),
@@ -446,25 +424,12 @@ size_t tm_ref_collect_kmer(tm_ref_conf_t const *conf, uint8_t const *seq, size_t
 	/* sort kmers by position */
 	tm_ref_kpos_t *kptr = kv_ptr(*buf);
 	size_t const kcnt = kv_cnt(*buf);
-
 	radix_sort_kmer(kptr, kcnt);
-/*
-	debug("kcnt(%zu)", kcnt);
-	for(size_t i = 0; i < kcnt; i++) {
-		debug("i(%zu), kmer(%x), pos(%x)", i, kptr[i].kmer, kptr[i].pos);
-	}
-*/
+
 	/* dedup kmers around ambiguous bases */
 	debug("kcnt(%zu)", kcnt);
 	size_t const dcnt = tm_ref_dedup_kmer(kptr, kcnt);
 	kv_cnt(*buf) = dcnt;
-
-/*
-	debug("kcnt(%zu)", dcnt);
-	for(size_t i = 0; i < dcnt; i++) {
-		debug("i(%zu), kmer(%x), pos(%x)", i, kptr[i].kmer, kptr[i].pos);
-	}
-*/
 	return(dcnt);
 }
 
@@ -507,7 +472,6 @@ size_t tm_ref_count_kmer(tm_ref_cnt_t *p, size_t ksize, tm_ref_kpos_t const *kpo
 
 	// debug("ksize(%zx), kcnt(%zu)", ksize, kcnt);
 	for(tm_ref_kpos_t const *k = kpos, *t = &kpos[kcnt]; k < t; k++) {
-		// tm_ref_cnt_t *q = &p[k->kmer>>2];
 		tm_ref_cnt_t *q = &p[k->kmer];
 
 		q->covered |= 1;
@@ -525,11 +489,10 @@ void tm_ref_patch_feeder(tm_ref_cnt_t *p, size_t ksize)
 		if(p[i].exist == 0) { continue; }
 
 		for(uint64_t mask = (ksize - 1)>>2; mask != 0; mask >>= 2) {
-			uint64_t krem = i & mask;
-			// debug("test mask(%lx), krem(%r), covered(%u), exist(%u)", mask, tm_kmer_to_str, &krem, p[krem].covered, p[krem].exist);
-			// if(p[krem].covered) { break; }
-
+			uint64_t const krem = i & mask;
 			p[krem].covered |= 1;
+
+			// debug("test mask(%lx), krem(%r), covered(%u), exist(%u)", mask, tm_kmer_to_str, &krem, p[krem].covered, p[krem].exist);
 		}
 	}
 
@@ -553,9 +516,39 @@ size_t tm_ref_calc_size(tm_ref_cnt_t const *p, size_t ksize)
 	for(size_t i = 0; i < ksize; i++) {
 		if(p[i].exist == 0) { continue; }
 		acc += _roundup(hdr + sizeof(uint16_t) * p[i].cnt, TM_REF_ALIGN_SIZE);
+
 		// debug("i(%zx), cnt(%zu), acc(%zu)", i, p[i].cnt, acc);
 	}
 	return(acc);
+}
+
+static _force_inline
+tm_ref_kpos_t const *tm_ref_pack_kpos_core(tm_ref_bin_t *bin, uint64_t kmer, tm_ref_kpos_t const *k, tm_ref_kpos_t const *t)
+{
+	/* extract kmer and next fields */
+	uint64_t const kmask = 0xffffffff000000ff;
+
+	/* first clear header; sizeof(tm_ref_bin_t) == sizeof(v4i32) */
+	_storeu_v4i32(bin, _zero_v4i32());
+
+	/* pack pos array */
+	size_t x = 0, y = 0;
+	while(k < t && k->kmer == kmer) {
+		uint64_t const next = k->next>>6;
+		uint64_t const kall = _loadu_u64(k) & kmask;
+		while(y < next) {
+			bin->link[y++].tail = x;
+		}
+		while(k < t && (_loadu_u64(k) & kmask) == kall) {
+			bin->pos[x++] = k++->pos;
+		}
+	}
+	/* fill missing tail */
+	while(y < 4) { bin->link[y++].tail = x; }
+
+	/* clear tail margin */
+	_storeu_v16i8(&bin->pos[x], _zero_v16i8());		/* suppress use-of-uninitialized-value error in valgrind */
+	return(k);
 }
 
 static _force_inline
@@ -563,68 +556,28 @@ size_t tm_ref_pack_kpos(tm_ref_cnt_t *p, size_t ksize, tm_ref_kpos_t const *kpos
 {
 	_unused(ksize);
 
-	uint64_t const kmask = 0xffffffff000000ff;	/* extract kmer and next fields */
-
-	/* first bin */
-	size_t const hdr = sizeof(tm_ref_bin_t);
+	/* first bin offset at base_ofs */
 	size_t ofs = TM_REF_BASE_OFS;
 
 	tm_ref_kpos_t const *k = kpos, *t = &kpos[kcnt];
 	for(size_t i = 0; i < ksize && k < t; i++) {
 		if(p[i].exist == 0) { continue; }
-		while(k < t && k->kmer < i) {
-			debug("something is wrong, k(%p, %p), kmer(%x)", k, t, k->kmer);
-			k++;
-		}
 
-		/* save current offset */
+		/* skip missing k-mers (won't be executed) */
+		while(k < t && k->kmer < i) { trap(); k++; }
+
+		/* save current offset; slice bin from the offset */
 		p[i].ofs = ofs;
-
-		/* slice bin from current offset */
 		tm_ref_bin_t *bin = _add_offset(sk, ofs);
-		_storeu_v4i32(bin, _zero_v4i32());		/* clear link */
 
-		/* pack pos array */
-		#if 1
-		size_t x = 0, y = 0;
-		while(k < t && k->kmer == i) {
-			uint64_t const next = k->next>>6;
-			uint64_t const kall = _loadu_u64(k) & kmask;
-			while(y < next) {
-				bin->link[y++].tail = x;
-			}
-			while(k < t && (_loadu_u64(k) & kmask) == kall) {
-				bin->pos[x++] = k++->pos;
-			}
-		}
-		/* fill missing tail */
-		while(y < 4) { bin->link[y++].tail = x; }
-
-
-		#else
-		size_t x = 0, y = 0;
-		while(k < t && (k->kmer>>2) == i) {
-			uint32_t const kall = k->kmer;
-			while(y < (kall & 0x03)) {
-				bin->link[y++].tail = x;
-			}
-			while(k < t && k->kmer == kall) {
-				bin->pos[x++] = k++->pos;
-			}
-		}
-		/* fill missing tail */
-		while(y < 4) { bin->link[y++].tail = x; }
-		#endif
-/*
-		debug("kmer(%r), ofs(%zu), cnt(%u, %zu, %zu), tail(%u, %u, %u, %u)",
-			tm_kmer_to_str, &i, ofs, p[i].cnt, x, y,
-			bin->link[0].tail, bin->link[1].tail, bin->link[2].tail, bin->link[3].tail
-		);
-*/
+		/* pack */
+		k = tm_ref_pack_kpos_core(bin, i, k, t);
 
 		/* update offset */
-		_storeu_v16i8(&bin->pos[x], _zero_v16i8());		/* suppress use-of-uninitialized-value error in valgrind */
-		ofs += _roundup(hdr + sizeof(uint16_t) * p[i].cnt, TM_REF_ALIGN_SIZE);
+		ofs += _roundup(
+			sizeof(tm_ref_bin_t) + sizeof(uint16_t) * p[i].cnt,
+			TM_REF_ALIGN_SIZE
+		);
 	}
 	return(ofs);
 }
@@ -691,8 +644,8 @@ uint64_t tm_ref_build_link(tm_ref_cnt_t const *p, size_t ksize, tm_ref_sketch_t 
 		for(size_t j = 0; j < 4; j++) {
 			tm_ref_prefix_t n = tm_ref_find_link(p, ((i<<2) + j) & mask, max_shift);
 			int32_t const next = (int32_t)(n.ofs - p[i].ofs) / (int32_t)TM_REF_ALIGN_SIZE;	/* overflows; keep sign bit */
-			if(next > INT16_MAX || next < INT16_MIN) {
-				error("link overflow: i(%zx), next(%d)", i, next);
+			if(_unlikely(next > INT16_MAX || next < INT16_MIN)) {
+				error("link overflow at k-mer(%zx) and next base(%c), try smaller k-mer size for this sequence or shorten the sequence.", i, "ACGT"[next]);
 				return(1);
 			}
 
@@ -728,7 +681,7 @@ tm_ref_sketch_t *tm_ref_build_index(tm_ref_conf_t const *conf, uint8_t const *se
 
 	/* count kmers */
 	tm_ref_count_kmer(p, ksize, kpos, kcnt);
-	_scan_memory(p, sizeof(tm_ref_cnt_t) * ksize);
+	_scan_memory(p, sizeof(tm_ref_cnt_t) * ksize);		/* valgrind use-of-uninitialized-value */
 
 	/* patch lead */
 	tm_ref_patch_feeder(p, ksize);
@@ -740,7 +693,7 @@ tm_ref_sketch_t *tm_ref_build_index(tm_ref_conf_t const *conf, uint8_t const *se
 	/* malloc; use entire page */
 	size_t const rounded_size = _roundup(size + conf->margin.head + conf->margin.tail, 4096);
 	void *base = malloc(rounded_size);
-	if(base == NULL) { debug("failed"); return(NULL); }
+	if(base == NULL) { return(NULL); }		/* wrapped malloc traps allocation failure */
 
 	/* save metadata */
 	tm_ref_sketch_t *sk = _add_offset(base, conf->margin.head);
@@ -758,8 +711,7 @@ tm_ref_sketch_t *tm_ref_build_index(tm_ref_conf_t const *conf, uint8_t const *se
 		free(base);
 		return(NULL);
 	}
-	_scan_memory(sk, sk->size);
-
+	_scan_memory(sk, sk->size);				/* valgrind use-of-uninitialized-value */
 
 	/* anything else? */
 	debug("done, size(%u), head_margin(%u), kbits(%u), slen(%u)", sk->size, sk->head_margin, sk->kbits, sk->slen);
@@ -2524,6 +2476,7 @@ size_t tm_expand_seed(tm_ref_state_t s, v4i32_t uofs, v4i32_t vofs, tm_seed_t *q
 		_storeu_v4i32(&q[i + 2], _hi_v4i32(u, v));
 	}
 	#else
+	/* serial; has a bug */
 	for(size_t i = 0; i < m.cnt; i++) {
 		int16_t const z = m.ptr[i];
 		uint32_t const w = ((int32_t)z) & mask;			/* signed expansion */
@@ -2532,16 +2485,9 @@ size_t tm_expand_seed(tm_ref_state_t s, v4i32_t uofs, v4i32_t vofs, tm_seed_t *q
 		q[i].v = v;
 		q[i].u = u;
 
-		_scan_memory(q, sizeof(tm_seed_t));
+		_scan_memory(q, sizeof(tm_seed_t));				/* valgrind use-of-uninitialized-value */
 	}
 	#endif
-
-/*
-	fprintf(stderr, "bin(%p), cnt(%zu)\n", s.bin, m.cnt);
-	for(size_t i = 0; i < m.cnt; i++) {
-		debug("qr(%x, %x), vu(%x, %x)", (0x80000000 - 0x20000) - _ext_v4i32(vofs, 0), m.ptr[i], q[i].v, q[i].u);
-	}
-*/
 	return(m.cnt);
 }
 
@@ -2564,15 +2510,6 @@ size_t tm_save_sqiv(tm_ref_squash_t sq, tm_sqiv_t *r)
 	_storeu_v2i32(r, sq.v);
 	return(1);
 }
-
-#if 0
-static _force_inline
-void tm_invalidate_sqiv(tm_sqiv_t *p)
-{
-	_storeu_u32(&p->dst, 0);		/* p->dst = p->src = 0 */
-	return;
-}
-#endif
 
 static _force_inline
 size_t tm_save_last_sqiv(tm_ref_state_t s, tm_sqiv_t *r)
@@ -2610,7 +2547,7 @@ size_t tm_collect_seed(tm_ref_sketch_t const *ref, uint8_t const *query, size_t 
 		tm_ref_next_t n = tm_ref_match_next(s, (rem & mask) == 0, t[-rem]);
 
 		/* save matching state of the previous bin */
-		r += tm_save_sqiv(n.squash, r) + s.unmatching;		/* do not forward pointer if previous bin did not match */
+		r += tm_save_sqiv(n.squash, r) + s.unmatching;	/* do not forward pointer if previous bin did not match */
 
 		/* skip current bin if not matching */
 		s = n.state;
@@ -2644,13 +2581,12 @@ size_t tm_squash_seed(tm_sqiv_t const *sqiv, size_t icnt, tm_seed_v *seed)
 
 	/* squash succeeding match */
 	for(size_t i = 0; i < icnt; i++) {
-		_scan_memory(&sqiv[i], sizeof(tm_sqiv_t));
+		_scan_memory(&sqiv[i], sizeof(tm_sqiv_t));		/* valgrind use-of-uninitialized-value */
 		tm_sqiv_t sq = {
 			.dst = sqiv[i].dst & 0xfff,
 			.src = sqiv[i].src & 0xfff,
 			.cnt = sqiv[i].cnt & 0xfff
 		};
-
 		// debug("spos(%zu), dpos(%zu), cnt(%u, %u, %u)", sp - kv_ptr(*seed), dp - kv_ptr(*seed), sq.dst, sq.src, sq.cnt);
 
 		/* former half */
@@ -2777,46 +2713,6 @@ tm_seed_t *tm_chain_find_nearest(uint64_t ruv, tm_seed_t *p, tm_seed_t *t, uint6
 	return(tm_chain_find_alt(n, t, lb));
 }
 
-#if 0
-static _force_inline
-size_t tm_chain_record(v2i32_t root, v2i32_t tail, v2i32_t cnt, v2i32_t min_cnt, tm_chain_t *q)
-{
-	/* avoid use of general-purpose register to minimize spills */
-	v2i32_t const span = _sub_v2i32(tail, root);
-
-	/* FIXME: raw SSE operations */
-	v4i32_t const chain = ({
-		__m128i const x = _mm_shufflelo_epi16(span.v1, 0xd8);	/* (uint32_t [4]){ -, -, -, (uspan, vspan) } */
-		__m128i const y = _mm_unpacklo_epi32(x, cnt.v1);		/* (uint32_t [4]){ -, -, cnt, (uspan, vspan) } */
-		__m128i const z = _mm_unpacklo_epi64(root.v1, y);		/* (uint32_t [4]){ cnt, (uspan, vspan), upos, vpos } */
-		((v4i32_t){ .v1 = z });
-	});
-	_storeu_v4i32(q, chain);
-
-	/* forward if cnt > min_cnt */
-	v2i32_t const fv = _gt_v2i32(min_cnt, cnt);
-	uint32_t const fwd = _ext_v2i32(fv, 0);
-	return((uint32_t)(1 + fwd));
-}
-
-static _force_inline
-void tm_chain_record(v2i32_t root, v2i32_t tail, v2i32_t cnt, tm_chain_t *q)
-{
-	/* avoid use of general-purpose register to minimize spills */
-	v2i32_t const span = _sub_v2i32(tail, root);
-
-	/* FIXME: raw SSE operations */
-	v4i32_t const chain = ({
-		__m128i const x = _mm_shufflelo_epi16(span.v1, 0xd8);	/* (uint32_t [4]){ -, -, -, (uspan, vspan) } */
-		__m128i const y = _mm_unpacklo_epi32(x, cnt.v1);		/* (uint32_t [4]){ -, -, cnt, (uspan, vspan) } */
-		__m128i const z = _mm_unpacklo_epi64(root.v1, y);		/* (uint32_t [4]){ cnt, (uspan, vspan), upos, vpos } */
-		((v4i32_t){ .v1 = z });
-	});
-	_storeu_v4i32(q, chain);
-	return;
-}
-#endif
-
 #define _print_v4i32x(a) { \
 	debug("(v4i32_t) %s(%x, %x, %x, %x)", #a, _ext_v4i32(a, 3), _ext_v4i32(a, 2), _ext_v4i32(a, 1), _ext_v4i32(a, 0)); \
 }
@@ -2838,10 +2734,6 @@ v4i32_t tm_chain_compose(v2i32_t spos, v2i32_t epos)
 		_add_v4i32(a, a),						/* 2; (2*ue, 2*us, 2*ve, 2*vs) */
 		_shuf_v4i32(a, _km_v4i32(1, 0, 3, 2))	/* 2; (ve, vs, ue, us) */
 	);
-	// _print_v4i32x(spos);
-	// _print_v4i32x(epos);
-	// _print_v4i32x(a);
-	// _print_v4i32x(b);
 
 	/* decode span */
 	v4i32_t const d = (v4i32_t){
@@ -2851,8 +2743,6 @@ v4i32_t tm_chain_compose(v2i32_t spos, v2i32_t epos)
 	v4i32_t const span = (v4i32_t){
 		_mm_mul_epu32(coef.v1, c.v1)			/* 6-; (qspan, -, rspan, -) */
 	};
-	// _print_v4i32x(d);
-	// _print_v4i32x(c);
 	_print_v4i32x(span);
 
 	/* decode pos */
@@ -2864,9 +2754,6 @@ v4i32_t tm_chain_compose(v2i32_t spos, v2i32_t epos)
 	v4i32_t const pos = (v4i32_t){
 		_mm_mul_epu32(coef.v1, g.v1)			/* 9-; (qpos, 0, rpos, -) */
 	};
-	// _print_v4i32x(e);
-	// _print_v4i32x(f);
-	// _print_v4i32x(g);
 	_print_v4i32x(pos);
 
 	/* fold pos and span */
@@ -3123,33 +3010,6 @@ int64_t tm_filter_extend(tm_filter_work_t *w, tm_idx_profile_t const *profile, u
 	return(fw + rv >= profile->filter.min_score);
 }
 
-#if 0
-static _force_inline
-size_t tm_filter_save_chain(uint32_t rid, tm_chain_t *q, tm_chain_raw_t const *p)
-{
-	/* load */
-	tm_chain_raw_t const raw = *p;
-	debug("p(%p), %r", p, tm_chain_raw_to_str, p);
-
-	/* calc weight */
-	ZCNT_RESULT size_t weight = _lzcnt_u32(p->rspan);
-
-	/* save */
-	*q = (tm_chain_t){
-		.rpos = raw.rpos + (raw.dir ? raw.rspan : 0),
-		.qpos = raw.qpos,
-		.qspan = raw.qspan,
-
-		.dir  = raw.dir,
-		.unused = raw.unused,
-
-		.attr.sep.rid = rid,			/* overwrite */
-		.attr.sep.weight = weight	/* negated and offsetted by 32; the larger for the longer chain */
-	};
-	debug("q(%p), %r, rid(%u), weight(%u)", q, tm_chain_to_str, q, rid, weight);
-	return(1);
-}
-#else
 static _force_inline
 size_t tm_filter_save_chain(uint32_t rid, tm_chain_t *q, tm_chain_raw_t const *p)
 {
@@ -3171,7 +3031,6 @@ size_t tm_filter_save_chain(uint32_t rid, tm_chain_t *q, tm_chain_raw_t const *p
 	debug("q(%p), %r, rid(%u), weight(%u)", q, tm_chain_to_str, q, rid, weight);
 	return(1);
 }
-#endif
 
 static _force_inline
 size_t tm_filter_chain(tm_idx_sketch_t const *si, tm_idx_profile_t const *profile, uint8_t const *query, tm_chain_t *chain, size_t ccnt)
