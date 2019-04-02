@@ -1591,7 +1591,7 @@ const char* toml_raw_at(const toml_array_t* arr, size_t idx)
 {
     if (arr->kind != 'v')
         return 0;
-    if (! (0 <= idx && idx < arr->nelem))
+    if (idx >= arr->nelem)
         return 0;
     return arr->u.val[idx];
 }
@@ -1647,7 +1647,7 @@ const toml_array_t* toml_array_at(const toml_array_t* arr, size_t idx)
 {
     if (arr->kind != 'a')
         return 0;
-    if (! (0 <= idx && idx < arr->nelem))
+    if (idx >= arr->nelem)
         return 0;
     return arr->u.arr[idx];
 }
@@ -1656,7 +1656,7 @@ const toml_table_t* toml_table_at(const toml_array_t* arr, size_t idx)
 {
     if (arr->kind != 't')
         return 0;
-    if (! (0 <= idx && idx < arr->nelem))
+    if (idx >= arr->nelem)
         return 0;
     return arr->u.tab[idx];
 }
