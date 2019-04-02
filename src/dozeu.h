@@ -2566,7 +2566,7 @@ void dz_init_gap_penalties(dz_profile_t *profile, dz_score_conf_t const *conf)
 	/* X-drop threshold */
 	uint16_t const gi = dz_max2(conf->ins_open,   conf->del_open);
 	uint16_t const ge = dz_max2(conf->ins_extend, conf->del_extend);
-	profile->xt = gi + ge * MAX2(conf->max_ins_len, conf->max_del_len);	/* FIXME: X-drop threshold */
+	profile->xt = gi + ge * dz_max2(conf->max_ins_len, conf->max_del_len);	/* FIXME: X-drop threshold */
 	profile->bonus = conf->full_length_bonus;
 	profile->init  = dz_add_ofs(DZ_CELL_MIN);
 	profile->max_ins_len = conf->max_ins_len;	/* save raw value */
