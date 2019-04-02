@@ -403,9 +403,9 @@ static _force_inline
 uint64_t bseq_append(bseq_file_t *fp, bseq_metam_v *seq, uint8m_v *bin)
 {
 	debugblock({ if(fp->is_eof > 1) { trap(); } });
-	while(bin->n < fp->batch_size) {						/* fetch-and-parse loop */
-		while(bseq_read_fasta(fp, seq, bin)) {				/* buffer starved and sequence block continues */
-			if(bseq_fetch_block(fp) == 0) { break; }		/* fetch next */
+	while(bin->n < fp->batch_size) {				/* fetch-and-parse loop */
+		while(bseq_read_fasta(fp, seq, bin)) {		/* buffer starved and sequence block continues */
+			if(bseq_fetch_block(fp) == 0) { break; }/* fetch next */
 			
 			/* reserve room for the next parsing unit */
 			kvm_reserve(uint8_t, *bin, kvm_cnt(*bin) + 2 * fp->batch_size);
@@ -413,14 +413,16 @@ uint64_t bseq_append(bseq_file_t *fp, bseq_metam_v *seq, uint8m_v *bin)
 		}
 		// debug("finished seq, state(%u), is_eof(%u), seq(%p, %lu), bin(%p, %lu)", fp->state, fp->is_eof, kvm_ptr(*seq), kvm_cnt(*seq), kvm_ptr(*bin), kvm_cnt(*bin));
 
-		if(_unlikely(fp->is_eof == 2)) { break; }			/* reached end of file */
+		if(_unlikely(fp->is_eof == 2)) { break; }	/* reached end of file */
 		if(_likely(fp->state == 0)) { continue; }
 
 		/* an error occurred */
-		fp->is_eof = 3;										/* mark error occurred */
-		if(kvm_cnt(*seq) > 0) { (void)kvm_pop(*seq); }		/* remove last (broken) element */
+		fp->is_eof = 3;								/* mark error occurred */
+		if(_likely(kvm_cnt(*seq) > 0)) {
+			(void)kvm_pop(*seq);					/* remove last (broken) element */
+		}
 		if(_unlikely(kvm_cnt(*seq) == 0)) {
-			fp->is_eof = MAX2(fp->is_eof, 2);				/* no sequence is remaining */
+			fp->is_eof = MAX2(fp->is_eof, 2);		/* no sequence is remaining */
 			return(1);
 		}
 		break;
