@@ -12,10 +12,12 @@
 #include "common.h"
 #include "log.h"
 
+#include "mmstring.h"
+
 
 enum opt_type_t { OPT_BOOL = 1, OPT_REQ = 2, OPT_OPT = 3 };
 typedef struct opt_s opt_t;
-typedef void (*opt_callback_t)(opt_t *o, void *opaque, char const *optarg);
+typedef int (*opt_callback_t)(opt_t *o, void *opaque, char const *optarg);		/* non-zero if fail */
 typedef struct { uint8_t type; opt_callback_t fn; } opt_parser_t;
 typedef struct { char *p; size_t size, used; } opt_mem_t;
 
@@ -25,61 +27,17 @@ typedef struct { char *p; size_t size, used; } opt_mem_t;
  */
 typedef int (*opt_log_t)(opt_t const *o, char level, char const *func, char const *fmt, ...);
 struct opt_s {
+	mm_strbin_t bin;
 	ptr_v parg;								/* positional arguments */
-	kvec_t(opt_mem_t) mem;					/* string bin (for positional arguments and opt_strdup) */
-	uint32_t ecnt;							/* error counter */
-	// uint32_t verbose;
-	// double inittime;
-	// opt_log_t log;
+	size_t ecnt;							/* error counter */
 	void *log;								/* output file pointer */
 	opt_parser_t t[256];					/* parser functions */
 };
 
-#if 0
-/**
- * @fn opt_log_printer
- * @brief 0, 1, 2,... for normal message, 8, 9, 10,... for message with timestamp, 16, 17, 18, ... for without header.
- */
-static
-int opt_log_printer(
-	opt_t const *o,			/* option object */
-	char level,				/* 'E' and 'W' for error and warning, 0, 1,... for message */
-	char const *func,		/* __func__ must be passed */
-	char const *fmt,		/* format string */
-	...)
-{
-	if (level < ' ' && (level & 0x07) > o->verbose) {
-		return(0);
-	}
-
-	va_list l;
-	va_start(l, fmt);
-
-	FILE *fp = (FILE *)o->fp;
-	int r = 0;
-	if(level >= ' ' || (level & 0x10) == 0) {
-		if(level >= ' ' || (level & 0x08) == 0) {
-			r += fprintf(fp, "[%c::%s] ", level < ' ' ? 'M' : level, func);
-		} else {
-			r += fprintf(fp, "[%c::%s::%.3f*%.2f] ",
-				level < ' ' ? 'M' : level,					/* 'E' for error */
-				func,										/* function name */
-				realtime() - o->inittime,					/* realtime */
-				cputime() / (realtime() - o->inittime));	/* average cpu usage */
-		}
-	}
-	r += vfprintf(fp, fmt, l);								/* body */
-	r += fprintf(fp, "\n");
-	va_end(l);
-	return(r);
-}
-#endif
-
 /**
  * @macro oassert, olog
  */
-#define oassert(_o, _cond, ...)		{ if(!(_cond)) { error("" __VA_ARGS__); (_o)->ecnt++; } }
-#define olog(_o, ...)				{ (_o)->log(_o, __VA_ARGS__); }
+#define oassert(_cond, ...)		{ if(!(_cond)) { error("" __VA_ARGS__); } }
 
 /**
  * @macro split_foreach
@@ -111,8 +69,6 @@ int opt_log_printer(
 #define opt_pargv(_o)				( (_o)->parg )
 #define opt_parg(_o)				( (_o)->parg.a )
 #define opt_parg_cnt(_o)			( (_o)->parg.n )
-// #define opt_verbose(_o)				( (_o)->verbose )
-// #define opt_fp(_o)					( (_o)->fp )
 #define opt_ecnt(_o)				( (_o)->ecnt )
 #define opt_log(_o)					( (_o)->log )
 
@@ -120,78 +76,44 @@ int opt_log_printer(
  * @fn opt_init, opt_destroy
  */
 static _force_inline
-void opt_init_static(opt_t *o, void *fp)
+void opt_init_static(opt_t *opt, void *fp)
 {
-	// o->verbose = 2;
-	o->log = fp;
+	opt->log = fp;
 
-	/* make sure kv_ptr(o->mem) is always available */
-	kv_reserve(void *, o->parg, 16);
+	/* make sure kv_ptr(opt->mem) is always available */
+	mm_strbin_init_static(&opt->bin);
+	kv_reserve(void *, opt->parg, 16);
 	return;
 }
 static _force_inline
-void opt_destroy_static(opt_t *o)
+void opt_destroy_static(opt_t *opt)
 {
-	/* memory arena */
-	kv_foreach(opt_mem_t, o->mem, { free(p->p); });
-	kv_destroy(o->mem);
-
 	/* positional arguments */
-	kv_destroy(o->parg);
+	mm_strbin_destroy_static(&opt->bin);
+	kv_destroy(opt->parg);
 	return;
 }
-#define opt_init(_fp, _log)			{ opt_t *o = calloc(sizeof(opt_t)); opt_init_static(o, _fp, _log); }
+#define opt_init(_fp, _log)			{ opt_t *_opt = calloc(sizeof(opt_t)); opt_init_static(_opt, _fp, _log); }
 #define opt_destroy(_o)				{ opt_destroy_static(_o); free(_o); }
 
-/**
- * @fn opt_strdup
- */
-static _force_inline
-opt_mem_t *opt_strdup_allocate_mem(opt_t *o, size_t len)
-{
-	size_t msize = kv_size(o->mem);
-	opt_mem_t const *tail = kv_tail(o->mem);
-	if(msize == 0 || tail->size - tail->used < len + 1) {
-		size_t const min_blk_size = 4 * 1024;
-		size_t blk_size = MAX2(len + 1, min_blk_size);
 
-		char *p = malloc(sizeof(char) * blk_size);
-		kv_push(opt_mem_t, o->mem, ((opt_mem_t){ .p = p, .size = blk_size, .used = 0 }));
-	}
-	return(kv_tail(o->mem));	
-}
 static _force_inline
-char const *opt_strdup(opt_t *o, char const *str, size_t len)
+uint64_t opt_is_argument(char const *q)
 {
-	/* calc len if needed */
-	if(len == 0) { len = strlen(str); }
+	return(q[0] != '-' || q[1] == '\0');
+}
 
-	/* allocate memory bin */
-	opt_mem_t *mem = opt_strdup_allocate_mem(o, len);
+static _force_inline
+void opt_push_parg(opt_t *opt, char const *arg)
+{
+	/* save positional argument */
+	char const *ptr = mm_bin_strdup(&opt->bin, arg, 0);
+	kv_push(void *, opt->parg, (void *)ptr);
 
-	/* copy */
-	char *base = &mem->p[mem->used];
-	memcpy(base, str, len);
-	base[len] = '\0';
-	mem->used += len + 1;
-	return(base);
-}
-static _force_inline
-char const *opt_join(opt_t *o, char const *const *p, char c)
-{
-	char *str = mm_join(p, c);
-	char const *dup = opt_strdup(o, str, 0);
-	free(str);
-	return(dup);
-}
-static _force_inline
-char const *opt_append(opt_t *o, char const *p, char const *q)
-{
-	char const *b[3] = { p, q, NULL };
-	char *str = mm_join(b, '\0');
-	char const *dup = opt_strdup(o, str, 0);
-	free(str);
-	return(dup);
+	/* push and pop; always keep NULL-terminated */
+	kv_push(void *, opt->parg, NULL);
+	(void)kv_pop(opt->parg);
+	return;
 }
 
 /**
@@ -199,36 +121,40 @@ char const *opt_append(opt_t *o, char const *p, char const *q)
  * @brief parse (argc, argv)-style option arrays. only argv is required here (MUST be NULL-terminated).
  */
 static _force_inline
-void opt_push_parg(opt_t *o, char const *arg)
-{
-	/* save positional argument */
-	char const *ptr = opt_strdup(o, arg, 0);
-	kv_push(void *, o->parg, (void *)ptr);
-
-	/* push and pop; always keep NULL-terminated */
-	kv_push(void *, o->parg, NULL);
-	(void)kv_pop(o->parg);
-	return;
-}
-static _force_inline
-int opt_parse_argv(opt_t *o, void *opaque, char const *const *argv)
+int opt_parse_argv(opt_t *opt, void *opaque, char const *const *argv)
 {
 	char const *const *p = argv - 1;
-	char const *q;
-	#define _isarg(_q)	( (_q)[0] != '-' || (_q)[1] == '\0' )
-	#define _x(x)		( (size_t)(x) )
-	while((q = *++p)) {											/* p is a jagged array, must be NULL-terminated */
-		if(_isarg(q)) {	opt_push_parg(o, q); continue; }		/* option starts with '-' and longer than 2 letters, such as "-a" and "-ab" */
-		while(o->t[_x(*++q)].type == OPT_BOOL) { o->t[_x(*q)].fn(o, opaque, NULL); }/* eat boolean options */
-		if(*q == '\0') { continue; }													/* end of positional argument */
-		if(!o->t[_x(*q)].fn) { error("unknown option `-%c'.", *q); continue; }	/* argument option not found */
-		char const *r = q[1] ? q+1 : (p[1] && _isarg(p[1]) ? *++p : NULL);				/* if the option ends without argument, inspect the next element in the jagged array (originally placed after space(s)) */
-		oassert(o, o->t[_x(*q)].type != OPT_REQ || r, "missing argument for option `-%c'.", *q);
-		if(o->t[_x(*q)].type != OPT_REQ || r) { o->t[_x(*q)].fn(o, opaque, r); }	/* option with argument would be found at the tail */
+	char const *q = NULL;
+
+	/* p is a jagged array, must be NULL-terminated */
+	while((q = *++p) != '\0') {
+		/* if the option does not start with '-' and has length, it's positional */
+		if(opt_is_argument(q)) {
+			opt_push_parg(opt, q);
+			continue;
+		}
+
+		/* option starts with '-' and longer than 2 letters, such as "-a" and "-ab"; eat boolean options other than the last one */
+		while(opt->t[(size_t)*++q].type == OPT_BOOL) {
+			if(opt->t[(size_t)*q].fn(opt, opaque, NULL)) { opt->ecnt++; }	/* error if nonzero */
+		}
+		if(*q == '\0') { continue; }		/* end of positional argument */
+
+		/* skip if argument option not found */
+		if(opt->t[(size_t)*q].fn == NULL) {
+			error("unknown option `-%c'.", *q);
+			continue;
+		}
+
+		/* if the option ends without argument, inspect the next element in the jagged array (originally placed after space(s)) */
+		char const *r = q[1] != '\0' ? q + 1 : (p[1] && opt_is_argument(p[1]) ? *++p : NULL);
+		if(opt->t[(size_t)*q].type == OPT_REQ && r == NULL) {
+			error("missing argument for option `-%c'.", *q);
+		} else {
+			if(opt->t[(size_t)*q].fn(opt, opaque, r)) { opt->ecnt++; }
+		}
 	}
-	#undef _isarg
-	#undef _x
-	return(o->ecnt);
+	return(opt->ecnt);
 }
 
 /**
@@ -247,7 +173,10 @@ static void opt_parse_line(opt_t *o, void *opaque, char const *arg)
 	kv_foreach(char const *, ptr, { *p += (ptrdiff_t)str.a; });
 	kv_push(char const *, ptr, NULL);
 	opt_parse_argv(o, opaque, ptr.a);
-	free(str.a); free(ptr.a);
+
+	/* done */
+	free(str.a);
+	free(ptr.a);
 	return;
 }
 
@@ -257,7 +186,10 @@ static void opt_parse_line(opt_t *o, void *opaque, char const *arg)
 static int opt_load_conf(opt_t *o, void *opaque, char const *arg)
 {
 	FILE *fp = fopen(arg, "r");
-	if(fp == NULL) { error("failed to find configuration file `%s'.", arg); return(0); }
+	if(fp == NULL) {
+		error("failed to find configuration file `%s'.", arg);
+		return(0);
+	}
 
 	kvec_t(char) str = { 0 };
 	kv_reserve(char, str, 1024);
@@ -265,8 +197,10 @@ static int opt_load_conf(opt_t *o, void *opaque, char const *arg)
 		if((str.n += fread(str.a, sizeof(char), str.m - str.n, fp)) < str.m) { break; }
 		kv_reserve(char, str, 2 * str.n);
 	}
-	fclose(fp); kv_push(char, str, '\0');
-	for(uint64_t i = 0; i < str.n; i++) {
+	fclose(fp);
+
+	kv_push(char, str, '\0');
+	for(size_t i = 0; i < str.n; i++) {
 		if(str.a[i] == '\n' || str.a[i] == '\t') { str.a[i] = ' '; }
 	}
 
