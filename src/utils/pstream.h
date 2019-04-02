@@ -999,7 +999,7 @@ size_t pgread(pg_t *pg, void *dst, size_t len)
 		}
 
 		/* copy to dst buffer */
-		uint64_t adv = MIN2(rem, s->len - s->head);
+		size_t adv = MIN2(rem, s->len - s->head);
 		memcpy(_add_offset(dst, len - rem), s->buf + s->head, adv);
 		rem -= adv; s->head += adv;
 	}
