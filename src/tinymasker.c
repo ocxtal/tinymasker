@@ -1414,8 +1414,8 @@ uint64_t tm_idx_check_sanity(tm_idx_profile_t const *profile)
 		uint8_t const gih = profile->extend.gih, geh = profile->extend.geh;
 		// fprintf(stderr, "%u, %u, %u, %u\n", giv, gev, gih, geh);
 
-		tm_idx_assert(giv >= 0 && giv <= 31, "gap open penalty (-p) must be >= 0 and <= 31.");
-		tm_idx_assert(gih >= 0 && gih <= 31, "gap open penalty (-p) must be >= 0 and <= 31.");
+		tm_idx_assert(/* giv >= 0 && */ giv <= 31, "gap open penalty (-p) must be >= 0 and <= 31.");
+		tm_idx_assert(/* gih >= 0 && */ gih <= 31, "gap open penalty (-p) must be >= 0 and <= 31.");
 		tm_idx_assert(gev >= 1 && gev <= 31, "gap extension penalty (-q) must be >= 1 and <= 31.");
 		tm_idx_assert(geh >= 1 && geh <= 31, "gap extension penalty (-q) must be >= 1 and <= 31.");
 	}
