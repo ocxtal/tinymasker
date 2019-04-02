@@ -1349,7 +1349,7 @@ void tm_idx_calc_filter_thresh(tm_idx_profile_t *profile)
 	/* set -1 to disable filter */
 	if(profile->filter.qspan_thresh != UINT32_MAX) {
 		uint32_t const qspan_thresh = profile->chain.window.sep.u * 2;
-		profile->filter.qspan_thresh = MAX2(0, qspan_thresh);
+		profile->filter.qspan_thresh = qspan_thresh;
 	}
 	return;
 }
@@ -4241,24 +4241,23 @@ enum main_error_codes {
 };
 
 typedef struct {
-	/* scan-and-mask params */
-	tm_idx_conf_t fallback;			/* tm_conf_t: tm_idx_conf_t */
-	tm_print_conf_t print;
-	char const *profile;
-
-	/* index dump mode if not NULL */
-	char const *idxdump;
-
 	/* global args */
 	char const *args;
 	uint32_t verbose, help;
 	size_t nth;
 
+	/* index dump mode if not NULL */
+	char const *idxdump;
+
+	/* scan-and-mask params */
+	char const *profile;
+	tm_idx_conf_t fallback;			/* tm_conf_t: tm_idx_conf_t */
+	tm_print_conf_t print;
+
 	/* option parser */
 	FILE *log;
 	opt_t opt;
 } tm_conf_t;
-_static_assert(offsetof(tm_conf_t, fallback) == 0);
 
 #define tm_conf_assert(_cond, ...) ({ \
 	if(!(_cond)) { \
@@ -4309,50 +4308,50 @@ static int tm_conf_profile(tm_conf_t *conf, char const *arg) {
 }
 
 /* indexing */
-static int tm_conf_kmer(tm_idx_conf_t *conf, char const *arg) {
-	conf->kmer = mm_atoi(arg, 0);
+static int tm_conf_kmer(tm_conf_t *conf, char const *arg) {
+	conf->fallback.kmer = mm_atoi(arg, 0);
 	return(0);
 }
-static int tm_conf_window(tm_idx_conf_t *conf, char const *arg) {
-	conf->window = mm_atoi(arg, 0);
+static int tm_conf_window(tm_conf_t *conf, char const *arg) {
+	conf->fallback.window = mm_atoi(arg, 0);
 	return(0);
 }
-static int tm_conf_ccnt(tm_idx_conf_t *conf, char const *arg) {
-	conf->min_scnt = mm_atoi(arg, 0);
+static int tm_conf_ccnt(tm_conf_t *conf, char const *arg) {
+	conf->fallback.min_scnt = mm_atoi(arg, 0);
 	return(0);
 }
-static int tm_conf_filter(tm_idx_conf_t *conf, char const *arg) {
+static int tm_conf_filter(tm_conf_t *conf, char const *arg) {
 	_unused(arg);
-	conf->skip_filter = 1;
+	conf->fallback.skip_filter = 1;
 	return(0);
 }
-static int tm_conf_match(tm_idx_conf_t *conf, char const *arg) {
-	conf->match = mm_atoi(arg, 0);
+static int tm_conf_match(tm_conf_t *conf, char const *arg) {
+	conf->fallback.match = mm_atoi(arg, 0);
 	return(0);
 }
-static int tm_conf_mismatch(tm_idx_conf_t *conf, char const *arg) {
-	conf->mismatch = mm_atoi(arg, 0);		/* positive number expected */
+static int tm_conf_mismatch(tm_conf_t *conf, char const *arg) {
+	conf->fallback.mismatch = mm_atoi(arg, 0);		/* positive number expected */
 	return(0);
 }
-static int tm_conf_gap_open(tm_idx_conf_t *conf, char const *arg) {
-	conf->gap_open = mm_atoi(arg, 0);		/* positive number expected */
+static int tm_conf_gap_open(tm_conf_t *conf, char const *arg) {
+	conf->fallback.gap_open = mm_atoi(arg, 0);		/* positive number expected */
 	return(0);
 }
-static int tm_conf_gap_extend(tm_idx_conf_t *conf, char const *arg) {
-	conf->gap_extend = mm_atoi(arg, 0);		/* positive number expected */
+static int tm_conf_gap_extend(tm_conf_t *conf, char const *arg) {
+	conf->fallback.gap_extend = mm_atoi(arg, 0);		/* positive number expected */
 	return(0);
 }
-static int tm_conf_max_gap(tm_idx_conf_t *conf, char const *arg) {
-	conf->max_gap_len = mm_atoi(arg, 0);
+static int tm_conf_max_gap(tm_conf_t *conf, char const *arg) {
+	conf->fallback.max_gap_len = mm_atoi(arg, 0);
 	return(0);
 }
-static int tm_conf_min_score(tm_idx_conf_t *conf, char const *arg) {
-	conf->min_score = mm_atoi(arg, 0);
+static int tm_conf_min_score(tm_conf_t *conf, char const *arg) {
+	conf->fallback.min_score = mm_atoi(arg, 0);
 	return(0);
 }
 
 
-static void tm_conf_preset(opt_t *opt, tm_conf_t *conf, char const *arg)
+static int tm_conf_preset(tm_conf_t *conf, char const *arg)
 {
 	struct tm_conf_preset_s {
 		/* key-value pair */
@@ -4372,14 +4371,17 @@ static void tm_conf_preset(opt_t *opt, tm_conf_t *conf, char const *arg)
 	split_foreach(arg, 0, ".:", {		/* traverse preset param tree along with parsing */
 		while(*q != NULL && strncmp(p, (*q)->key, l) != 0) { q++; }
 		if(*q == NULL) {				/* terminate if not matched, not loaded from file */
-			int ret = opt_load_conf(opt, conf, p);
-			if(ret == 0) { error("no preset params found for `%.*s'.", (int)l, p); }
+			int ret = opt_load_conf(&conf->opt, conf, p);
+			if(ret == 0) {
+				error("no preset params found for `%.*s'.", (int)l, p);
+				return(1);
+			}
 			break;
 		}
-		opt_parse_line(opt, conf, (*q)->val);/* apply recursively */
+		opt_parse_line(&conf->opt, conf, (*q)->val);/* apply recursively */
 		q = (*q)->children;				/* visit child nodes */
 	});
-	return;
+	return(0);
 }
 
 
