@@ -853,9 +853,12 @@ tm_ref_match_t tm_ref_get_arr(tm_ref_state_t s)
 typedef struct {
 	/* fallback parameters */
 	size_t kmer, window, min_scnt;		/* k-mer length and chain window size */
+	uint64_t skip_filter;
 
 	/* extension params */
-	uint64_t match, mismatch, gap_open, gap_extend;
+	uint64_t match, mismatch;
+	uint64_t gap_open, gap_extend;
+	uint64_t max_gap_len;
 	int64_t min_score;
 } tm_idx_conf_t;
 
@@ -883,10 +886,7 @@ typedef struct {
 		uint8_t score_matrix[16];	/* match-mismatch score matrix */
 		uint8_t gap[16];			/* gap */
 		uint8_t init[16];			/* p = 0 */
-
-		/* extension test if < test_cnt, do inward extension if longer than uspan_thresh */
-		uint16_t test_cnt;
-		uint16_t uspan_thresh;
+		uint32_t qspan_thresh;		/* -1 to disable */
 		int32_t min_score;			/* discard if sum of extension scores is smaller than min_score */
 	} filter;
 
@@ -899,6 +899,7 @@ typedef struct {
 	struct {
 		dz_profile_t *dz;
 		int32_t min_score;
+		uint32_t vlim, hlim;		/* max_ins_len and max_del_len */
 		uint8_t giv, gev, gih, geh;
 		int8_t score_matrix[DZ_QUERY_MAT_SIZE * DZ_REF_MAT_SIZE];
 	} extend;
@@ -1151,21 +1152,8 @@ tm_idx_matcher_t tm_idx_parse_matcher(char const *pname, toml_table_t const *tab
 	return(matcher);
 }
 
-static _force_inline
-size_t tm_idx_profile_size(size_t plen)
-{
-	size_t const size = sizeof(tm_idx_profile_t) + _roundup(plen + 1, 16);
-	return(size);
-}
 
-static _force_inline
-char *tm_idx_profile_name_ptr(tm_idx_profile_t *profile)
-{
-	size_t const ofs = sizeof(tm_idx_profile_t);
-	return(_add_offset(profile, ofs));
-}
-
-typedef void (*tm_idx_score_foreach_t)(void *opaque, int8_t *p, size_t i, size_t j);
+typedef void (*tm_idx_score_foreach_t)(void *opaque, int8_t *p, size_t qidx, size_t ridx);
 
 static _force_inline
 void tm_idx_score_foreach(tm_idx_profile_t *profile, void *opaque, tm_idx_score_foreach_t fp)
@@ -1199,9 +1187,11 @@ void tm_idx_fill_score(tm_idx_profile_t *profile, int64_t m, int64_t x)
 }
 
 static _force_inline
-uint32_t tm_idx_calc_kadj(uint32_t k)
+void tm_idx_set_kadj(tm_idx_profile_t *profile, uint32_t k)
 {
-	return(k + 1);
+	profile->chain.kadj[0] = k + 1;
+	profile->chain.kadj[1] = k + 1;
+	return;
 }
 
 static _force_inline
@@ -1211,10 +1201,9 @@ void tm_idx_fill_default(tm_idx_profile_t *profile)
 	size_t const k = 5;
 	profile->kbits = 2 * k;
 
+	tm_idx_set_kadj(profile, k);
 	profile->chain.window.sep.u = 32;
 	profile->chain.window.sep.v = 32;
-	profile->chain.kadj[0] = tm_idx_calc_kadj(k);
-	profile->chain.kadj[1] = tm_idx_calc_kadj(k);
 	profile->chain.min_scnt = 4;
 
 	profile->extend.min_score = 16;
@@ -1231,8 +1220,7 @@ void tm_idx_override_default(tm_idx_profile_t *profile, tm_idx_conf_t const *con
 {
 	if(conf->kmer > 0) {
 		profile->kbits = 2 * conf->kmer;
-		profile->chain.kadj[0] = tm_idx_calc_kadj(conf->kmer);
-		profile->chain.kadj[1] = tm_idx_calc_kadj(conf->kmer);
+		tm_idx_set_kadj(profile, conf->kmer);
 	}
 
 	/* chaining */
@@ -1242,6 +1230,11 @@ void tm_idx_override_default(tm_idx_profile_t *profile, tm_idx_conf_t const *con
 	}
 	if(conf->min_scnt > 0) {
 		profile->chain.min_scnt = conf->min_scnt;
+	}
+
+	/* filter */
+	if(conf->skip_filter) {
+		profile->filter.qspan_thresh = UINT32_MAX;
 	}
 
 	/* score matrix */
@@ -1349,13 +1342,15 @@ void tm_idx_calc_filter_ivec(tm_idx_profile_t *profile)
 static _force_inline
 void tm_idx_calc_filter_thresh(tm_idx_profile_t *profile)
 {
-	uint32_t const test_cnt = profile->chain.min_scnt * 3;
+	/* just save */
 	int32_t const min_score = profile->extend.min_score / 4;
-	uint32_t const uspan_thresh = profile->chain.window.sep.u * 2;
-
-	profile->filter.test_cnt  = test_cnt;
 	profile->filter.min_score = MAX2(0, min_score);
-	profile->filter.uspan_thresh = uspan_thresh;
+
+	/* set -1 to disable filter */
+	if(profile->filter.qspan_thresh != UINT32_MAX) {
+		uint32_t const qspan_thresh = profile->chain.window.sep.u * 2;
+		profile->filter.qspan_thresh = MAX2(0, qspan_thresh);
+	}
 	return;
 }
 
@@ -1370,8 +1365,72 @@ void tm_idx_calc_filter_params(tm_idx_profile_t *profile)
 }
 
 static _force_inline
-void tm_idx_finalize_profile(tm_idx_profile_t *profile)
+uint64_t tm_idx_check_sanity(tm_idx_profile_t const *profile)
 {
+	#define tm_idx_assert(_cond, ...) ({ if(!(_cond)) { error("" __VA_ARGS__); ecnt++; } })
+
+	size_t ecnt = 0;
+
+	/* kmer */ {
+		uint32_t const k = profile->kbits>>1;
+		tm_idx_assert(k >= 3 && k <= 7, "k-mer size (-k) must be >= 3 and <= 7.");
+	}
+
+	/* window size */ {
+		uint32_t const w = MAX2(profile->chain.window.sep.u, profile->chain.window.sep.v);
+		tm_idx_assert(w <= 256, "chain window size (-w) must be >= 0 and <= 256.");		/* zero to disable chain */
+	}
+
+	/* seed count */ {
+		uint32_t const c = profile->chain.min_scnt;
+		tm_idx_assert(c >= 1 && c <= 1024, "minimum seed count (-c) must be >= 1 and <= 1024.");
+	}
+
+	/* score matrix */ {
+		tm_idx_calc_acc_t c[2] = {
+			{ 0, INT32_MAX, INT32_MIN, 0 },
+			{ 0, INT32_MAX, INT32_MIN, 0 }
+		};
+		tm_idx_score_foreach((tm_idx_profile_t *)profile,
+			(void *)c,
+			(tm_idx_score_foreach_t)tm_idx_acc_filter_score
+		);
+
+		tm_idx_assert(c[0].min >= 1   && c[0].max <= 31, "match award (-a) must be >= 1 and <= 31.");
+		tm_idx_assert(c[1].min >= -31 && c[1].min <= -1, "mismatch penalty (-b) must be >= 1 and <= 31.");
+	}
+	/* gaps */ {
+		uint8_t const giv = profile->extend.giv, gev = profile->extend.gev;
+		uint8_t const gih = profile->extend.gih, geh = profile->extend.geh;
+
+		tm_idx_assert(giv >= 1 && giv <= 31, "gap open penalty (-p) must be >= 1 and <= 31.");
+		tm_idx_assert(gih >= 1 && gih <= 31, "gap open penalty (-p) must be >= 1 and <= 31.");
+		tm_idx_assert(gev >= 1 && gev <= 31, "gap extension penalty (-q) must be >= 1 and <= 31.");
+		tm_idx_assert(geh >= 1 && geh <= 31, "gap extension penalty (-q) must be >= 1 and <= 31.");
+	}
+
+	/* max gap len */ {
+		uint32_t const vlim = profile->extend.vlim;
+		uint32_t const hlim = profile->extend.hlim;
+
+		tm_idx_assert(vlim >= 1 && vlim <= 256, "max gap length (-g) must be >= 1 and <= 256.");
+		tm_idx_assert(hlim >= 1 && hlim <= 256, "max gap length (-g) must be >= 1 and <= 256.");
+	}
+
+	/* min_score */ {
+		uint32_t const min_score = profile->extend.min_score;
+		tm_idx_assert(min_score <= INT32_MAX, "minimum score threshold must be smaller than INT32_MAX.");
+	}
+	return(0);		/* no problem */
+}
+
+static _force_inline
+uint64_t tm_idx_finalize_profile(tm_idx_profile_t *profile)
+{
+	if(tm_idx_check_sanity(profile)) {
+		return(1);
+	}
+
 	/* calc squash interval */
 	uint32_t const u = profile->chain.window.sep.u;
 	profile->chain.squash_intv = 0x40000000>>_lzcnt_u32(u);		/* divide by 2 */
@@ -1390,11 +1449,58 @@ void tm_idx_finalize_profile(tm_idx_profile_t *profile)
 		.del_extend = profile->extend.geh,
 
 		/* fixed */
-		.max_gap_len = 16,
-		.full_length_bonus = 0
+		.max_ins_len = profile->extend.vlim,
+		.max_del_len = profile->extend.hlim,
+		.full_length_bonus = 0		/* disabled for now */
 	};
 	profile->extend.dz = dz_init_profile(&alloc, &conf);
-	return;
+	return(0);
+}
+
+
+static _force_inline
+size_t tm_idx_profile_size(size_t plen)
+{
+	size_t const size = sizeof(tm_idx_profile_t) + _roundup(plen + 1, 16);
+	return(size);
+}
+
+static _force_inline
+char *tm_idx_profile_name_ptr(tm_idx_profile_t *profile)
+{
+	size_t const ofs = sizeof(tm_idx_profile_t);
+	return(_add_offset(profile, ofs));
+}
+
+static _force_inline
+tm_idx_profile_t *tm_idx_allocate_profile(tm_idx_profile_t const *template, char const *pname)
+{
+	/* base size + profile name length */
+	size_t const plen = mm_strlen(pname);
+	size_t const size = tm_idx_profile_size(plen);
+
+	/* malloc and fill zero */
+	tm_idx_profile_t *profile = malloc(size);	/* calloc? */
+
+	/* copy base image */
+	if(template == NULL) {
+		memset(profile, 0, size);
+	} else {
+		memcpy(profile, template, sizeof(tm_idx_profile_t));
+	}
+
+	/* name and tail */
+	char *p = tm_idx_profile_name_ptr(profile);
+	char *t = _add_offset(profile, size);
+
+	/* override save size and name */
+	profile->size = size;
+	profile->meta.name = p;
+	memcpy(p, pname, plen);
+
+	/* clear remaining to avoid use-of-uninitialized-value error; including tail cap ('\0') */
+	memset(&p[plen], 0, t - &p[plen]);
+	return(profile);
 }
 
 static _force_inline
@@ -1402,17 +1508,9 @@ tm_idx_profile_t *tm_idx_default_profile(tm_idx_conf_t const *conf)
 {
 	/* name */
 	char const *pname = "default";
-	size_t const plen = mm_strlen(pname);
 
 	/* allocate profile object */
-	size_t const size = tm_idx_profile_size(plen);
-	tm_idx_profile_t *profile = malloc(size);
-	memset(profile, 0, size);
-
-	/* save size and name */
-	profile->size = size;
-	profile->meta.name = tm_idx_profile_name_ptr(profile);
-	memcpy(profile->meta.name, pname, plen + 1);
+	tm_idx_profile_t *profile = tm_idx_allocate_profile(NULL, pname);
 
 	/* load default params */
 	tm_idx_fill_default(profile);
@@ -1422,27 +1520,317 @@ tm_idx_profile_t *tm_idx_default_profile(tm_idx_conf_t const *conf)
 	tm_idx_calc_filter_params(profile);
 
 	/* instanciate dz */
-	tm_idx_finalize_profile(profile);
+	if(tm_idx_finalize_profile(profile)) {
+		free(profile);
+		return(NULL);
+	}
+	return(profile);
+}
+
+
+
+/* argument parsers */
+
+typedef uint64_t (*tm_idx_set_t)(tm_idx_profile_t *profile, void *str);
+typedef void *(*tm_idx_toml_in_t)(toml_table_t const *tab, char const *key);
+typedef struct {
+	char const *key;
+	size_t prefix;
+	tm_idx_set_t set;
+	tm_idx_toml_in_t in;
+} tm_idx_parse_t;
+
+typedef struct {
+	uint8_t idx[DZ_REF_MAT_SIZE];
+	uint64_t has_header;
+	size_t qsize, rsize;
+} tm_idx_dim_t;
+
+
+static _force_inline
+uint64_t tm_idx_is_valid_base(uint8_t const *conv, char const *str)
+{
+	return(str[0] == '\0' || str[1] != '\0' || conv[(size_t)(uint8_t)str[0]] == 0);
+}
+
+static _force_inline
+tm_idx_dim_t tm_idx_parse_header(toml_array_t const *arr, tm_idx_dim_t dim)
+{
+	/* index conversion table */
+	static uint8_t const conv[256] = {
+		['A'] = A, ['C'] = C, ['G'] = G, ['T'] = T,
+		['R'] = R, ['Y'] = Y, ['S'] = S,
+		['W'] = W, ['K'] = K, ['M'] = M,
+		['B'] = B, ['D'] = D, ['H'] = H, ['V'] = V,
+		['N'] = 16		/* to distinguish 'N' with invalid characters */
+	};
+
+	tm_idx_dim_t const error = { { 0 }, 0 };		/* qsize == 0 for error */
+	toml_array_t const *hdr = toml_array_at(arr, 0);
+
+	/* update dim */
+	dim.has_header = 1;
+	dim.qsize--;
+	dim.rsize = toml_array_nelem(hdr);		/* any number is acceptable */
+
+	/* save index for each base in the header */
+	for(size_t ridx = 0; ridx < dim.rsize; ridx++) {
+		char const *bstr = toml_raw_at(hdr, ridx);
+		if(tm_idx_is_valid_base(conv, bstr)) {
+			error("invalid base character in score matrix header: `%s'.", bstr);
+			return(error);
+		}
+		dim.idx[ridx] = conv[(size_t)(uint8_t)bstr[0]];
+	}
+
+	/* the header is confirmed valid */
+	return(dim);
+}
+
+static _force_inline
+size_t tm_idx_determine_rsize(toml_array_t const *arr, tm_idx_dim_t dim)
+{
+	size_t rsize[DZ_QUERY_MAT_SIZE + 1] = { 0 };
+
+	/* copy lengths */
+	for(size_t i = 0; i < dim.qsize + dim.has_header; i++) {
+		rsize[i] = toml_array_nelem(toml_array_at(arr, i));
+	}
+
+	/* check column lengths are matched */
+	for(size_t i = 1; i < dim.qsize + dim.has_header; i++) {
+		if(rsize[i - 1] != rsize[i]) {
+			error("unmatched row lengths of score matrix.");
+			return(0);
+		}
+	}
+
+	/* matched; anything else? */
+	return(rsize[0]);
+}
+
+static _force_inline
+tm_idx_dim_t tm_idx_fill_idx(toml_array_t const *arr, tm_idx_dim_t dim)
+{
+	tm_idx_dim_t const error = { { 0 }, 0 };		/* qsize == 0 for error */
+
+	/* here header is missing; we expect matrix is 4 x 4 or 16 x 4 */
+	dim.rsize = tm_idx_determine_rsize(arr, dim);
+	if(dim.rsize != 4 || dim.rsize != 16) { return(error); }
+
+	/* prebuilt conversion table */
+	static uint8_t const idx[2][DZ_REF_MAT_SIZE] __attribute__(( aligned(16) )) = {
+		{ 1, 2, 4, 8 },		/* A, C, G, T */
+		{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }	/* id(x) */
+	};
+	memcpy(&dim.idx, &idx[dim.rsize == 16], DZ_REF_MAT_SIZE);
+	return(dim);
+}
+
+static _force_inline
+tm_idx_dim_t tm_idx_parse_dim(toml_array_t const *arr)
+{
+	tm_idx_dim_t const error = { { 0 }, 0 };		/* qsize == 0 for error */
+	tm_idx_dim_t dim = {
+		.has_header = 0,
+		.qsize = toml_array_nelem(arr),
+		.rsize = 0
+	};
+
+	if(dim.qsize == DZ_QUERY_MAT_SIZE + 1) {
+		/* table seems to have header; inspect the header row */
+		return(tm_idx_parse_header(arr, dim));
+
+	} else if(dim.qsize == DZ_QUERY_MAT_SIZE) {
+		/* header missing; we expect the matrix is 4 x 4 or 16 x 4 */
+		return(tm_idx_fill_idx(arr, dim));
+	}
+
+	/* no header available and #rows does not match */
+	error("wrong #rows for score_matrix. four rows (for each of query-side A, C, G, and T) expected.");
+	return(error);
+}
+
+static _force_inline
+uint64_t tm_idx_parse_row(tm_idx_profile_t *profile, toml_array_t const *row, size_t qidx, tm_idx_dim_t dim)
+{
+	for(size_t ridx = 0; ridx < dim.rsize; ridx++) {
+		/* retrieve string at (qidx, ridx) */
+		char const *val = toml_raw_at(row, ridx);
+
+		/* convert to integer, INT64_MIN is returned when unparsable */
+		int64_t const n = mm_atoi(val, 0);
+		if(n == INT64_MIN) { return(1); }
+
+		/* save (others are left -DZ_SCORE_OFS) */
+		profile->extend.score_matrix[qidx * DZ_REF_MAT_SIZE + dim.idx[ridx]] = n;
+	}
+	return(0);
+}
+
+static
+uint64_t tm_idx_parse_matrix(tm_idx_profile_t *profile, toml_array_t const *arr)
+{
+	/* must be two-dimensional array of integer */
+	if(toml_array_kind(arr) == 'a') {
+		error("two-dimensional integer matrix expected for score_matrix in parsing `%s'.", profile->meta.name);
+		return(1);
+	}
+
+	/* calc dimension */
+	tm_idx_dim_t const dim = tm_idx_parse_dim(arr);
+	if(dim.qsize == 0) {
+		goto _tm_idx_parse_matrix_fail;		/* error occurred */
+	}
+
+	/* clear matrix */
+	memset(profile->extend.score_matrix, -DZ_SCORE_OFS, DZ_REF_MAT_SIZE * DZ_QUERY_MAT_SIZE);
+
+	/* convert to integer array */
+	for(size_t qidx = 0; qidx < dim.qsize; qidx++) {
+		toml_array_t const *row = toml_array_at(arr, qidx + dim.has_header);
+
+		if(tm_idx_parse_row(profile, row, qidx, dim)) {
+			goto _tm_idx_parse_matrix_fail;
+		}
+	}
+
+	/* done */
+	return(0);
+
+_tm_idx_parse_matrix_fail:;
+	error("in parsing `%s'.", profile->meta.name);
+	return(1);
+}
+
+static uint64_t tm_idx_set_kmer(tm_idx_profile_t *profile, char const *str)
+{
+	int64_t const k = mm_atoi(str, 0);
+	profile->kbits = 2 * k;
+	tm_idx_set_kadj(profile, k);
+	return(0);
+}
+static uint64_t tm_idx_set_window(tm_idx_profile_t *profile, char const *str) {
+	int64_t const w = mm_atoi(str, 0);
+	profile->chain.window.sep.u = w;
+	profile->chain.window.sep.v = w;
+	return(0);
+}
+static uint64_t tm_idx_set_ccnt(tm_idx_profile_t *profile, char const *str) {
+	profile->chain.min_scnt = mm_atoi(str, 0);
+	return(0);
+}
+static uint64_t tm_idx_set_filter(tm_idx_profile_t *profile, char const *str) {
+	if(mm_strcmp(str, "false") == 0) {
+		profile->filter.qspan_thresh = UINT32_MAX;
+	} else if(mm_strcmp(str, "true") != 0) {
+		error("boolean (true or false) expected for enable-filter (%s) in parsing `%s'.", str, profile->meta.name);
+		return(1);
+	}
+	return(0);
+}
+static uint64_t tm_idx_set_ins_open(tm_idx_profile_t *profile, char const *str) {
+	profile->extend.giv = mm_atoi(str, 0);
+	return(0);
+}
+static uint64_t tm_idx_set_ins_extend(tm_idx_profile_t *profile, char const *str) {
+	profile->extend.gev = mm_atoi(str, 0);
+	return(0);
+}
+static uint64_t tm_idx_set_ins_max(tm_idx_profile_t *profile, char const *str) {
+	profile->extend.vlim = mm_atoi(str, 0);
+	return(0);
+}
+static uint64_t tm_idx_set_del_open(tm_idx_profile_t *profile, char const *str) {
+	profile->extend.gih = mm_atoi(str, 0);
+	return(0);
+}
+static uint64_t tm_idx_set_del_extend(tm_idx_profile_t *profile, char const *str) {
+	profile->extend.geh = mm_atoi(str, 0);
+	return(0);
+}
+static uint64_t tm_idx_set_del_max(tm_idx_profile_t *profile, char const *str) {
+	profile->extend.hlim = mm_atoi(str, 0);
+	return(0);
+}
+static uint64_t tm_idx_set_min_score(tm_idx_profile_t *profile, char const *str) {
+	profile->extend.min_score = mm_atoi(str, 0);
+	return(0);
+}
+
+
+
+static _force_inline
+uint64_t tm_idx_match_key(char const *key, char const *expected, size_t min_len)
+{
+	size_t i = 0;
+	for(; key[i] != '\0' && expected[i] != '\0'; i++) {
+		if(key[i] != expected[i]) { return(0); }
+	}
+	return(i >= min_len && key[i] == '\0');		/* regard as match if key is shorter than full-length key */
+}
+
+static _force_inline
+uint64_t tm_idx_parse_key(tm_idx_profile_t *profile, toml_table_t const *table, char const *key)
+{
+	/* use the same parser for command-line arguments for consistency */
+	static tm_idx_parse_t const keys[] = {
+		/* short option */
+		{ "kmer_size",     4, (tm_idx_set_t)tm_idx_set_kmer,       (tm_idx_toml_in_t)toml_raw_in },
+		{ "window_size",   6, (tm_idx_set_t)tm_idx_set_window,     (tm_idx_toml_in_t)toml_raw_in },
+		{ "min_seed_cnt",  8, (tm_idx_set_t)tm_idx_set_ccnt,       (tm_idx_toml_in_t)toml_raw_in },
+		{ "enable_filter", 6, (tm_idx_set_t)tm_idx_set_filter,     (tm_idx_toml_in_t)toml_raw_in },		/* disable filter if arg == "false" */
+		{ "ins_open",      6, (tm_idx_set_t)tm_idx_set_ins_open,   (tm_idx_toml_in_t)toml_raw_in },
+		{ "ins_extend",    6, (tm_idx_set_t)tm_idx_set_ins_extend, (tm_idx_toml_in_t)toml_raw_in },
+		{ "ins_max_len",   7, (tm_idx_set_t)tm_idx_set_ins_max,    (tm_idx_toml_in_t)toml_raw_in },
+		{ "del_open",      6, (tm_idx_set_t)tm_idx_set_del_open,   (tm_idx_toml_in_t)toml_raw_in },
+		{ "del_extend",    6, (tm_idx_set_t)tm_idx_set_del_extend, (tm_idx_toml_in_t)toml_raw_in },
+		{ "del_max_len",   7, (tm_idx_set_t)tm_idx_set_del_max,    (tm_idx_toml_in_t)toml_raw_in },
+		{ "min_score",     6, (tm_idx_set_t)tm_idx_set_min_score,  (tm_idx_toml_in_t)toml_raw_in },
+		{ "score_matrix",  5, (tm_idx_set_t)tm_idx_parse_matrix,   (tm_idx_toml_in_t)toml_table_in },
+
+		{ NULL, 0, NULL, NULL }		/* sentinel */
+	};
+
+	/* parse int / boolean */
+	for(tm_idx_parse_t const *p = keys; p->key != NULL; p++) {
+		if(!tm_idx_match_key(key, p->key, p->prefix)) { continue; }
+
+		return(p->set(profile, (void *)p->in(table, key)));
+	}
+
+	error("unrecognized key `%s' in parsing `%s'.", key, profile->meta.name);
+	return(1);		/* not found */
+}
+
+static _force_inline
+tm_idx_profile_t *tm_idx_parse_table(tm_idx_profile_t const *template, char const *pname, toml_table_t const *table)
+{
+	/* copy params */
+	tm_idx_profile_t *profile = tm_idx_allocate_profile(template, pname);
+
+	/* parse table */
+	char const *key = NULL;
+	for(size_t i = 0; (key = toml_key_in(table, i)) != NULL; i++) {
+		if(tm_idx_parse_key(profile, table, key)) {
+			error("error in parsing table: `%s'.", profile->meta.name);
+			return(NULL);
+		}
+	}
+
+	/* always recalc filtering scores */
+	tm_idx_calc_filter_params(profile);
+
+	/* instanciate dz */
+	if(tm_idx_finalize_profile(profile)) {
+		free(profile);
+		return(NULL);
+	}
 	return(profile);
 }
 
 static _force_inline
-tm_idx_profile_t *tm_idx_parse_profile(tm_idx_profile_t const *template, char const *pname, toml_table_t const *table)
-{
-	size_t const plen = mm_strlen(pname);	
-
-	/* FIXME: save profile name */
-	_unused(template);
-	_unused(table);
-	_unused(plen);
-
-	/* instanciate dz */
-	// tm_idx_finalize_profile(profile);
-	return(NULL);
-}
-
-static _force_inline
-uint64_t tm_idx_load_score_core(tm_idx_gen_t *mii, tm_idx_profile_t const *template, toml_table_t const *root)
+uint64_t tm_idx_load_profile_core(tm_idx_gen_t *mii, tm_idx_profile_t const *template, toml_table_t const *root)
 {
 	char const *key;
 	for(size_t i = 0; (key = toml_key_in(root, i)) != NULL; i++) {
@@ -1459,7 +1847,7 @@ uint64_t tm_idx_load_score_core(tm_idx_gen_t *mii, tm_idx_profile_t const *templ
 		if(matcher.name == NULL && matcher.comment == NULL) { continue; }	/* error when both NULL */
 
 		/* parse score matrix */
-		tm_idx_profile_t *profile = tm_idx_parse_profile(template, key, table);	/* NULL if error */
+		tm_idx_profile_t *profile = tm_idx_parse_table(template, key, table);	/* NULL if error */
 		if(profile == NULL) { return(1); }	/* unignorable error */
 
 		/* save */
@@ -1469,16 +1857,20 @@ uint64_t tm_idx_load_score_core(tm_idx_gen_t *mii, tm_idx_profile_t const *templ
 }
 
 static _force_inline
-uint64_t tm_idx_load_score(tm_idx_gen_t *mii, tm_idx_profile_t const *template, char const *fn)
+uint64_t tm_idx_load_profile(tm_idx_gen_t *mii, tm_idx_profile_t const *template, char const *fn)
 {
 	/* open file as toml */
 	toml_table_t *root = tm_idx_dump_toml(fn);
 
 	/* parse */
-	uint64_t state = tm_idx_load_score_core(mii, template, root);
+	uint64_t const state = tm_idx_load_profile_core(mii, template, root);
 	toml_free(root);
 	return(state);
 }
+
+
+
+/* profile builder API and multithreading */
 
 static _force_inline
 uint64_t tm_idx_gen_profile(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, char const *fn, FILE *log)
@@ -1488,7 +1880,7 @@ uint64_t tm_idx_gen_profile(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, char c
 
 	if(fn != NULL) {
 		message(log, "reading score matrices...");
-		if(tm_idx_load_score(mii, fallback, fn)) {
+		if(tm_idx_load_profile(mii, fallback, fn)) {
 			return(1);
 		}
 	} else {
@@ -2023,21 +2415,18 @@ tm_idx_t *tm_idx_slice_root(uint8_t *base, size_t size)
 }
 
 static _force_inline
-void tm_idx_patch_profile(tm_idx_t *mi, uint8_t *base)
+void tm_idx_patch_ptr(tm_idx_t *mi, uint8_t *base)
 {
+	/* profile */
 	tm_idx_profile_t **p = mi->profile.arr;
 	size_t const pcnt = mi->profile.cnt;
 	for(size_t i = 0; i < pcnt; i++) {
 		p[i] = _add_offset(p[i], base);
 		p[i]->meta.name = tm_idx_profile_name_ptr(p[i]);
-		tm_idx_finalize_profile(p[i]);		/* instanciate dz */
+		_unused(tm_idx_finalize_profile(p[i]));		/* never fail; instanciate dz */
 	}
-	return;
-}
 
-static _force_inline
-void tm_idx_patch_sketch(tm_idx_t *mi, uint8_t *base)
-{
+	/* sketch */
 	tm_idx_sketch_t **s = mi->sketch.arr;
 	size_t const scnt = mi->sketch.cnt;
 	for(size_t i = 0; i < scnt; i++) {
@@ -2078,8 +2467,7 @@ tm_idx_t *tm_idx_load(void *fp, read_t rfp)
 	tm_idx_t *mi = tm_idx_slice_root(base, hdr.size);
 	mi->filename.ref     = _add_offset(mi->filename.ref, base);
 	mi->filename.profile = _add_offset(mi->filename.profile, base);
-	tm_idx_patch_profile(mi, base);
-	tm_idx_patch_sketch(mi, base);
+	tm_idx_patch_ptr(mi, base);
 	return(mi);
 }
 
@@ -2973,7 +3361,8 @@ static _force_inline
 int64_t tm_filter_extend(tm_filter_work_t *w, tm_idx_profile_t const *profile, uint8_t const *r, uint8_t const *q, tm_chain_raw_t const *c)
 {
 	/* skip if long enough */
-	if(c->qspan >= 128) { return(1); }
+	uint32_t const qth = profile->filter.qspan_thresh + 1;
+	if(c->qspan >= qth) { return(1); }
 
 	/* load sequences */
 	tm_filter_load_seq(w, r, q, c);
@@ -3021,7 +3410,7 @@ size_t tm_filter_chain(tm_idx_sketch_t const *si, tm_idx_profile_t const *profil
 	tm_filter_work_t w __attribute__(( aligned(32) ));
 	tm_filter_work_init(&w, profile);
 
-	debug("test_cnt(%u), min_score(%d), uspan_thresh(%u), rid(%u)", profile->filter.test_cnt, profile->filter.min_score, profile->filter.uspan_thresh, rid);
+	debug("min_score(%d), qspan_thresh(%u), rid(%u)", profile->filter.min_score, profile->filter.qspan_thresh, rid);
 	for(size_t i = 0; i < ccnt; i++) {
 		tm_chain_raw_t const *p = &src[i];
 		debug("i(%zu), ccnt(%zu), %r", i, ccnt, tm_chain_raw_to_str, p);
@@ -3852,6 +4241,11 @@ enum main_error_codes {
 };
 
 typedef struct {
+	/* scan-and-mask params */
+	tm_idx_conf_t fallback;			/* tm_conf_t: tm_idx_conf_t */
+	tm_print_conf_t print;
+	char const *profile;
+
 	/* index dump mode if not NULL */
 	char const *idxdump;
 
@@ -3860,25 +4254,101 @@ typedef struct {
 	uint32_t verbose, help;
 	size_t nth;
 
-	/* scan-and-mask params */
-	char const *profile;
-	tm_idx_conf_t fallback;
-	tm_print_conf_t print;
-
 	/* option parser */
 	FILE *log;
 	opt_t opt;
 } tm_conf_t;
+_static_assert(offsetof(tm_conf_t, fallback) == 0);
+
+#define tm_conf_assert(_cond, ...) ({ \
+	if(!(_cond)) { \
+		error("" __VA_ARGS__); \
+		return(1); \
+	} \
+})
 
 
+static int tm_conf_verbose(tm_conf_t *conf, char const *arg) {
+	if(arg == NULL || *arg == '\0') {
+		conf->verbose = 1;
+	} else if(isdigit(*arg)) {
+		conf->verbose = (size_t)mm_atoi(arg, 0);
+	} else if(*arg == 'v') {
+		tm_conf_verbose(conf, arg + 1);
+		conf->verbose++;
+	} else {
+		return(1);
+	}
+	return(0);
+}
+static int tm_conf_threads(tm_conf_t *conf, char const *arg) {
+	int64_t const nth = mm_atoi(arg, 0);
+	tm_conf_assert(nth < MAX_THREADS, "#threads must be less than %d.", MAX_THREADS);
 
+	conf->nth = nth;
+	return(0);
+}
+static int tm_conf_help(tm_conf_t *conf, char const *arg) {
+	_unused(arg);
 
-#define tm_conf_append(_type, _ptr, _cnt, _body) { \
-	kvec_t(_type) b; \
-	kv_build(b, (void *)_ptr, _cnt, _cnt); \
-	{ _body; } \
-	_ptr = kv_ptr(b); \
-	_cnt = kv_cnt(b); \
+	conf->verbose++;
+	conf->help++;
+	return(0);
+}
+
+/* index filename */
+static int tm_conf_idxdump(tm_conf_t *conf, char const *arg) {
+	/* FIXME: check sanity */
+	conf->idxdump = mm_strdup(arg);
+	return(0);
+}
+static int tm_conf_profile(tm_conf_t *conf, char const *arg) {
+	/* FIXME: check sanity */
+	conf->profile = mm_strdup(arg);
+	return(0);
+}
+
+/* indexing */
+static int tm_conf_kmer(tm_idx_conf_t *conf, char const *arg) {
+	conf->kmer = mm_atoi(arg, 0);
+	return(0);
+}
+static int tm_conf_window(tm_idx_conf_t *conf, char const *arg) {
+	conf->window = mm_atoi(arg, 0);
+	return(0);
+}
+static int tm_conf_ccnt(tm_idx_conf_t *conf, char const *arg) {
+	conf->min_scnt = mm_atoi(arg, 0);
+	return(0);
+}
+static int tm_conf_filter(tm_idx_conf_t *conf, char const *arg) {
+	_unused(arg);
+	conf->skip_filter = 1;
+	return(0);
+}
+static int tm_conf_match(tm_idx_conf_t *conf, char const *arg) {
+	conf->match = mm_atoi(arg, 0);
+	return(0);
+}
+static int tm_conf_mismatch(tm_idx_conf_t *conf, char const *arg) {
+	conf->mismatch = mm_atoi(arg, 0);		/* positive number expected */
+	return(0);
+}
+static int tm_conf_gap_open(tm_idx_conf_t *conf, char const *arg) {
+	conf->gap_open = mm_atoi(arg, 0);		/* positive number expected */
+	return(0);
+}
+static int tm_conf_gap_extend(tm_idx_conf_t *conf, char const *arg) {
+	conf->gap_extend = mm_atoi(arg, 0);		/* positive number expected */
+	return(0);
+}
+static int tm_conf_max_gap(tm_idx_conf_t *conf, char const *arg) {
+	conf->max_gap_len = mm_atoi(arg, 0);
+	return(0);
+}
+static int tm_conf_min_score(tm_idx_conf_t *conf, char const *arg) {
+	conf->min_score = mm_atoi(arg, 0);
+	return(0);
 }
 
 
@@ -3903,7 +4373,7 @@ static void tm_conf_preset(opt_t *opt, tm_conf_t *conf, char const *arg)
 		while(*q != NULL && strncmp(p, (*q)->key, l) != 0) { q++; }
 		if(*q == NULL) {				/* terminate if not matched, not loaded from file */
 			int ret = opt_load_conf(opt, conf, p);
-			oassert(opt, ret, "no preset params found for `%.*s'.", (int)l, p);
+			if(ret == 0) { error("no preset params found for `%.*s'.", (int)l, p); }
 			break;
 		}
 		opt_parse_line(opt, conf, (*q)->val);/* apply recursively */
@@ -3911,84 +4381,6 @@ static void tm_conf_preset(opt_t *opt, tm_conf_t *conf, char const *arg)
 	});
 	return;
 }
-
-static void tm_conf_verbose(opt_t *opt, tm_conf_t *conf, char const *arg) {
-	if(arg == NULL || *arg == '\0') { conf->verbose = 1; return; }
-	if(isdigit(*arg)) { conf->verbose = (size_t)mm_atoi(arg, 0); return; }
-	if(*arg != 'v') { return; }
-	tm_conf_verbose(opt, conf, arg + 1);
-	conf->verbose++;
-}
-static void tm_conf_threads(opt_t *opt, tm_conf_t *conf, char const *arg) {
-	conf->nth = mm_atoi(arg, 0);
-	oassert(opt, conf->nth < MAX_THREADS, "#threads must be less than %d.", MAX_THREADS);
-}
-static void tm_conf_help(opt_t *opt, tm_conf_t *conf, char const *arg) {
-	_unused(opt);
-	_unused(arg);
-	conf->verbose++;
-	conf->help++;
-}
-
-/* index filename */
-static void tm_conf_idxdump(opt_t *opt, tm_conf_t *conf, char const *arg) {
-	_unused(opt);
-	conf->idxdump = opt_strdup(opt, arg, mm_strlen(arg));
-}
-static void tm_conf_profile(opt_t *opt, tm_conf_t *conf, char const *arg) {
-	_unused(opt);
-	conf->profile = opt_strdup(opt, arg, mm_strlen(arg));
-}
-
-/* indexing */
-static void tm_conf_kmer(opt_t *opt, tm_conf_t *conf, char const *arg) {
-	size_t k = mm_atoi(arg, 0);
-	oassert(opt, k >= 3 && k <= 7, "k-mer size (-k) must be >= 3 and <= 7.");
-
-	conf->fallback.kmer = k;
-}
-static void tm_conf_chain(opt_t *opt, tm_conf_t *conf, char const *arg) {
-	size_t w = mm_atoi(arg, 0);
-	oassert(opt, w >= 1 && w <= 256, "chain window size (-w) must be >= 2 and <= 256.");
-
-	conf->fallback.window = w;
-}
-static void tm_conf_ccnt(opt_t *opt, tm_conf_t *conf, char const *arg) {
-	size_t c = mm_atoi(arg, 0);
-	oassert(opt, c >= 1 && c <= 1024, "minimum seed count (-c) must be >= 1 and <= 1024.");
-
-	conf->fallback.min_scnt = c;
-}
-static void tm_conf_match(opt_t *opt, tm_conf_t *conf, char const *arg) {
-	int64_t m = mm_atoi(arg, 0);
-	oassert(opt, m >= 1 && m <= 7, "match award (-a) must be >= 1 and <= 7 (%s).", arg);
-
-	conf->fallback.match = m;
-}
-static void tm_conf_mismatch(opt_t *opt, tm_conf_t *conf, char const *arg) {
-	int64_t x = mm_atoi(arg, 0);
-	oassert(opt, x >= 1 && x <= 7, "mismatch penalty (-b) must be >= 1 and <= 7 (%s).", arg);
-
-	conf->fallback.mismatch = x;
-}
-static void tm_conf_gap_open(opt_t *opt, tm_conf_t *conf, char const *arg) {
-	int64_t gi = mm_atoi(arg, 0);
-	oassert(opt, gi >= 1 && gi <= 7, "gap open penalty (-p) must be >= 1 and <= 7 (%s).", arg);
-
-	conf->fallback.gap_open = gi;
-}
-static void tm_conf_gap_extend(opt_t *opt, tm_conf_t *conf, char const *arg) {
-	int64_t ge = mm_atoi(arg, 0);
-	oassert(opt, ge >= 1 && ge <= 7, "gap extension penalty (-q) must be >= 1 and <= 7 (%s).", arg);
-
-	conf->fallback.gap_extend = ge;
-}
-static void tm_conf_min_score(opt_t *opt, tm_conf_t *conf, char const *arg) {
-	_unused(opt);
-
-	conf->fallback.min_score = mm_atoi(arg, 0);
-}
-
 
 
 static _force_inline
@@ -4030,6 +4422,11 @@ static _force_inline
 void tm_conf_destroy_static(tm_conf_t *conf)
 {
 	if(conf == NULL) { return; }
+
+	free((void *)conf->args);
+	free((void *)conf->idxdump);
+	free((void *)conf->profile);
+
 	opt_destroy_static(&conf->opt);
 	return;
 }
@@ -4052,10 +4449,11 @@ uint64_t tm_conf_init_static(tm_conf_t *conf, char const *const *argv, FILE *fp)
 
 			/* preset and configuration file */
 			['x'] = { OPT_REQ,  _c(tm_conf_preset) },
+			['z'] = { OPT_REQ,  _c(tm_conf_profile) },
 
 			/* fallback parameters */
 			['k'] = { OPT_REQ,  _c(tm_conf_kmer) },
-			['w'] = { OPT_REQ,  _c(tm_conf_chain) },
+			['w'] = { OPT_REQ,  _c(tm_conf_window) },
 			['c'] = { OPT_REQ,  _c(tm_conf_ccnt) },
 			['a'] = { OPT_REQ,  _c(tm_conf_match) },
 			['b'] = { OPT_REQ,  _c(tm_conf_mismatch) },
@@ -4072,7 +4470,7 @@ uint64_t tm_conf_init_static(tm_conf_t *conf, char const *const *argv, FILE *fp)
 	if(tm_conf_check_sanity(conf)) { goto _tm_conf_init_fail; }
 
 	/* parsed without error */
-	conf->args = opt_join(&conf->opt, argv, ' ');
+	conf->args = mm_join(argv, ' ');
 	return(0);
 
 
@@ -4210,7 +4608,7 @@ int main_index(tm_conf_t *conf, pt_t *pt)
 	/* add suffix if missing and if /dev/xxx */
 	if(!mm_startswith(conf->idxdump, "/dev") && !mm_endswith(conf->idxdump, ".tmi")) {
 		message(conf->log, "index filename does not end with `.tmi' (added).");
-		conf->idxdump = opt_append(&conf->opt, conf->idxdump, ".tmi");
+		conf->idxdump = mm_append((char *)conf->idxdump, ".tmi");
 	}
 
 	/* open file in write mode */
