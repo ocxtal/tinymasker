@@ -1198,7 +1198,7 @@ static _force_inline
 void tm_idx_fill_default(tm_idx_profile_t *profile)
 {
 	/* default params */
-	size_t const k = 5;
+	size_t const k = 4;
 	profile->kbits = 2 * k;
 
 	tm_idx_set_kadj(profile, k);
@@ -1206,11 +1206,13 @@ void tm_idx_fill_default(tm_idx_profile_t *profile)
 	profile->chain.window.sep.v = 32;
 	profile->chain.min_scnt = 4;
 
-	profile->extend.min_score = 16;
+	profile->extend.min_score = 0;
 	profile->extend.giv = 5;
 	profile->extend.gev = 1;
 	profile->extend.gih = 5;
 	profile->extend.geh = 1;
+	profile->extend.vlim = 16;
+	profile->extend.hlim = 16;
 	tm_idx_fill_score(profile, 2, -3);
 	return;
 }
@@ -1255,6 +1257,10 @@ void tm_idx_override_default(tm_idx_profile_t *profile, tm_idx_conf_t const *con
 		profile->extend.gev = conf->gap_extend;
 		profile->extend.geh = conf->gap_extend;
 	}
+	if(conf->max_gap_len > 0) {
+		profile->extend.vlim = conf->max_gap_len;
+		profile->extend.hlim = conf->max_gap_len;
+	}
 
 	/* postprocess */
 	if(conf->min_score > 0) {
@@ -1269,14 +1275,16 @@ typedef struct {
 } tm_idx_calc_acc_t;
 
 static
-void tm_idx_acc_filter_score(tm_idx_calc_acc_t *acc, int8_t *p, size_t i, size_t j)
+void tm_idx_acc_filter_score(tm_idx_calc_acc_t *acc, int8_t *p, size_t q, size_t r)
 {
+	size_t const q4 = (0x8421>>(4 * q)) & 0x0f;
+	tm_idx_calc_acc_t *ptr = &acc[(q4 & r) == 0];
+
 	int64_t const s = *p;
-	tm_idx_calc_acc_t *q = &acc[(i & j) == 0];
-	q->acc += s;
-	q->min = MIN2(q->min, s);
-	q->max = MAX2(q->max, s);
-	q->cnt++;
+	ptr->acc += s;
+	ptr->min = MIN2(ptr->min, s);
+	ptr->max = MAX2(ptr->max, s);
+	ptr->cnt++;
 	return;
 }
 
@@ -1320,10 +1328,11 @@ static _force_inline
 void tm_idx_calc_filter_gap(tm_idx_profile_t *profile)
 {
 	int32_t const ge = (profile->extend.gev + profile->extend.geh) / 2;
-	v16i8_t const gv = _set_v16i8(-ge);			/* signed; negated without offset */
+	int32_t const gi = (profile->extend.giv + profile->extend.gih) / 8;
+	v16i8_t const gv = _set_v16i8(0 - gi - ge);			/* signed; negated without offset */
 	_storeu_v16i8(profile->filter.gap, gv);
 
-	debug("ge(%d)", (int8_t)ge);
+	debug("ge(%d)", (int8_t)(0 - gi - ge));
 	_print_v16i8(gv);
 	return;
 }
@@ -1395,6 +1404,7 @@ uint64_t tm_idx_check_sanity(tm_idx_profile_t const *profile)
 			(void *)c,
 			(tm_idx_score_foreach_t)tm_idx_acc_filter_score
 		);
+		// fprintf(stderr, "%ld, %ld, %ld, %ld\n", c[0].min, c[0].max, c[1].min, c[1].max);
 
 		tm_idx_assert(c[0].min >= 1   && c[0].max <= 31, "match award (-a) must be >= 1 and <= 31.");
 		tm_idx_assert(c[1].min >= -31 && c[1].min <= -1, "mismatch penalty (-b) must be >= 1 and <= 31.");
@@ -1402,9 +1412,10 @@ uint64_t tm_idx_check_sanity(tm_idx_profile_t const *profile)
 	/* gaps */ {
 		uint8_t const giv = profile->extend.giv, gev = profile->extend.gev;
 		uint8_t const gih = profile->extend.gih, geh = profile->extend.geh;
+		// fprintf(stderr, "%u, %u, %u, %u\n", giv, gev, gih, geh);
 
-		tm_idx_assert(giv >= 1 && giv <= 31, "gap open penalty (-p) must be >= 1 and <= 31.");
-		tm_idx_assert(gih >= 1 && gih <= 31, "gap open penalty (-p) must be >= 1 and <= 31.");
+		tm_idx_assert(giv >= 0 && giv <= 31, "gap open penalty (-p) must be >= 0 and <= 31.");
+		tm_idx_assert(gih >= 0 && gih <= 31, "gap open penalty (-p) must be >= 0 and <= 31.");
 		tm_idx_assert(gev >= 1 && gev <= 31, "gap extension penalty (-q) must be >= 1 and <= 31.");
 		tm_idx_assert(geh >= 1 && geh <= 31, "gap extension penalty (-q) must be >= 1 and <= 31.");
 	}
@@ -1412,6 +1423,7 @@ uint64_t tm_idx_check_sanity(tm_idx_profile_t const *profile)
 	/* max gap len */ {
 		uint32_t const vlim = profile->extend.vlim;
 		uint32_t const hlim = profile->extend.hlim;
+		// fprintf(stderr, "%u, %u\n", vlim, hlim);
 
 		tm_idx_assert(vlim >= 1 && vlim <= 256, "max gap length (-g) must be >= 1 and <= 256.");
 		tm_idx_assert(hlim >= 1 && hlim <= 256, "max gap length (-g) must be >= 1 and <= 256.");
@@ -1421,7 +1433,7 @@ uint64_t tm_idx_check_sanity(tm_idx_profile_t const *profile)
 		uint32_t const min_score = profile->extend.min_score;
 		tm_idx_assert(min_score <= INT32_MAX, "minimum score threshold must be smaller than INT32_MAX.");
 	}
-	return(0);		/* no problem */
+	return(ecnt);
 }
 
 static _force_inline
@@ -2193,7 +2205,7 @@ _tm_idx_gen_error:;
 
 
 /* index I/O */
-#define TM_IDX_MAGIC				( 0x30494d54 )
+#define TM_IDX_MAGIC				( 0x31494d54 )
 
 typedef struct {
 	uint64_t magic;
@@ -2998,7 +3010,7 @@ tm_seed_t *tm_chain_find_first(uint64_t ruv, tm_seed_t *p, tm_seed_t *t, uint64_
 	/* load bounds */
 	uint64_t const uv = ruv;					/* (ulb, vlb) */
 	uint64_t ub = (uv & umask) + window;		/* (uub, vub - vlb) */
-	debug("uub(%lx), vwlen(%lx)", ub>>32, ub & 0xffffffff);
+	// debug("uub(%lx), vwlen(%lx)", ub>>32, ub & 0xffffffff);
 
 	int64_t cont = 0;		/* continuous flag */
 	while(1) {
@@ -3006,16 +3018,16 @@ tm_seed_t *tm_chain_find_first(uint64_t ruv, tm_seed_t *p, tm_seed_t *t, uint64_
 		if((cont | tm_chain_test_ptr(++p, t)) < 0) { return(NULL); }
 
 		uint64_t const v = _loadu_u64(p) - lb;	/* 1: (u, v - vlb) for inclusion test */
-		debug("test inclusion, pv(%lx), pu(%lx), u(%lx), {v - vlb}(%lx), test(%lx)", p->v, p->u, v>>32, v & 0xffffffff, (ub - v) & tmask);
+		// debug("test inclusion, pv(%lx), pu(%lx), u(%lx), {v - vlb}(%lx), test(%lx)", p->v, p->u, v>>32, v & 0xffffffff, (ub - v) & tmask);
 
 		cont = ub - v;		/* save diff for testing MSb */
 		if(((cont | v) & tmask) == 0) {			/* 2,3: break if chainable (first chainable seed found) */
-			debug("chainable");
+			// debug("chainable");
 			break;
 		}
 
 		/* unchainable */
-		debug("unchainable");
+		// debug("unchainable");
 	}
 	return(p);
 }
@@ -3029,7 +3041,7 @@ tm_seed_t *tm_chain_find_alt(tm_seed_t *p, tm_seed_t *t, uint64_t lb)
 	/* calculate bounds */
 	uint64_t rv = _loadu_u64(p) - lb;
 	uint64_t ub = rv + (rv<<32);
-	debug("u(%lx), {v - vlb}(%lx), uub(%lx), vub(%lx)", rv>>32, rv & 0xffffffff, ub>>32, ub & 0xffffffff);
+	// debug("u(%lx), {v - vlb}(%lx), uub(%lx), vub(%lx)", rv>>32, rv & 0xffffffff, ub>>32, ub & 0xffffffff);
 
 	/* keep nearest seed */
 	tm_seed_t *n = p;
@@ -3037,18 +3049,18 @@ tm_seed_t *tm_chain_find_alt(tm_seed_t *p, tm_seed_t *t, uint64_t lb)
 	int64_t cont = 0;
 	while((cont | tm_chain_test_ptr(++p, t)) >= 0) {
 		uint64_t const v = _loadu_u64(p) - lb;	/* 1: (u, v - vlb) for inclusion test */
-		debug("u(%lx), {v - vlb}(%lx), uub(%lx), vub(%lx), test(%lx), term(%lx)", p->u, v & 0xffffffff, ub>>32, ub & 0xffffffff, (ub - v) & tmask, (int64_t)(ub - v) < 0);
+		// debug("u(%lx), {v - vlb}(%lx), uub(%lx), vub(%lx), test(%lx), term(%lx)", p->u, v & 0xffffffff, ub>>32, ub & 0xffffffff, (ub - v) & tmask, (int64_t)(ub - v) < 0);
 		cont = ub - v;
 		if((cont | v) & tmask) {		/* skip if unchainable */
-			debug("unchainable");
+			// debug("unchainable");
 			continue;
 		}
 
 		/* chainable; test if the seed is nearer than the previous */
 		uint64_t const w = v + (v<<32);			/* 2,3: (u + v - vlb, v - vlb) */
-		debug("{u + v - vlb}(%lx), {v - vlb}(%lx)", w>>32, w & 0xffffffff);
+		// debug("{u + v - vlb}(%lx), {v - vlb}(%lx)", w>>32, w & 0xffffffff);
 		if((ub - w) & tmask) {			/* 4,5: further than previous */
-			debug("further; terminate");
+			// debug("further; terminate");
 			break;
 		}
 
@@ -3066,7 +3078,7 @@ tm_seed_t *tm_chain_find_nearest(uint64_t ruv, tm_seed_t *p, tm_seed_t *t, uint6
 	uint64_t const umask = 0xffffffff00000000;	/* extract upper */
 	uint64_t const uv = ruv;					/* (ulb, vlb) */
 	uint64_t lb = (uv & ~umask);				/* (0, vlb) */
-	debug("ulb(%lx), vlb(%lx)", uv>>32, lb);
+	// debug("ulb(%lx), vlb(%lx)", uv>>32, lb);
 
 	/* find first chainable seed */
 	tm_seed_t *n = tm_chain_find_first(ruv, p, t, lb, window);
@@ -4396,13 +4408,16 @@ uint64_t tm_conf_restore_default(tm_conf_t *conf)
 {
 	tm_conf_t defaults = {
 		.fallback = {
-			.kmer = 3,
+			.kmer   = 4,
 			.window = 32,
-			.match = 2,
-			.mismatch = 3,
-			.gap_open = 5,
-			.gap_extend = 1,
-			.min_score = 0
+			.min_scnt    = 4,
+			.skip_filter = 0,
+			.match       = 2,
+			.mismatch    = 3,
+			.gap_open    = 5,
+			.gap_extend  = 1,
+			.max_gap_len = 16,
+			.min_score   = 0
 		},
 		.print = {
 			0
