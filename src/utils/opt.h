@@ -17,7 +17,7 @@
 
 enum opt_type_t { OPT_BOOL = 1, OPT_REQ = 2, OPT_OPT = 3 };
 typedef struct opt_s opt_t;
-typedef int (*opt_callback_t)(opt_t *o, void *opaque, char const *optarg);		/* non-zero if fail */
+typedef int (*opt_callback_t)(void *opaque, char const *optarg);		/* non-zero if fail */
 typedef struct { uint8_t type; opt_callback_t fn; } opt_parser_t;
 typedef struct { char *p; size_t size, used; } opt_mem_t;
 
@@ -127,7 +127,7 @@ int opt_parse_argv(opt_t *opt, void *opaque, char const *const *argv)
 	char const *q = NULL;
 
 	/* p is a jagged array, must be NULL-terminated */
-	while((q = *++p) != '\0') {
+	while((q = *++p) != NULL) {
 		/* if the option does not start with '-' and has length, it's positional */
 		if(opt_is_argument(q)) {
 			opt_push_parg(opt, q);
@@ -136,7 +136,7 @@ int opt_parse_argv(opt_t *opt, void *opaque, char const *const *argv)
 
 		/* option starts with '-' and longer than 2 letters, such as "-a" and "-ab"; eat boolean options other than the last one */
 		while(opt->t[(size_t)*++q].type == OPT_BOOL) {
-			if(opt->t[(size_t)*q].fn(opt, opaque, NULL)) { opt->ecnt++; }	/* error if nonzero */
+			if(opt->t[(size_t)*q].fn(opaque, NULL)) { opt->ecnt++; }	/* error if nonzero */
 		}
 		if(*q == '\0') { continue; }		/* end of positional argument */
 
@@ -151,7 +151,7 @@ int opt_parse_argv(opt_t *opt, void *opaque, char const *const *argv)
 		if(opt->t[(size_t)*q].type == OPT_REQ && r == NULL) {
 			error("missing argument for option `-%c'.", *q);
 		} else {
-			if(opt->t[(size_t)*q].fn(opt, opaque, r)) { opt->ecnt++; }
+			if(opt->t[(size_t)*q].fn(opaque, r)) { opt->ecnt++; }
 		}
 	}
 	return(opt->ecnt);
