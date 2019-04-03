@@ -185,23 +185,36 @@ static void opt_parse_line(opt_t *o, void *opaque, char const *arg)
  */
 static int opt_load_conf(opt_t *o, void *opaque, char const *arg)
 {
+	/* open file */
 	FILE *fp = fopen(arg, "r");
 	if(fp == NULL) {
 		error("failed to find configuration file `%s'.", arg);
 		return(0);
 	}
 
-	kvec_t(char) str = { 0 };
-	kv_reserve(char, str, 1024);
+	/* file opend successfully; init buffer */
+	kvecm_t(char) str;
+	kvm_init(str, 0, 32);
+	kvm_reserve(char, str, 1024);
+
+	/* dump */
 	while(1) {
 		if((str.n += fread(str.a, sizeof(char), str.m - str.n, fp)) < str.m) { break; }
 		kv_reserve(char, str, 2 * str.n);
 	}
 	fclose(fp);
 
+	/* escape \n and \t */
 	kv_push(char, str, '\0');
-	for(size_t i = 0; i < str.n; i++) {
-		if(str.a[i] == '\n' || str.a[i] == '\t') { str.a[i] = ' '; }
+	v32i8_t const nv = _set_v32i8('\n'), tv = _set_v32i8('\t'), sv = _set_v32i8(' ');
+	for(size_t i = 0; i < str.n; i += 32) {
+		v32i8_t const v = _loadu_v32i8(&str.a[i]);
+		v32i8_t const nm = _eq_v32i8(nv, v);
+		v32i8_t const tm = _eq_v32i8(tv, v);
+		v32i8_t const w = _sel_v32i8(_or_v32i8(nm, tm), sv, v);
+		_storeu_v32i8(&str.a[i], w);
+
+		// if(str.a[i] == '\n' || str.a[i] == '\t') { str.a[i] = ' '; }
 	}
 
 	/* parse */
