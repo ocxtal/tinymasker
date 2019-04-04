@@ -394,7 +394,7 @@ static char* normalize_string(const char* src, size_t srclen,
             if (!x) {
                 xfree(dst);
                 snprintf(errbuf, errbufsz, "out of memory");
-                return 0;
+                return NULL;
             }
             dst = x;
         }
@@ -413,7 +413,7 @@ static char* normalize_string(const char* src, size_t srclen,
         if (sp >= sq) {
             snprintf(errbuf, errbufsz, "last backslash is invalid");
             free(dst);
-            return 0;
+            return NULL;
         }
 
         /* if we want to kill line-ending-backslash ... */
@@ -437,7 +437,7 @@ static char* normalize_string(const char* src, size_t srclen,
                     if (sp >= sq) {
                         snprintf(errbuf, errbufsz, "\\%c expects %d hex chars", ch, nhex);
                         free(dst);
-                        return 0;
+                        return NULL;
                     }
                     ch = *sp++;
                     int v = ('0' <= ch && ch <= '9')
@@ -446,7 +446,7 @@ static char* normalize_string(const char* src, size_t srclen,
                     if (-1 == v) {
                         snprintf(errbuf, errbufsz, "invalid hex chars for \\u or \\U");
                         free(dst);
-                        return 0;
+                        return NULL;
                     }
                     ucs = ucs * 16 + v;
                 }
@@ -454,7 +454,7 @@ static char* normalize_string(const char* src, size_t srclen,
                 if (-1 == n) {
                     snprintf(errbuf, errbufsz, "illegal ucs code in \\u or \\U");
                     free(dst);
-                    return 0;
+                    return NULL;
                 }
                 off += n;
             }
@@ -470,7 +470,7 @@ static char* normalize_string(const char* src, size_t srclen,
         default: 
             snprintf(errbuf, errbufsz, "illegal escape char \\%c", ch);
             free(dst);
-            return 0;
+            return NULL;
         }
 
         dst[off++] = ch;
@@ -504,7 +504,7 @@ static char* normalize_key(context_t* ctx, token_t tok)
             /* for single quote, take it verbatim. */
             if (! (ret = strndup(sp, sq - sp))) {
                 e_outofmemory(ctx, FLINE);
-                return 0;       /* not reached */
+                return NULL;       /* not reached */
             }
         } else {
             /* for double quote, we need to normalize */
@@ -519,7 +519,7 @@ static char* normalize_key(context_t* ctx, token_t tok)
         if (strchr(ret, '\n')) {
             free(ret);
             e_bad_key_error(ctx, lineno);
-            return 0;           /* not reached */
+            return NULL;           /* not reached */
         }
         return ret;
     }
@@ -531,13 +531,13 @@ static char* normalize_key(context_t* ctx, token_t tok)
         if (isalnum(k)) continue;
         if (k == '_' || k == '-') continue;
         e_bad_key_error(ctx, lineno);
-        return 0;               /* not reached */
+        return NULL;               /* not reached */
     }
 
     /* dup and return it */
     if (! (ret = strndup(sp, sq - sp))) {
         e_outofmemory(ctx, FLINE);
-        return 0;               /* not reached */
+        return NULL;               /* not reached */
     }
     return ret;
 }
