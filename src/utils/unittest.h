@@ -220,7 +220,7 @@ struct ut_s {
 		struct ut_group_config_s const *config);
 
 	/* internal use (cont'd) */
-	size_t index;
+	size_t idx;
 	size_t succ, fail;		/* result: 1 when succeeded, 2 when failed */
 
 	/* dependency resolution */
@@ -1406,10 +1406,10 @@ void ut_propagate_config(
 	ut_unused(test_cnt);
 	ut_unused(compd_config);
 
-	/* set index */
+	/* set idx */
 	for(size_t i = 0; i < file_cnt; i++) {
 		for(size_t j = sorted_file_idx[i]; j < sorted_file_idx[i + 1]; j++) {
-			test[j].index = i;
+			test[j].idx = i;
 			test[j].succ = 0;		/* clear counters */
 			test[j].fail = 0;
 		}
@@ -1427,12 +1427,12 @@ void ut_run_test(
 	struct ut_group_config_s const *compd_config)
 {
 	if(test->exec == 0) { return; }
-	size_t index = test->index;
+	size_t idx = test->idx;
 
 	/* initialize group context */
 	void *gctx = NULL;
-	if(compd_config[index].init != NULL && compd_config[index].clean != NULL) {
-		gctx = compd_config[index].init(compd_config[index].params);
+	if(compd_config[idx].init != NULL && compd_config[idx].clean != NULL) {
+		gctx = compd_config[idx].init(compd_config[idx].params);
 	}
 
 	/* initialize local context */
@@ -1442,14 +1442,14 @@ void ut_run_test(
 	}
 
 	/* run a test */
-	test->fn(ctx, gctx, test, gconf, &compd_config[index]);
+	test->fn(ctx, gctx, test, gconf, &compd_config[idx]);
 
 	/* cleanup contexts */
 	if(test->init != NULL && test->clean != NULL) {
 		test->clean(ctx);
 	}
-	if(compd_config[index].init != NULL && compd_config[index].clean != NULL) {
-		compd_config[index].clean(gctx);
+	if(compd_config[idx].init != NULL && compd_config[idx].clean != NULL) {
+		compd_config[idx].clean(gctx);
 	}
 	return;
 }
@@ -1527,10 +1527,10 @@ int ut_main_impl(int argc, char *argv[])
 	/* collect results */
 	struct ut_result_s *res = calloc(sizeof(struct ut_result_s), file_cnt);
 	for(size_t i = 0; i < test_cnt; i++) {
-		size_t index = test[i].index;
-		res[index].cnt++;
-		res[index].succ += test[i].succ;
-		res[index].fail += test[i].fail;
+		size_t idx = test[i].idx;
+		res[idx].cnt++;
+		res[idx].succ += test[i].succ;
+		res[idx].fail += test[i].fail;
 	}
 
 	/* print results */
