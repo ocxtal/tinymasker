@@ -483,11 +483,11 @@ static char* normalize_string(const char* src, size_t srclen,
 
 
 /* Normalize a key. Convert all special chars to raw unescaped utf-8 chars. */
-static char* normalize_key(context_t* ctx, token_t strtok)
+static char* normalize_key(context_t* ctx, token_t tok)
 {
-    const char* sp = strtok.ptr;
-    const char* sq = strtok.ptr + strtok.len;
-    size_t lineno = strtok.lineno;
+    const char* sp = tok.ptr;
+    const char* sq = tok.ptr + tok.len;
+    size_t lineno = tok.lineno;
     char* ret;
     int ch = *sp;
     char ebuf[80];
@@ -558,7 +558,9 @@ static int check_key(toml_table_t* tab, const char* key,
     if (!ret_arr) ret_arr = (toml_array_t**) &dummy;
     if (!ret_val) ret_val = (toml_keyval_t**) &dummy;
 
-    *ret_tab = 0; *ret_arr = 0; *ret_val = 0;
+    *ret_tab = NULL;
+    *ret_arr = NULL;
+    *ret_val = NULL;
     
     for (size_t i = 0; i < tab->nkval; i++) {
         if (0 == strcmp(key, tab->kval[i]->key)) {
@@ -592,10 +594,10 @@ static toml_keyval_t* create_keyval_in_table(context_t* ctx, toml_table_t* tab, 
 
     /* if key exists: error out. */
     toml_keyval_t* dest = 0;
-    if (check_key(tab, newkey, 0, 0, 0)) {
+    if (check_key(tab, newkey, NULL, NULL, NULL)) {
         free(newkey);
         e_key_exists_error(ctx, keytok);
-        return 0;               /* not reached */
+        return NULL;               /* not reached */
     }
 
     /* make a new entry */
@@ -604,14 +606,14 @@ static toml_keyval_t* create_keyval_in_table(context_t* ctx, toml_table_t* tab, 
     if (0 == (base = (toml_keyval_t**) realloc(tab->kval, (n+1) * sizeof(*base)))) {
         free(newkey);
         e_outofmemory(ctx, FLINE);
-        return 0;               /* not reached */
+        return NULL;               /* not reached */
     }
     tab->kval = base;
     
     if (0 == (base[n] = (toml_keyval_t*) calloc(1, sizeof(*base[n])))) {
         free(newkey);
         e_outofmemory(ctx, FLINE);
-        return 0;               /* not reached */
+        return NULL;               /* not reached */
     }
     dest = tab->kval[tab->nkval++];
 
@@ -632,7 +634,7 @@ static toml_table_t* create_keytable_in_table(context_t* ctx, toml_table_t* tab,
 
     /* if key exists: error out */
     toml_table_t* dest = 0;
-    if (check_key(tab, newkey, 0, 0, &dest)) {
+    if (check_key(tab, newkey, NULL, NULL, &dest)) {
         free(newkey);           /* don't need this anymore */
         
         /* special case: if table exists, but was created implicitly ... */
@@ -642,7 +644,7 @@ static toml_table_t* create_keytable_in_table(context_t* ctx, toml_table_t* tab,
             return dest;
         }
         e_key_exists_error(ctx, keytok);
-        return 0;               /* not reached */
+        return NULL;               /* not reached */
     }
 
     /* create a new table entry */
@@ -651,14 +653,14 @@ static toml_table_t* create_keytable_in_table(context_t* ctx, toml_table_t* tab,
     if (0 == (base = (toml_table_t**) realloc(tab->tab, (n+1) * sizeof(*base)))) {
         free(newkey);
         e_outofmemory(ctx, FLINE);
-        return 0;               /* not reached */
+        return NULL;               /* not reached */
     }
     tab->tab = base;
         
     if (0 == (base[n] = (toml_table_t*) calloc(1, sizeof(*base[n])))) {
         free(newkey);
         e_outofmemory(ctx, FLINE);
-        return 0;               /* not reached */
+        return NULL;               /* not reached */
     }
     dest = tab->tab[tab->ntab++];
     
