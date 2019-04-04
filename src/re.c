@@ -11,7 +11,7 @@
 #define L(c) ((c) >> 8)
 #define H(c) ((c) &  0xFF)
 
-enum {
+typedef enum {
         NFA_CHAR,
         NFA_EPSILON,
         NFA_ANYCHAR,
@@ -19,22 +19,24 @@ enum {
         NFA_NCLASS,
         NFA_BEGIN,
         NFA_END,
-};
+} re_nfa_t;
+typedef enum {
+        RE_INVALID,
+        RE_CHAR,
+        RE_ALT,
+        RE_STAR,
+        RE_PLUS,
+        RE_OPTION,
+        RE_DOT,
+        RE_CONCAT,
+        RE_CLASS,
+        RE_NCLASS,
+        RE_BEGIN,
+        RE_END
+} re_type_t;
 
 struct re_s {
-        enum {
-                RE_CHAR,
-                RE_ALT,
-                RE_STAR,
-                RE_PLUS,
-                RE_OPTION,
-                RE_DOT,
-                RE_CONCAT,
-                RE_CLASS,
-                RE_NCLASS,
-                RE_BEGIN,
-                RE_END
-        } type;
+        re_type_t type;
         union {
                 uint8_t c;
 
@@ -376,7 +378,7 @@ subexp(char const **s)
                 return NULL;
         }
         
-        int type = -1;
+        re_type_t type = RE_INVALID;
 
         switch (**s) {
         case '*': ++*s; type = RE_STAR;   break;
@@ -385,7 +387,7 @@ subexp(char const **s)
         default:                          break;
         }
 
-        if (type == -1) {
+        if (type == RE_INVALID) {
                 return e;
         }
 
