@@ -117,10 +117,10 @@ _rb_reader(xz, x, uint8_t, {
 static inline
 struct rb_reader_result_s rb_read_transparent(rbread_t *rb, void *dst, size_t len)
 {
-	size_t read = fread(dst, sizeof(char), len, rb->fp);
+	size_t bytes = fread(dst, sizeof(char), len, rb->fp);
 	rb->eof = feof(rb->fp);
 	return((struct rb_reader_result_s){
-		.obtained = read,
+		.obtained = bytes,
 		.remaining = 0
 	});
 }
