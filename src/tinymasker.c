@@ -629,7 +629,7 @@ tm_ref_prefix_t tm_ref_find_link(tm_ref_cnt_t const *p, uint32_t kmer, size_t ma
 static _force_inline
 uint64_t tm_ref_build_link(tm_ref_cnt_t const *p, size_t ksize, tm_ref_sketch_t *sk)
 {
-	size_t const max_shift = _tzcnt_u64(ksize);
+	size_t const max_shift = _tzc_u64(ksize);
 	uint64_t const mask = ksize - 1;
 
 	for(size_t i = 0; i < ksize; i++) {
@@ -807,11 +807,11 @@ tm_ref_next_t tm_ref_match_next(tm_ref_state_t s, uint64_t keep, uint8_t next)
 	int64_t const pitch = TM_REF_ALIGN_SIZE;
 
 	/* get link to the next bin */
-	tm_ref_link_t const *link = _add_offset(s.bin->link, next);
-	tm_ref_bin_t const *bin = _add_offset(s.bin, pitch * link->next);	/* signed */
+	tm_ref_link_t const *lk = _add_offset(s.bin->link, next);
+	tm_ref_bin_t const *bin = _add_offset(s.bin, pitch * lk->next);	/* signed */
 
 	/* update matching state */
-	uint64_t const prefix     = MAX2(s.prefix + s.unmatching, link->plen);
+	uint64_t const prefix     = MAX2(s.prefix + s.unmatching, lk->plen);
 	uint64_t const unmatching = 0ULL - (prefix != 0);
 
 	/* calc squashable subbin of the previous node */
@@ -1445,7 +1445,7 @@ uint64_t tm_idx_finalize_profile(tm_idx_profile_t *profile)
 
 	/* calc squash interval */
 	uint32_t const u = profile->chain.window.sep.u;
-	profile->chain.squash_intv = 0x40000000>>_lzcnt_u32(u);		/* divide by 2 */
+	profile->chain.squash_intv = 0x40000000>>_lzc_u32(u);		/* divide by 2 */
 	debug("wu(%u), intv(%u)", u, profile->chain.squash_intv);
 
 	/* instanciate dz */
@@ -1885,18 +1885,18 @@ uint64_t tm_idx_load_profile(tm_idx_gen_t *mii, tm_idx_profile_t const *template
 /* profile builder API and multithreading */
 
 static _force_inline
-uint64_t tm_idx_gen_profile(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, char const *fn, FILE *log)
+uint64_t tm_idx_gen_profile(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, char const *fn, FILE *lfp)
 {
 	/* compose default (fallback) profile as template */
 	tm_idx_profile_t *fallback = tm_idx_default_profile(conf);
 
 	if(fn != NULL) {
-		message(log, "reading score matrices...");
+		message(lfp, "reading score matrices...");
 		if(tm_idx_load_profile(mii, fallback, fn)) {
 			return(1);
 		}
 	} else {
-		message(log, "loading default score matrix...");
+		message(lfp, "loading default score matrix...");
 	}
 
 	/* append default score matrix as fallback */
@@ -2176,7 +2176,7 @@ tm_idx_t *tm_idx_gen_finalize(tm_idx_gen_t *mii, char const *ref, char const *pr
 }
 
 static _force_inline
-tm_idx_t *tm_idx_gen(tm_idx_conf_t const *conf, pt_t *pt, char const *ref, char const *profile, FILE *log)
+tm_idx_t *tm_idx_gen(tm_idx_conf_t const *conf, pt_t *pt, char const *ref, char const *profile, FILE *lfp)
 {
 	/* allocate thread-local buffers */
 	size_t size = sizeof(tm_idx_gen_t) + pt_nth(pt) * sizeof(tm_ref_tbuf_t);
@@ -2184,17 +2184,17 @@ tm_idx_t *tm_idx_gen(tm_idx_conf_t const *conf, pt_t *pt, char const *ref, char 
 	memset(mii, 0, size);
 
 	/* load score matrices and build regex matcher */
-	if(tm_idx_gen_profile(mii, conf, profile, log)) {
+	if(tm_idx_gen_profile(mii, conf, profile, lfp)) {
 		goto _tm_idx_gen_error;
 	}
 
 	/* read sequence and collect k-mers */
-	message(log, "reading sequences and collecting k-mers...");
+	message(lfp, "reading sequences and collecting k-mers...");
 	if(tm_idx_gen_core(mii, conf, ref, pt)) {
 		goto _tm_idx_gen_error;
 	}
 
-	message(log, "done.");
+	message(lfp, "done.");
 	return(tm_idx_gen_finalize(mii, ref, profile));
 
 _tm_idx_gen_error:;
@@ -2466,11 +2466,11 @@ tm_idx_t *tm_idx_load(void *fp, read_t rfp)
 	/* bulk load */
 	size_t idx_size = _roundup(hdr.size, ARCH_HUGEPAGE_SIZE);
 	uint8_t *base = aligned_malloc(idx_size);
-	size_t read = rfp(fp, base, hdr.size);
+	size_t const bytes = rfp(fp, base, hdr.size);
 
 	/* sanity check */
-	if(read != hdr.size) {
-		error("truncated index file. please rebuild the index (%zu, %zu).", read, hdr.size);
+	if(bytes != hdr.size) {
+		error("truncated index file. please rebuild the index (%zu, %zu).", bytes, hdr.size);
 		free(base);
 		return(NULL);
 	}
@@ -3396,7 +3396,7 @@ size_t tm_filter_save_chain(uint32_t rid, tm_chain_t *q, tm_chain_raw_t const *p
 	debug("p(%p), %r", p, tm_chain_raw_to_str, p);
 
 	/* calc weight */
-	ZCNT_RESULT size_t weight = _lzcnt_u32(p->rspan);
+	ZCNT_RESULT size_t weight = _lzc_u32(p->rspan);
 
 	/* save */
 	_storeu_v2i32(q, v);
@@ -4015,7 +4015,7 @@ void tm_print_cigar(tm_print_t *self, uint8_t const *path, size_t len)
 			_print_v16i8(eq);
 
 			uint64_t const mask = ((v16_masku_t){ .mask = _mask_v16i8(eq) }).all;
-			ZCNT_RESULT size_t cnt = _tzcnt_u64(~mask);
+			ZCNT_RESULT size_t cnt = _tzc_u64(~mask);
 			debug("cnt(%zu)", cnt);
 
 			q += cnt;
@@ -4529,11 +4529,11 @@ tm_conf_outfp_t tm_conf_get_outfp(tm_conf_t *conf)
 
 /* print help */
 static _force_inline
-void tm_conf_print_help(tm_conf_t const *conf, FILE *log)
+void tm_conf_print_help(tm_conf_t const *conf, FILE *lfp)
 {
 	if(conf->verbose == 0) { return; }
 
-	#define _msg_impl(_level, _fmt, ...) { logger_printf(log, _fmt "%s\n", __VA_ARGS__); }
+	#define _msg_impl(_level, _fmt, ...) { logger_printf(lfp, _fmt "%s\n", __VA_ARGS__); }
 	#define _msg(_level, ...) { if((_level) <= conf->verbose + 1) { _msg_impl(_level, __VA_ARGS__, ""); } }
 
 	_msg(2, "\n"
