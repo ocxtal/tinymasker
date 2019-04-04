@@ -43,22 +43,22 @@ struct re_s {
                 struct {
                         uint8_t n;
                         uint16_t *class;
-                };
+                } x;
 
                 struct {
                         struct re_s *left;
                         struct re_s *right;
-                };
+                } y;
 
                 struct re_s *re;
-        };
+        } u;
 };
 
 struct transition_s {
         uint8_t t;
         uint8_t c;
         uint16_t *class;
-        union { struct st_s *s; size_t idx; };
+        union { struct st_s *s; size_t idx; } u;
 };
 
 struct st_s {
@@ -98,8 +98,8 @@ addstate(struct re_nfa_s *nfa)
                 nfa->states = tmp;
         }
 
-        nfa->states[nfa->count].one.idx = -1;
-        nfa->states[nfa->count].two.idx = -1;
+        nfa->states[nfa->count].one.u.idx = -1;
+        nfa->states[nfa->count].two.u.idx = -1;
 
         nfa->count += 1;
 
@@ -109,12 +109,12 @@ addstate(struct re_nfa_s *nfa)
 static struct transition_s *
 transition(struct re_nfa_s *nfa, size_t from, size_t to, uint16_t type)
 {
-        if (nfa->states[from].one.idx == SIZE_MAX) {
-                nfa->states[from].one.idx = to;
+        if (nfa->states[from].one.u.idx == SIZE_MAX) {
+                nfa->states[from].one.u.idx = to;
                 nfa->states[from].one.t = type;
                 return &nfa->states[from].one;
-        } else if (nfa->states[from].two.idx == SIZE_MAX) {
-                nfa->states[from].two.idx = to;
+        } else if (nfa->states[from].two.u.idx == SIZE_MAX) {
+                nfa->states[from].two.u.idx = to;
                 nfa->states[from].two.t = type;
                 return &nfa->states[from].two;
         } else {
@@ -127,15 +127,15 @@ static void
 complete(struct re_nfa_s *nfa)
 {
         for (size_t i = 0; i < nfa->count; ++i) {
-                if (nfa->states[i].one.idx != SIZE_MAX) {
-                        nfa->states[i].one.s = &nfa->states[nfa->states[i].one.idx];
+                if (nfa->states[i].one.u.idx != SIZE_MAX) {
+                        nfa->states[i].one.u.s = &nfa->states[nfa->states[i].one.u.idx];
                 } else {
-                        nfa->states[i].one.s = NULL;
+                        nfa->states[i].one.u.s = NULL;
                 }
-                if (nfa->states[i].two.idx != SIZE_MAX) {
-                        nfa->states[i].two.s = &nfa->states[nfa->states[i].two.idx];
+                if (nfa->states[i].two.u.idx != SIZE_MAX) {
+                        nfa->states[i].two.u.s = &nfa->states[nfa->states[i].two.u.idx];
                 } else {
-                        nfa->states[i].two.s = NULL;
+                        nfa->states[i].two.u.s = NULL;
                 }
         }
 }
@@ -150,7 +150,7 @@ tonfa(struct re_nfa_s *nfa, size_t start, struct re_s *re)
         switch (re->type) {
         case RE_CHAR:
                 a = addstate(nfa);
-                transition(nfa, start, a, RE_CHAR)->c = re->c;
+                transition(nfa, start, a, RE_CHAR)->c = re->u.c;
                 return a;
         case RE_BEGIN:
                 a = addstate(nfa);
@@ -163,14 +163,14 @@ tonfa(struct re_nfa_s *nfa, size_t start, struct re_s *re)
         case RE_CLASS:
                 a = addstate(nfa);
                 tr = transition(nfa, start, a, NFA_CLASS);
-                tr->class = re->class;
-                tr->c = re->n;
+                tr->class = re->u.x.class;
+                tr->c = re->u.x.n;
                 return a;
         case RE_NCLASS:
                 a = addstate(nfa);
                 tr = transition(nfa, start, a, NFA_NCLASS);
-                tr->class = re->class;
-                tr->c = re->n;
+                tr->class = re->u.x.class;
+                tr->c = re->u.x.n;
                 return a;
         case RE_ALT:
                 /* End state */
@@ -182,9 +182,9 @@ tonfa(struct re_nfa_s *nfa, size_t start, struct re_s *re)
                 b = addstate(nfa);
 
                 /* End of left */
-                t = tonfa(nfa, a, re->left);
+                t = tonfa(nfa, a, re->u.y.left);
                 /* End of right */
-                v = tonfa(nfa, b, re->right);
+                v = tonfa(nfa, b, re->u.y.right);
 
                 /* Link left to end */
                 transition(nfa, t, c, NFA_EPSILON);
@@ -205,7 +205,7 @@ tonfa(struct re_nfa_s *nfa, size_t start, struct re_s *re)
                 a = addstate(nfa);
 
                 /* End of star's operand */
-                t = tonfa(nfa, a, re->re);
+                t = tonfa(nfa, a, re->u.re);
 
                 /* Make the loop (connect end to start) */
                 transition(nfa, t, a, NFA_EPSILON);
@@ -228,7 +228,7 @@ tonfa(struct re_nfa_s *nfa, size_t start, struct re_s *re)
                 a = addstate(nfa);
 
                 /* End of plus's operand */
-                t = tonfa(nfa, a, re->re);
+                t = tonfa(nfa, a, re->u.re);
 
                 /* Make the loop (connect end to start) */
                 transition(nfa, t, a, NFA_EPSILON);
@@ -248,7 +248,7 @@ tonfa(struct re_nfa_s *nfa, size_t start, struct re_s *re)
                 a = addstate(nfa);
 
                 /* End of ?'s operand */
-                t = tonfa(nfa, a, re->re);
+                t = tonfa(nfa, a, re->u.re);
 
                 /* Link end of ?'s operand to the end state */
                 transition(nfa, t, b, NFA_EPSILON);
@@ -269,8 +269,8 @@ tonfa(struct re_nfa_s *nfa, size_t start, struct re_s *re)
 
                 return b;
         case RE_CONCAT:
-                t = tonfa(nfa, start, re->left);
-                return tonfa(nfa, t, re->right);
+                t = tonfa(nfa, start, re->u.y.left);
+                return tonfa(nfa, t, re->u.y.right);
         default:;
         }
 
@@ -288,8 +288,8 @@ static void
 freere(struct re_s *re)
 {
         if (re->type == RE_ALT || re->type == RE_CONCAT) {
-                freere(re->left);
-                freere(re->right);
+                freere(re->u.y.left);
+                freere(re->u.y.right);
         }
 
         free(re);
@@ -308,8 +308,8 @@ or(struct re_s *left, struct re_s *right)
         struct re_s *e;
         mkre(e);
         e->type  = RE_ALT;
-        e->left  = left;
-        e->right = right;
+        e->u.y.left  = left;
+        e->u.y.right = right;
         return e;
 }
 
@@ -326,8 +326,8 @@ and(struct re_s *left, struct re_s *right)
         struct re_s *e;
         mkre(e);
         e->type  = RE_CONCAT;
-        e->left  = left;
-        e->right = right;
+        e->u.y.left  = left;
+        e->u.y.right = right;
         return e;
 }
 
@@ -361,10 +361,10 @@ regexp(char const **s, bool allow_trailing)
 
         mkre(re);
         re->type  = RE_ALT;
-        re->left  = e;
-        re->right = regexp(s, allow_trailing);
+        re->u.y.left  = e;
+        re->u.y.right = regexp(s, allow_trailing);
 
-        if (re->right == NULL) {
+        if (re->u.y.right == NULL) {
                 return NULL;
         }
 
@@ -394,7 +394,7 @@ subexp(char const **s)
 
         mkre(re);
         re->type = type;
-        re->re   = e;
+        re->u.re   = e;
 
         return re;
 }
@@ -447,13 +447,13 @@ atom(char const **s)
                 }
                 mkre(e);
                 e->type = RE_CHAR;
-                e->c    = **s;
+                e->u.c  = **s;
                 *s += 1;
                 return e;
         } else {
                 mkre(e);
                 e->type = RE_CHAR;
-                e->c    = **s;
+                e->u.c  = **s;
                 *s += 1;
                 return e;
         }
@@ -542,8 +542,8 @@ charclass(char const **s)
         struct re_s *e;
         mkre(e);
         e->type = negate? RE_NCLASS: RE_CLASS;
-        e->class = class;
-        e->n = n;
+        e->u.x.class = class;
+        e->u.x.n = n;
 
         return e;
 }
@@ -595,12 +595,12 @@ domatch(struct st_s const *state, char const *string, char const *begin)
                                 stack = tmp;
                 }
 
-                if (f.state->one.s == NULL)
+                if (f.state->one.u.s == NULL)
                         return f.s;
-                if (f.state->two.s != NULL && charmatch(&s, &f.state->two, begin))
-                        stack[i++] = (struct frame_s){ .s = s, .state = f.state->two.s };
+                if (f.state->two.u.s != NULL && charmatch(&s, &f.state->two, begin))
+                        stack[i++] = (struct frame_s){ .s = s, .state = f.state->two.u.s };
                 if (charmatch(&f.s, &f.state->one, begin))
-                        stack[i++] = (struct frame_s){ .s = f.s, .state = f.state->one.s };
+                        stack[i++] = (struct frame_s){ .s = f.s, .state = f.state->one.u.s };
         }
 
 end:
