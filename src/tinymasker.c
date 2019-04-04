@@ -174,16 +174,19 @@ static char *tm_kmer_to_str(uint32_t const *kmer)
 
 
 /* construct reference object */
-typedef struct {
-	uint32_t next : 8;
-	uint32_t pos  : 24;
-	uint32_t kmer;
+typedef union {
+	struct {
+		uint32_t next : 8;
+		uint32_t pos  : 24;
+		uint32_t kmer;
+	} s;
+	uint64_t all;
 } tm_ref_kpos_t;
 _static_assert(sizeof(tm_ref_kpos_t) == 8);
 
 typedef struct { tm_ref_kpos_t *a; size_t n, m; } tm_ref_kpos_v;
 
-#define tm_ref_kmer(x)			( _loadu_u64(&x) )
+#define tm_ref_kmer(x)			( (x).all )
 KRADIX_SORT_INIT(kmer, tm_ref_kpos_t, tm_ref_kmer, 8);	/* sort all */
 
 typedef struct {
@@ -396,10 +399,10 @@ size_t tm_ref_dedup_kmer(tm_ref_kpos_t *kptr, size_t kcnt)
 		uint64_t const kmer = _loadu_u64(p);
 		uint64_t const curr = kmer & mask;
 
-		if(curr == prev) {
+		if(curr == prev) {				/* skip if both pos and kmer are the same as the previous */
 			debug("dedup, i(%zu), prev(%lx), curr(%lx, %lx)", p - kptr, prev, curr, kmer);
 			continue;
-		}		/* skip pos and kmer are the same */
+		}
 
 		/* pos or kmer changed; save */
 		_storeu_u64(q, kmer);
@@ -472,7 +475,7 @@ size_t tm_ref_count_kmer(tm_ref_cnt_t *p, size_t ksize, tm_ref_kpos_t const *kpo
 
 	// debug("ksize(%zx), kcnt(%zu)", ksize, kcnt);
 	for(tm_ref_kpos_t const *k = kpos, *t = &kpos[kcnt]; k < t; k++) {
-		tm_ref_cnt_t *q = &p[k->kmer];
+		tm_ref_cnt_t *q = &p[k->s.kmer];
 
 		q->covered |= 1;
 		q->exist   |= 1;
@@ -532,18 +535,18 @@ tm_ref_kpos_t const *tm_ref_pack_kpos_core(tm_ref_bin_t *bin, uint64_t kmer, tm_
 	_storeu_v4i32(bin, _zero_v4i32());
 
 	/* skip missing k-mers (won't be executed) */
-	while(k < t && k->kmer < kmer) { trap(); k++; }
+	while(k < t && k->s.kmer < kmer) { trap(); k++; }
 
 	/* pack pos array */
 	size_t x = 0, y = 0;
-	while(k < t && k->kmer == kmer) {
-		uint64_t const next = k->next>>6;
-		uint64_t const kall = _loadu_u64(k) & kmask;
+	while(k < t && k->s.kmer == kmer) {
+		uint64_t const next = k->s.next>>6;
+		uint64_t const kall = k->all & kmask;
 		while(y < next) {
 			bin->link[y++].tail = x;
 		}
-		while(k < t && (_loadu_u64(k) & kmask) == kall) {
-			bin->pos[x++] = k++->pos;
+		while(k < t && (k->all & kmask) == kall) {
+			bin->pos[x++] = k++->s.pos;
 		}
 	}
 	/* fill missing tail */
