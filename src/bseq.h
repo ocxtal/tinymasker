@@ -134,11 +134,11 @@ static _force_inline
 size_t bseq_fetch_block(bseq_file_t *fp)
 {
 	/* read a block */
-	size_t read = rbread_bulk(&fp->rb, fp->buf, fp->batch_size);		/* always bypass internal buffer; up to batch_size */
+	size_t const bytes = rbread_bulk(&fp->rb, fp->buf, fp->batch_size);		/* always bypass internal buffer; up to batch_size */
 
 	/* save pointers */
 	fp->p = fp->buf;
-	fp->t = fp->buf + read;
+	fp->t = fp->buf + bytes;
 
 	/* add padding */
 	_memset_blk_u(fp->t, '\n', BSEQ_MGN);		/* fill margin of the input buffer */
@@ -146,8 +146,8 @@ size_t bseq_fetch_block(bseq_file_t *fp)
 	/* update EOF */
 	fp->is_eof = MAX2(fp->is_eof, rbeof(&fp->rb));
 
-	// debug("read, state(%u), len(%lu), is_eof(%u)", fp->state, read, fp->is_eof);
-	return(read);
+	// debug("bytes, state(%u), len(%lu), is_eof(%u)", fp->state, bytes, fp->is_eof);
+	return(bytes);
 }
 
 
@@ -247,15 +247,15 @@ size_t bseq_readline(
 	w->p += len - 32;
 
 	/* remove '\r' for '\r\n' */
-	size_t back = w->p[-1] == '\r';
-	size_t read = (w->p - b) - back;
+	size_t const back  = w->p[-1] == '\r';
+	size_t const bytes = (w->p - b) - back;
 
 	/* forward pointer (skip an obvious delimiter at the end) */
 	w->p++;
 
 	/* fixup last byte for the next readline */
 	w->q[w->n] = '\0';				/* mark empty; invariant condition */
-	return(read);
+	return(bytes);
 }
 
 static _force_inline
