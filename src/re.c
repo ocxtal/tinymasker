@@ -271,6 +271,7 @@ tonfa(struct re_nfa_s *nfa, size_t start, struct re_s *re)
         case RE_CONCAT:
                 t = tonfa(nfa, start, re->left);
                 return tonfa(nfa, t, re->right);
+        default:;
         }
 
         /* never reach here */
