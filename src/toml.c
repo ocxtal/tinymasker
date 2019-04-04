@@ -1411,7 +1411,7 @@ static tokentype_t scan_string(context_t* ctx, char* p, size_t lineno, int dotis
         p = strstr(p + 3, "'''");
         if (0 == p) {
             e_syntax_error(ctx, lineno, "unterminated triple-s-quote");
-            return 0;           /* not reached */
+            return INVALID;           /* not reached */
         }
 
         return ret_token(ctx, STRING, lineno, orig, p + 3 - orig);
@@ -1429,20 +1429,20 @@ static tokentype_t scan_string(context_t* ctx, char* p, size_t lineno, int dotis
                 if (*p == 'U') { hexreq = 8; continue; }
                 if (*p == '\n') continue; /* allow for line ending backslash */
                 e_syntax_error(ctx, lineno, "bad escape char");
-                return 0;       /* not reached */
+                return INVALID;       /* not reached */
             }
             if (hexreq) {
                 hexreq--;
                 if (strchr("0123456789ABCDEF", *p)) continue;
                 e_syntax_error(ctx, lineno, "expect hex char");
-                return 0;       /* not reached */
+                return INVALID;       /* not reached */
             }
             if (*p == '\\') { escape = 1; continue; }
             qcnt = (*p == '"') ? qcnt + 1 : 0; 
         }
         if (qcnt != 3) {
             e_syntax_error(ctx, lineno, "unterminated triple-quote");
-            return 0;           /* not reached */
+            return INVALID;           /* not reached */
         }
 
         return ret_token(ctx, STRING, lineno, orig, p - orig);
@@ -1452,7 +1452,7 @@ static tokentype_t scan_string(context_t* ctx, char* p, size_t lineno, int dotis
         for (p++; *p && *p != '\n' && *p != '\''; p++);
         if (*p != '\'') {
             e_syntax_error(ctx, lineno, "unterminated s-quote");
-            return 0;           /* not reached */
+            return INVALID;           /* not reached */
         }
 
         return ret_token(ctx, STRING, lineno, orig, p + 1 - orig);
@@ -1468,13 +1468,13 @@ static tokentype_t scan_string(context_t* ctx, char* p, size_t lineno, int dotis
                 if (*p == 'u') { hexreq = 4; continue; }
                 if (*p == 'U') { hexreq = 8; continue; }
                 e_syntax_error(ctx, lineno, "bad escape char");
-                return 0;       /* not reached */
+                return INVALID;       /* not reached */
             }
             if (hexreq) {
                 hexreq--;
                 if (strchr("0123456789ABCDEF", *p)) continue;
                 e_syntax_error(ctx, lineno, "expect hex char");
-                return 0;       /* not reached */
+                return INVALID;       /* not reached */
             }
             if (*p == '\\') { escape = 1; continue; }
             if (*p == '\n') break;
@@ -1482,7 +1482,7 @@ static tokentype_t scan_string(context_t* ctx, char* p, size_t lineno, int dotis
         }
         if (*p != '"') {
             e_syntax_error(ctx, lineno, "unterminated quote");
-            return 0;           /* not reached */
+            return INVALID;           /* not reached */
         }
 
         return ret_token(ctx, STRING, lineno, orig, p + 1 - orig);
