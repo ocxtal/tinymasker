@@ -552,31 +552,25 @@ static int check_key(toml_table_t* tab, const char* key,
                      toml_array_t** ret_arr,
                      toml_table_t** ret_tab)
 {
-    void* dummy;
+    if (NULL != ret_tab) { *ret_tab = NULL; }
+    if (NULL != ret_arr) { *ret_arr = NULL; }
+    if (NULL != ret_val) { *ret_val = NULL; }
 
-    if (!ret_tab) ret_tab = (toml_table_t**) &dummy;
-    if (!ret_arr) ret_arr = (toml_array_t**) &dummy;
-    if (!ret_val) ret_val = (toml_keyval_t**) &dummy;
-
-    *ret_tab = NULL;
-    *ret_arr = NULL;
-    *ret_val = NULL;
-    
     for (size_t i = 0; i < tab->nkval; i++) {
         if (0 == strcmp(key, tab->kval[i]->key)) {
-            *ret_val = tab->kval[i];
+            if (NULL != ret_val) { *ret_val = tab->kval[i]; }
             return 'v';
         }
     }
     for (size_t i = 0; i < tab->narr; i++) {
         if (0 == strcmp(key, tab->arr[i]->key)) {
-            *ret_arr = tab->arr[i];
+            if (NULL != ret_arr) { *ret_arr = tab->arr[i]; }
             return 'a';
         }
     }
     for (size_t i = 0; i < tab->ntab; i++) {
         if (0 == strcmp(key, tab->tab[i]->key)) {
-            *ret_tab = tab->tab[i];
+            if (NULL != ret_tab) { *ret_tab = tab->tab[i]; }
             return 't';
         }
     }
@@ -684,7 +678,7 @@ static toml_array_t* create_keyarray_in_table(context_t* ctx,
     
     /* if key exists: error out */
     toml_array_t* dest = 0;
-    if (check_key(tab, newkey, 0, &dest, 0)) {
+    if (check_key(tab, newkey, NULL, &dest, NULL)) {
         free(newkey);           /* don't need this anymore */
 
         /* special case skip if exists? */
@@ -1048,9 +1042,9 @@ static void walk_tabpath(context_t* ctx)
     for (size_t i = 0; i < ctx->tpath.top; i++) {
         const char* key = ctx->tpath.key[i];
 
-        toml_keyval_t* nextval = 0;
-        toml_array_t* nextarr = 0;
-        toml_table_t* nexttab = 0;
+        toml_keyval_t* nextval = NULL;
+        toml_array_t* nextarr = NULL;
+        toml_table_t* nexttab = NULL;
         switch (check_key(curtab, key, &nextval, &nextarr, &nexttab)) {
         case 't':
             /* found a table. nexttab is where we will go next. */
@@ -1077,18 +1071,18 @@ static void walk_tabpath(context_t* ctx)
             { /* Not found. Let's create an implicit table. */
                 size_t n = curtab->ntab;
                 toml_table_t** base = (toml_table_t**) realloc(curtab->tab, (n+1) * sizeof(*base));
-                if (0 == base) {
+                if (NULL == base) {
                     e_outofmemory(ctx, FLINE);
                     return;     /* not reached */
                 }
                 curtab->tab = base;
                 
-                if (0 == (base[n] = (toml_table_t*) calloc(1, sizeof(*base[n])))) {
+                if (NULL == (base[n] = (toml_table_t*) calloc(1, sizeof(*base[n])))) {
                     e_outofmemory(ctx, FLINE);
                     return;     /* not reached */
                 }
                 
-                if (0 == (base[n]->key = strdup(key))) {
+                if (NULL == (base[n]->key = strdup(key))) {
                     e_outofmemory(ctx, FLINE);
                     return;     /* not reached */
                 }
@@ -1157,18 +1151,18 @@ static void parse_select(context_t* ctx)
         {
             int n = arr->nelem;
             toml_table_t** base = realloc(arr->u.tab, (n+1) * sizeof(*base));
-            if (0 == base) {
+            if (NULL == base) {
                 e_outofmemory(ctx, FLINE);
                 return;         /* not reached */
             }
             arr->u.tab = base;
             
-            if (0 == (base[n] = calloc(1, sizeof(*base[n])))) {
+            if (NULL == (base[n] = calloc(1, sizeof(*base[n])))) {
                 e_outofmemory(ctx, FLINE);
                 return;         /* not reached */
             }
             
-            if (0 == (base[n]->key = strdup("__anon__"))) {
+            if (NULL == (base[n]->key = strdup("__anon__"))) {
                 e_outofmemory(ctx, FLINE);
                 return;         /* not reached */
             }
@@ -1225,10 +1219,10 @@ toml_table_t* toml_parse(char* conf,
     ctx.tok.len = 0;
 
     // make a root table
-    if (0 == (ctx.root = calloc(1, sizeof(*ctx.root)))) {
+    if (NULL == (ctx.root = calloc(1, sizeof(*ctx.root)))) {
         /* do not call outofmemory() here... setjmp not done yet */
         snprintf(ctx.errbuf, ctx.errbufsz, "ERROR: out of memory (%s)", FLINE);
-        return 0;
+        return NULL;
     }
 
     // set root as default table
@@ -1239,7 +1233,7 @@ toml_table_t* toml_parse(char* conf,
         // Free resources and return error.
         for (size_t i = 0; i < ctx.tpath.top; i++) xfree(ctx.tpath.key[i]);
         toml_free(ctx.root);
-        return 0;
+        return NULL;
     }
 
     /* Scan forward until EOF */
@@ -1254,7 +1248,7 @@ toml_table_t* toml_parse(char* conf,
             parse_keyval(&ctx, ctx.curtab);
             if (ctx.tok.tok != NEWLINE) {
                 e_syntax_error(&ctx, ctx.tok.lineno, "extra chars after value");
-                return 0;         /* not reached */
+                return NULL;         /* not reached */
             }
 
             EAT_TOKEN(&ctx, NEWLINE);
@@ -1281,14 +1275,14 @@ toml_table_t* toml_parse_file(FILE* fp,
                               size_t errbufsz)
 {
     size_t bufsz = 0;
-    char* buf = 0;
+    char* buf = NULL;
     size_t off = 0;
 
     /* prime the buf[] */
     bufsz = 1000;
     if (! (buf = malloc(bufsz + 1))) {
         snprintf(errbuf, errbufsz, "out of memory");
-        return 0;
+        return NULL;
     }
 
     /* read from fp into buf */
@@ -1300,7 +1294,7 @@ toml_table_t* toml_parse_file(FILE* fp,
         if (!x) {
             snprintf(errbuf, errbufsz, "out of memory");
             xfree(buf);
-            return 0;
+            return NULL;
         }
         buf = x;
 
@@ -1310,7 +1304,7 @@ toml_table_t* toml_parse_file(FILE* fp,
             snprintf(errbuf, errbufsz, "%s",
                      errno ? strerror(errno) : "Error reading file");
             free(buf);
-            return 0;
+            return NULL;
         }
         off += n;
     }
@@ -1567,7 +1561,7 @@ const char* toml_raw_in(const toml_table_t* tab, const char* key)
         if (0 == strcmp(key, tab->kval[i]->key))
             return tab->kval[i]->val;
     }
-    return 0;
+    return NULL;
 }
 
 const toml_array_t* toml_array_in(const toml_table_t* tab, const char* key)
@@ -1576,7 +1570,7 @@ const toml_array_t* toml_array_in(const toml_table_t* tab, const char* key)
         if (0 == strcmp(key, tab->arr[i]->key))
             return tab->arr[i];
     }
-    return 0;
+    return NULL;
 }
 
 
@@ -1586,15 +1580,15 @@ const toml_table_t* toml_table_in(const toml_table_t* tab, const char* key)
         if (0 == strcmp(key, tab->tab[i]->key))
             return tab->tab[i];
     }
-    return 0;
+    return NULL;
 }
 
 const char* toml_raw_at(const toml_array_t* arr, size_t idx)
 {
     if (arr->kind != 'v')
-        return 0;
+        return NULL;
     if (idx >= arr->nelem)
-        return 0;
+        return NULL;
     return arr->u.val[idx];
 }
 
@@ -1648,18 +1642,18 @@ const char* toml_table_key(const toml_table_t* tab)
 const toml_array_t* toml_array_at(const toml_array_t* arr, size_t idx)
 {
     if (arr->kind != 'a')
-        return 0;
+        return NULL;
     if (idx >= arr->nelem)
-        return 0;
+        return NULL;
     return arr->u.arr[idx];
 }
 
 const toml_table_t* toml_table_at(const toml_array_t* arr, size_t idx)
 {
     if (arr->kind != 't')
-        return 0;
+        return NULL;
     if (idx >= arr->nelem)
-        return 0;
+        return NULL;
     return arr->u.tab[idx];
 }
 
