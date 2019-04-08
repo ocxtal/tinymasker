@@ -3694,7 +3694,7 @@ typedef struct {
 	uint64_t conv;
 } tm_extend_fetcher_t;
 
-static __dz_vectorize
+static _force_inline
 void tm_extend_fetcher_init(tm_extend_fetcher_t *self, uint8_t const *ref, uint32_t dir)
 {
 	self->p    = ref - dir;
@@ -3712,7 +3712,7 @@ void tm_extend_fetcher_init(tm_extend_fetcher_t *self, uint8_t const *ref, uint3
 	return;
 }
 
-static __dz_vectorize
+static _force_inline
 dz_fill_fetch_t tm_extend_fetch_next(tm_extend_fetcher_t *self, int8_t const *score_matrix, dz_query_t const *query)
 {
 	dz_unused(query);
@@ -3739,7 +3739,7 @@ dz_fill_fetch_t tm_extend_fetch_next(tm_extend_fetcher_t *self, int8_t const *sc
 	});
 }
 
-static __dz_vectorize
+static _force_inline
 __m128i tm_extend_get_profile(tm_extend_fetcher_t *self, int8_t const *score_matrix, dz_query_t const *query, size_t qidx)
 {
 	dz_unused(score_matrix);
@@ -3755,7 +3755,7 @@ __m128i tm_extend_get_profile(tm_extend_fetcher_t *self, int8_t const *score_mat
 	return(v);
 }
 
-static __dz_vectorize
+static _force_inline
 dz_trace_match_t tm_extend_get_match(int8_t const *score_matrix, dz_query_t const *query, size_t qidx, uint32_t ch)
 {
 	uint8_t const *packed = dz_query_packed_array(query);
@@ -3773,7 +3773,7 @@ size_t tm_extend_calc_dim(size_t qlen)
 	return(1);
 }
 
-static __dz_vectorize
+static _force_inline
 __m128i tm_extend_conv(int8_t const *score_matrix, uint32_t dir, __m128i v)
 {
 	dz_unused(score_matrix);
