@@ -3715,7 +3715,7 @@ void tm_extend_fetcher_init(tm_extend_fetcher_t *self, uint8_t const *ref, uint3
 static _force_inline
 dz_fill_fetch_t tm_extend_fetch_next(tm_extend_fetcher_t *self, int8_t const *score_matrix, dz_query_t const *query)
 {
-	dz_unused(query);
+	_unused(query);
 
 	if(*self->p == '\0') {
 		return((dz_fill_fetch_t){
@@ -3742,7 +3742,7 @@ dz_fill_fetch_t tm_extend_fetch_next(tm_extend_fetcher_t *self, int8_t const *sc
 static _force_inline
 __m128i tm_extend_get_profile(tm_extend_fetcher_t *self, int8_t const *score_matrix, dz_query_t const *query, size_t qidx)
 {
-	dz_unused(score_matrix);
+	_unused(score_matrix);
 
 	uint8_t const *packed = dz_query_packed_array(query);
 	__m128i const v = ({
@@ -3769,14 +3769,14 @@ dz_trace_match_t tm_extend_get_match(int8_t const *score_matrix, dz_query_t cons
 static
 size_t tm_extend_calc_dim(size_t qlen)
 {
-	dz_unused(qlen);
+	_unused(qlen);
 	return(1);
 }
 
 static _force_inline
 __m128i tm_extend_conv(int8_t const *score_matrix, uint32_t dir, __m128i v)
 {
-	dz_unused(score_matrix);
+	_unused(score_matrix);
 
 	static uint8_t const conv[16] __attribute__(( aligned(16) )) = {
 		[nA]     = 0x00, [nC]     = 0x01, [nG]     = 0x02, [nT]     = 0x03,	/* forward */
