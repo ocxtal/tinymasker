@@ -3690,7 +3690,7 @@ tm_alnv_t *tm_extend_finalize(tm_scan_t *self)
 typedef struct {
 	__m128i mv;
 	uint8_t const *p;
-	int64_t inc;
+	ptrdiff_t inc;
 	uint64_t conv;
 } tm_extend_fetcher_t;
 
