@@ -3773,7 +3773,7 @@ dz_trace_match_t tm_extend_get_match(int8_t const *score_matrix, dz_query_t cons
 	});
 }
 
-static
+static _force_inline
 size_t tm_extend_calc_dim(size_t qlen)
 {
 	_unused(qlen);
