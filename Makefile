@@ -22,7 +22,7 @@ NWFLAGS = $(shell bash -c "if [[ $(CC) = icc* ]]; then echo '-Wno-unused-functio
 LDFLAGS = -lpthread $(UTIL_LDFLAGS)
 CFLAGS = -std=c99 -march=native $(UTIL_CFLAGS) $(WFLAGS) $(NWFLAGS)
 GFLAGS = -g
-SFLAGS = $(GFLAGS) -fsanitize=memory -fsanitize=address -fsanitize=leak
+SFLAGS = $(GFLAGS) -fsanitize=address # -fsanitize=memory -fsanitize=leak
 
 
 # intermediate
@@ -48,9 +48,9 @@ $(TARGET): $(OBJS_INTL)
 	$(CC) -o $(TARGET) $(OFLAGS) $(CFLAGS) $(OBJS_INTL) $(LDFLAGS)
 
 debug: $(SRCS_INTL)
-	$(CC) -o $(TARGET).d $(GFLAGS) -DDEBUG  $(CFLAGS) $(SRCS_INTL) $(LDFLAGS)
-	$(CC) -o $(TARGET).g $(GFLAGS) -DNDEBUG $(CFLAGS) $(SRCS_INTL) $(LDFLAGS)
-	$(CC) -o $(TARGET).s $(SFLAGS) -DNDEBUG $(CFLAGS) $(SRCS_INTL) $(LDFLAGS)
+	$(CC) -o $(TARGET).d $(GFLAGS) -DDEBUG $(CFLAGS) $(SRCS_INTL) $(LDFLAGS)
+	$(CC) -o $(TARGET).g $(GFLAGS) -DDEBUG -DNDEBUG_PRINT -DNDEBUG_BLOCK $(CFLAGS) $(SRCS_INTL) $(LDFLAGS)
+	$(CC) -o $(TARGET).s $(SFLAGS) -DDEBUG -DNDEBUG_PRINT -DNDEBUG_BLOCK $(CFLAGS) $(SRCS_INTL) $(LDFLAGS)
 
 clean:
 	$(RM) -f $(TARGET) $(TARGET).g $(TARGET).d $(OBJS_INTL)
