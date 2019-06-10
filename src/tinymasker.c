@@ -2753,6 +2753,7 @@ RBT_INIT_ITER(aln, tm_aln_t, tm_aln_rbt_header,
 /* array of alignment; allocated in trace stack */
 typedef struct {
 	size_t cnt;
+	size_t unused[3];
 	tm_aln_t arr[];
 } tm_alnv_t;
 
@@ -3640,9 +3641,34 @@ void tm_extend_clear(tm_scan_t *self)
 	kv_pushp(tm_aln_t, self->extend.arr);
 	rbt_init_static_aln(kv_ptr(self->extend.arr));
 
-	/* clear working stack */
-	dz_arena_flush(self->extend.trace);
+	/* we must not clear trace stack because we have saved alignments and metadata in it */
+	// dz_arena_flush(self->extend.trace);
 	return;
+}
+
+static _force_inline
+size_t tm_extend_finalize_pack(tm_aln_t *dst, tm_aln_t const *src)
+{
+	/* sort by qpos: traverse tree */
+	tm_aln_t const all = {
+		.pos  = { .q = 0 },
+		.span = { .q = INT32_MAX },
+		// .qmax = INT32_MAX
+	};
+
+	rbt_iter_t it;
+	rbt_init_iter_aln(&it, src, &all);
+
+	tm_aln_t const *p = rbt_fetch_head_aln(&it, src, &all);
+	tm_aln_t *q = dst;
+	while(p != NULL) {
+		debug("p(%p), pos(%u, %u), span(%u, %u)", p, p->pos.q, p->pos.r, p->span.q, p->span.r);
+
+		*q++ = *p;
+		p = rbt_fetch_next_aln(&it, src, &all);
+	}
+	size_t const saved = q - dst;
+	return(saved);
 }
 
 static _force_inline
@@ -3659,28 +3685,9 @@ tm_alnv_t *tm_extend_finalize(tm_scan_t *self)
 	);
 	debug("src(%p), cnt(%zu), dst(%p)", src, cnt, dst);
 
-	/* sort by qpos: traverse tree */
-	tm_aln_t const all = {
-		.pos  = { .q = 0 },
-		.span = { .q = INT32_MAX },
-		// .qmax = INT32_MAX
-	};
-
-	rbt_iter_t it;
-	rbt_init_iter_aln(&it, src, &all);
-
-	tm_aln_t const *p = rbt_fetch_head_aln(&it, src, &all);
-	tm_aln_t *q = dst->arr;
-	while(p != NULL) {
-		debug("p(%p), pos(%u, %u), span(%u, %u)", p, p->pos.q, p->pos.r, p->span.q, p->span.r);
-
-		*q++ = *p;
-		p = rbt_fetch_next_aln(&it, src, &all);
-	}
-	size_t const saved = q - dst->arr;
-	dst->cnt = saved;
-
-	debug("cnt(%zu, %zu)", cnt, saved);
+	/* pack; cnt returned */
+	dst->cnt = tm_extend_finalize_pack(dst->arr, src);
+	debug("cnt(%zu, %zu)", cnt, dst->cnt);
 	return(dst);
 }
 
