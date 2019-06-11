@@ -2263,8 +2263,8 @@ void *tm_idx_dump_pad(tm_idx_dump_t *w)
 static _force_inline
 void *tm_idx_dump_string(tm_idx_dump_t *w, char const *s)
 {
-	char c = '\0';
-	char const *p = s == 0 ? &c : s;
+	char const c = '\0';
+	char const *p = s == NULL ? &c : s;
 	size_t const l = tm_idx_string_size(s);
 	return(tm_idx_dump_block(w, p, l));
 }
