@@ -701,10 +701,10 @@ tm_ref_sketch_t *tm_ref_build_index(tm_ref_conf_t const *conf, uint8_t const *se
 	/* save metadata */
 	tm_ref_sketch_t *sk = _add_offset(base, conf->margin.head);
 	*sk = (tm_ref_sketch_t){
-		.size = size,
+		.size  = size,
 		.head_margin = conf->margin.head,
 		.kbits = conf->kbits,
-		.slen = slen
+		.slen  = slen
 	};
 
 	/* pack pos array */
