@@ -4045,16 +4045,23 @@ void tm_print_aln(tm_print_t *self, tm_idx_sketch_t const **si, bseq_meta_t cons
 	_unused(self);
 
 	tm_idx_sketch_t const *ref = si[aln->attr.rid];
-	printf("%.*s\t%u\t%u\t%.*s\t%u\t%u\t%u\t",
-		(int)bseq_name_len(query),
-		bseq_name(query),
-		aln->pos.q,
-		aln->span.q,
-		(int)tm_idx_ref_name_len(ref),
-		tm_idx_ref_name_ptr(ref),
-		aln->pos.r,
-		aln->span.r,
-		aln->dir
+
+	/*
+	 * in PAF
+	 * qname, qlen, qstart (0-based), qend (0-based, inclusive), strand,
+	 * rname, rlen, rstart (0-based), rend (0-based, inclusive), #matches, block len, mapq
+	 */
+	printf(
+		/* query */ "%.*s\t%u\t%u\t%u\t"
+		/* dir   */ "%c\t"
+		/* ref   */ "%.*s\t%u\t%u\t%u\t"
+		/* stats */ "*\t%u\t255\tAS:i:%u\tCG:Z:",	/* and cigar */
+		(int)bseq_name_len(query), bseq_name(query),
+		(uint32_t)bseq_seq_len(query), aln->pos.q, aln->span.q,
+		aln->dir ? '-' : '+',
+		(int)tm_idx_ref_name_len(ref), tm_idx_ref_name_ptr(ref),
+		(uint32_t)tm_idx_ref_seq_len(ref), aln->pos.r, aln->span.r,
+		aln->span.r, aln->score
 	);
 	tm_print_cigar(self, aln->path.ptr, aln->path.len);
 	printf("\n");
