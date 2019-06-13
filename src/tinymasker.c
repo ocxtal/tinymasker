@@ -3953,7 +3953,7 @@ size_t tm_extend_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *query,
 }
 
 
-/* evaluate all; query sequence must be encoded in 2bit and shorter than 2Gbp */
+/* evaluate all; query sequence must be encoded in 2bit at [3:2] and shorter than 2Gbp */
 static _force_inline
 tm_alnv_t *tm_scan_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *seq, size_t slen)
 {
@@ -4074,6 +4074,53 @@ void tm_print_aln(tm_print_t *self, tm_idx_sketch_t const **si, bseq_meta_t cons
 
 
 
+/* sanity checker for sequences read from file */
+
+static _force_inline
+uint64_t tm_validate_query(uint8_t const *query, size_t qlen)
+{
+	/*
+	 * we only allow { 0x0, 0x4, 0x8, 0xc } for query-side input.
+	 * non-zero when valid, zero otherwise.
+	 */
+	v32i8_t const mv = _set_v32i8(0xf3);
+	v32i8_t cv = _zero_v32i8();			/* accumulator */
+
+	/* we don't have margin at the tail */
+	size_t qpos = 0;
+	while((qpos += 32) < qlen) {
+		v32i8_t const v = _loadu_v32i8(&query[qpos - 32]);
+		v32i8_t const t = _and_v32i8(mv, v);
+		cv = _or_v32i8(cv, t);			/* accumulate non-zero */
+	}
+
+	/* accumulate tail */ {
+		v32i8_t const v = _loadu_v32i8(&query[qpos - 32]);
+		v32i8_t const t = _and_v32i8(mv, v);
+
+		/* create mask and clear out the tail */
+		static uint8_t const inc[32] __attribute__(( aligned(32) )) = {
+			 -1,  -2,  -3,  -4,  -5,  -6,  -7,  -8,  -9, -10, -11, -12, -13, -14, -15, -16,
+			-17, -18, -19, -20, -21, -22, -23, -24, -25, -26, -27, -28, -29, -30, -31, -32
+		};
+		v32i8_t const iv = _load_v32i8(inc);
+		v32i8_t const rv = _set_v32i8(qlen & 0x1f);		/* remainder length */
+		v32i8_t const sv = _add_v32i8(iv, rv);			/* first <rem> elements are non-negative */
+
+		/* apply mask */
+		v32i8_t const z = _zero_v32i8();
+		v32i8_t const s = _sel_v32i8(sv, z, t);
+		cv = _or_v32i8(cv, s);
+	}
+
+	/* 1 if all zero (valid), 0 otherwise */
+	v32i8_t const eq = _eq_v32i8(cv, _zero_v32i8());
+	uint64_t const mask = ((v32_masku_t){ .mask = _mask_v32i8(eq) }).all;
+	return(mask == 0xffffffffULL);		/* all the columns are zero */
+}
+
+
+
 /* multithreaded scan-and-mask */
 
 typedef struct {
@@ -4170,6 +4217,10 @@ void *tm_mtscan_worker(uint32_t tid, tm_mtscan_t *self, tm_mtscan_batch_t *batch
 			fprintf(stderr, "begin, tid(%u), i(%zu), len(%zu), seq(%s)\n", tid, i, bseq_seq_len(seq), bseq_name(seq));
 		});
 
+		if(tm_validate_query(bseq_seq(seq), bseq_seq_len(seq)) == 0) {
+			error("invalid character found in `%.*s'. skipped.", (int)bseq_name_len(seq), bseq_name(seq));
+			continue;
+		}
 		seq->u.ptr = tm_scan_all(scan, self->mi, bseq_seq(seq), bseq_seq_len(seq));
 
 		/* print info */
