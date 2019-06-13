@@ -3937,8 +3937,12 @@ size_t tm_extend_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *query,
 		debug("%r, rid(%u), pid(%u)", tm_chain_to_str, q, q->attr.sep.rid, s->h.pid);
 
 		/* extend */
+		dz_freeze_t const *fz = dz_arena_freeze(self->extend.trace);
 		tm_extend_res_t r = tm_extend_core(self, p, s, query, qlen, q);
-		if(r.aln == NULL || r.aln->score <= p->extend.min_score) { continue; }
+		if(r.aln == NULL || r.aln->score <= p->extend.min_score) {
+			dz_arena_restore(self->extend.trace, fz);
+			continue;
+		}
 
 		tm_extend_record(self, q, r.spos, r.aln);
 		if(tm_extend_is_complete(self)) { break; }
