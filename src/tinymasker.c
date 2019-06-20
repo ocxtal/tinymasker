@@ -4856,7 +4856,7 @@ int main_scan_foreach_qfile(main_scan_tbuf_t *w, tm_mtscan_t *mt)
 {
 	for(size_t i = 0; i < w->qcnt; i++) {
 		if(tm_mtscan_file(mt, w->query[i])) {
-			return(main_scan_error(w->conf, ERROR_OPEN_QSEQ, NULL));
+			return(main_scan_error(w->conf, ERROR_OPEN_QSEQ, w->query[i]));
 		}
 	}
 	return(0);
