@@ -44,6 +44,9 @@
 #ifndef TM_VERSION
 #  define TM_VERSION			"tinymasker-0.0.1"
 #endif
+#ifndef TM_COMMIT
+#  define TM_COMMIT				"unknown"
+#endif
 #define TM_ARCH_NAME			ARCH_NAME			/* SSE4.1 or AVX2 */
 
 /* version string */
@@ -56,6 +59,9 @@ char const *tm_version(void)
 	uint64_t spos = mm_startswith(TM_VERSION, prefix) ? mm_strlen(prefix) : 0;
 	return(&TM_VERSION[spos]);
 }
+
+static _force_inline char const *tm_commit(void) { return(TM_COMMIT); }
+static _force_inline char const *tm_arch_name(void) { return(TM_ARCH_NAME); }
 
 unittest_config( .name = "tinymasker" );
 
@@ -4972,7 +4978,7 @@ int main(int argc, char *argv[])
 
 	/* always print version */
 	tm_conf_outfp_t out = tm_conf_get_outfp(&conf);
-	message(out.fp, "Version: %s, Build: %s", tm_version(), TM_ARCH_NAME);
+	message(out.fp, "Version: %s (%s), Build: %s", tm_version(), tm_commit(), tm_arch_name());
 
 	/* when -h is passed or no input file is given, print help message */
 	if(out.help) {

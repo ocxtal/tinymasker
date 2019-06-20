@@ -16,13 +16,14 @@ TARGET = tinymasker
 
 
 # compiler flags
-OFLAGS = -O3
-WFLAGS = -Wall -Wextra -Wshadow
+OFLAGS  = -O3
+WFLAGS  = -Wall -Wextra -Wshadow
 NWFLAGS = $(shell bash -c "if [[ $(CC) = icc* ]]; then echo '-Wno-unused-function'; else echo '-Wno-unused-function -Wno-unused-label -Wno-constant-conversion -Wno-implicit-fallthrough -Wno-missing-field-initializers'; fi")
 LDFLAGS = -lpthread $(UTIL_LDFLAGS)
-CFLAGS = -std=c99 -march=native $(UTIL_CFLAGS) $(WFLAGS) $(NWFLAGS)
-GFLAGS = -g
-SFLAGS = $(GFLAGS) -fsanitize=address # -fsanitize=memory -fsanitize=leak
+VFLAGS  = -DTM_VERSION=\"$(VERSION)\" -DTM_COMMIT=\"$(COMMIT)\"
+CFLAGS  = -std=c99 -march=native $(UTIL_CFLAGS) $(WFLAGS) $(NWFLAGS) $(VFLAGS)
+GFLAGS  = -g
+SFLAGS  = $(GFLAGS) -fsanitize=address # -fsanitize=memory -fsanitize=leak
 
 
 # intermediate
@@ -33,7 +34,8 @@ OBJS_INTL = $(SRCS_INTL:c=o)
 DEPS_INTL = $(SRCS_INTL:c=dep)
 
 # default version string is parsed from git tags, otherwise extracted from the source
-VERSION = $(shell $(GIT) describe --tags || grep "define TM_VERSION" $(SRCDIR)/tinymasker.c | grep -o '".*"' | sed 's/"//g')
+VERSION = $(shell $(GIT) describe --tags 2>/dev/null || grep "define TM_VERSION" $(SRCDIR)/tinymasker.c | grep -o '".*"' | sed 's/"//g')
+COMMIT  = $(shell $(GIT) describe --always --dirty)
 
 
 # suffix rule
