@@ -4631,11 +4631,15 @@ unittest( "long.graph" ) {
 		ut_assert(!dz_is_terminated(ff[i]) || !dz_is_terminated(ff[i + 1]));
 
 		/* score increasing */
-		ut_assert(dz_max2(ff[i]->max, ff[i + 1]->max) > prev_max, "i(%zu), (%d, %d), %d", i, ff[i]->max, ff[i + 1]->max, prev_max);
+		int32_t max = prev_max;
+		if(!dz_is_terminated(ff[i    ])) { max = dz_max2(max, ff[i    ]->max); }
+		if(!dz_is_terminated(ff[i + 1])) { max = dz_max2(max, ff[i + 1]->max); }
+
+		ut_assert(max > prev_max, "i(%zu), max(%d), pair(%d, %d), prev_max(%d)", i, max, ff[i]->max, ff[i + 1]->max, prev_max);
 		debugblock({
-			if(dz_max2(ff[i]->max, ff[i + 1]->max) <= prev_max) { trap(); }
+			if(max <= prev_max) { trap(); }
 		});
-		prev_max = dz_max2(ff[i]->max, ff[i + 1]->max);
+		prev_max = max;
 	}
 
 	/* tail */
