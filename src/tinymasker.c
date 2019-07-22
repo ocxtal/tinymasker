@@ -3989,12 +3989,22 @@ tm_alnv_t *tm_scan_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *seq,
 
 /* printer */
 typedef struct {
-	uint32_t dummy;
+	uint32_t flip;				/* flip reference and query */
 } tm_print_conf_t;
 
 typedef struct {
-	uint32_t dummy;
+	uint32_t flip;
 } tm_print_t;
+
+typedef struct {
+	struct {
+		char const *ptr;
+		size_t len;				/* converted to int when passed to printf */
+	} name;
+	struct {
+		size_t len, pos, span;
+	} seq;
+} tm_print_seq_t;
 
 
 static _force_inline
@@ -4008,10 +4018,10 @@ void tm_print_destory_static(tm_print_t *self)
 static _force_inline
 void tm_print_init_static(tm_print_t *self, tm_print_conf_t const *conf, char const *args)
 {
-	_unused(self);
-	_unused(conf);
 	_unused(args);
 
+	/* copy flip flag */
+	self->flip = conf->flip != 0;		/* make sure self->flip is either 1 or 0 */
 	return;
 }
 
@@ -4050,27 +4060,72 @@ void tm_print_cigar(tm_print_t *self, uint8_t const *path, size_t len)
 }
 
 static _force_inline
+tm_print_seq_t tm_print_compose_query(bseq_meta_t const *query, tm_aln_t const *aln)
+{
+	tm_print_seq_t const q = {
+		.name = {
+			.len = bseq_name_len(query),
+			.ptr = (char const *)bseq_name(query)
+		},
+		.seq = {
+			.len = bseq_seq_len(query),
+			.pos = aln->pos.q,
+			.span = aln->span.q
+		}
+	};
+	return(q);
+}
+
+static _force_inline
+tm_print_seq_t tm_print_compose_ref(tm_idx_sketch_t const *ref, tm_aln_t const *aln)
+{
+	tm_print_seq_t const r = {
+		.name = {
+			.len = tm_idx_ref_name_len(ref),
+			.ptr = (char const *)tm_idx_ref_name_ptr(ref)
+		},
+		.seq = {
+			.len = tm_idx_ref_seq_len(ref),
+			.pos = aln->pos.r,
+			.span = aln->span.r,
+		}
+	};
+	return(r);
+}
+
+static _force_inline
 void tm_print_aln(tm_print_t *self, tm_idx_sketch_t const **si, bseq_meta_t const *query, tm_aln_t const *aln)
 {
 	_unused(self);
 
+	/* load reference sequence object */
 	tm_idx_sketch_t const *ref = si[aln->attr.rid];
+
+	/* compose alignment coordinate object */
+	tm_print_seq_t const seq[2] = {
+		tm_print_compose_query(query, aln),			/* query side won't change except for alignment span */
+		tm_print_compose_ref(ref, aln)				/* reference side needs reloaded every time */
+	};
+
+	/* leftside and rightside; query comes first if flip == 0 */
+	tm_print_seq_t const *l = &seq[self->flip];
+	tm_print_seq_t const *r = &seq[self->flip ^ 0x01];
 
 	/*
 	 * in PAF
 	 * qname, qlen, qstart (0-based), qend (0-based, inclusive), strand,
 	 * rname, rlen, rstart (0-based), rend (0-based, inclusive), #matches, block len, mapq
+	 *
+	 * we use size_t for (seq len, pos, span) for future compatibility.
 	 */
 	printf(
-		/* query */ "%.*s\t%u\t%u\t%u\t"
+		/* query */ "%.*s\t%zu\t%zu\t%zu\t"
 		/* dir   */ "%c\t"
-		/* ref   */ "%.*s\t%u\t%u\t%u\t"
+		/* ref   */ "%.*s\t%zu\t%zu\t%zu\t"
 		/* stats */ "*\t%u\t255\tAS:i:%u\tCG:Z:",	/* and cigar */
-		(int)bseq_name_len(query), bseq_name(query),
-		(uint32_t)bseq_seq_len(query), aln->pos.q, aln->span.q,
+		(int)l->name.len, l->name.ptr, l->seq.len, l->seq.pos, l->seq.span,
 		aln->dir ? '-' : '+',
-		(int)tm_idx_ref_name_len(ref), tm_idx_ref_name_ptr(ref),
-		(uint32_t)tm_idx_ref_seq_len(ref), aln->pos.r, aln->span.r,
+		(int)r->name.len, r->name.ptr, r->seq.len, r->seq.pos, r->seq.span,
 		aln->span.r, aln->score
 	);
 	tm_print_cigar(self, aln->path.ptr, aln->path.len);
@@ -4439,6 +4494,11 @@ static int tm_conf_min_score(tm_conf_t *conf, char const *arg) {
 	conf->fallback.min_score = mm_atoi(arg, 0);
 	return(0);
 }
+static int tm_conf_flip(tm_conf_t *conf, char const *arg) {
+	_unused(arg);
+	conf->print.flip = 1;
+	return(0);
+}
 
 
 static int tm_conf_preset(tm_conf_t *conf, char const *arg)
@@ -4498,7 +4558,7 @@ uint64_t tm_conf_restore_default(tm_conf_t *conf)
 			.min_score   = 0
 		},
 		.print = {
-			0
+			.flip = 0
 		}
 	};
 
@@ -4554,7 +4614,8 @@ uint64_t tm_conf_init_static(tm_conf_t *conf, char const *const *argv, FILE *fp)
 			['b'] = { OPT_REQ,  _c(tm_conf_mismatch) },
 			['p'] = { OPT_REQ,  _c(tm_conf_gap_open) },
 			['q'] = { OPT_REQ,  _c(tm_conf_gap_extend) },
-			['m'] = { OPT_REQ,  _c(tm_conf_min_score) }
+			['m'] = { OPT_REQ,  _c(tm_conf_min_score) },
+			['r'] = { OPT_BOOL, _c(tm_conf_flip) }
 		}
 		#undef _c
 	};
