@@ -4108,8 +4108,9 @@ void tm_print_aln(tm_print_t *self, tm_idx_sketch_t const **si, bseq_meta_t cons
 	};
 
 	/* leftside and rightside; query comes first if flip == 0 */
-	tm_print_seq_t const *l = &seq[self->flip];
-	tm_print_seq_t const *r = &seq[self->flip ^ 0x01];
+	size_t const flip = self->flip & 0x01;
+	tm_print_seq_t const *l = &seq[flip];
+	tm_print_seq_t const *r = &seq[flip ^ 0x01];
 
 	/*
 	 * in PAF
