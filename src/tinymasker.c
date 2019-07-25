@@ -32,6 +32,7 @@
 #define DZ_REF_MAT_SIZE			( 16 )
 #define DZ_QUERY_MAT_SIZE		( 4 )
 #define DZ_TRANSPOSE_MATRIX		( 1 )
+#define DZ_FULL_LENGTH_BONUS	( 1 )
 #include "dozeu.h"
 
 
@@ -868,6 +869,7 @@ typedef struct {
 	uint64_t match, mismatch;
 	uint64_t gap_open, gap_extend;
 	uint64_t max_gap_len;
+	uint64_t full_length_bonus;			/* anchoring bonus */
 	int64_t min_score;
 } tm_idx_conf_t;
 
@@ -908,12 +910,13 @@ typedef struct {
 	struct {
 		dz_profile_t *dz;
 		int32_t min_score;
+		uint32_t bonus;				/* DZ_FULL_LENGTH_BONUS */
 		uint32_t vlim, hlim;		/* max_ins_len and max_del_len */
 		uint8_t giv, gev, gih, geh;
 		int8_t score_matrix[DZ_QUERY_MAT_SIZE * DZ_REF_MAT_SIZE];
 	} extend;
 } tm_idx_profile_t;
-// _static_assert(sizeof(tm_idx_profile_t) == 16);
+_static_assert((sizeof(tm_idx_profile_t) % 16) == 0);
 
 
 /* k-mer index object (wrapper of ref_sketch_t) */
@@ -1215,7 +1218,8 @@ void tm_idx_fill_default(tm_idx_profile_t *profile)
 	profile->chain.window.sep.v = 32;
 	profile->chain.min_scnt = 4;
 
-	profile->extend.min_score = 0;
+	profile->extend.bonus = 10;
+	profile->extend.min_score = 30;
 	profile->extend.giv = 5;
 	profile->extend.gev = 1;
 	profile->extend.gih = 5;
@@ -1269,6 +1273,11 @@ void tm_idx_override_default(tm_idx_profile_t *profile, tm_idx_conf_t const *con
 	if(conf->max_gap_len > 0) {
 		profile->extend.vlim = conf->max_gap_len;
 		profile->extend.hlim = conf->max_gap_len;
+	}
+
+	/* anchoring bonus */
+	if(conf->full_length_bonus > 0) {
+		profile->extend.bonus = conf->full_length_bonus;
 	}
 
 	/* postprocess */
@@ -1472,7 +1481,7 @@ uint64_t tm_idx_finalize_profile(tm_idx_profile_t *profile)
 		/* fixed */
 		.max_ins_len = profile->extend.vlim,
 		.max_del_len = profile->extend.hlim,
-		.full_length_bonus = 0		/* disabled for now */
+		.full_length_bonus = profile->extend.bonus
 	};
 	profile->extend.dz = dz_init_profile(&alloc, &conf);
 	return(0);
@@ -2696,7 +2705,7 @@ typedef struct {
 	uint32_t qmax;
 
 	/* stats */
-	int32_t score;
+	int32_t score;				/* patched score, including bonus on both ends */
 	dz_alignment_t const *aln;
 
 	/* positions */
@@ -3607,10 +3616,17 @@ tm_pair_t tm_aln_span(dz_alignment_t const *aln)
 }
 
 static _force_inline
-void tm_extend_record(tm_scan_t *self, tm_chain_t const *chain, tm_pair_t spos, dz_alignment_t const *aln)
+int32_t tm_extend_patched_score(tm_scan_t *self, tm_idx_profile_t const *pf, tm_pair_t spos, dz_alignment_t const *aln)
 {
-	_unused(chain);
+	_unused(self);
 
+	/* add bonus if anchored at the head */
+	return((spos.r == 0 ? pf->extend.bonus : 0) + aln->score);
+}
+
+static _force_inline
+void tm_extend_record(tm_scan_t *self, tm_idx_profile_t const *pf, tm_chain_t const *chain, tm_pair_t spos, dz_alignment_t const *aln)
+{
 	tm_pair_t const span = tm_aln_span(aln);
 	tm_aln_t a = {
 		/* coordinates */
@@ -3624,7 +3640,7 @@ void tm_extend_record(tm_scan_t *self, tm_chain_t const *chain, tm_pair_t spos, 
 		},
 
 		/* stats */
-		.score = aln->score,		/* copy */
+		.score = tm_extend_patched_score(self, pf, spos, aln),
 		.aln = aln,					/* save original */
 
 		/* path */
@@ -3945,12 +3961,12 @@ size_t tm_extend_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *query,
 		/* extend */
 		dz_freeze_t const *fz = dz_arena_freeze(self->extend.trace);
 		tm_extend_res_t r = tm_extend_core(self, p, s, query, qlen, q);
-		if(r.aln == NULL || r.aln->score <= p->extend.min_score) {
+		if(r.aln == NULL || tm_extend_patched_score(self, p, r.spos, r.aln) <= p->extend.min_score) {
 			dz_arena_restore(self->extend.trace, fz);
 			continue;
 		}
 
-		tm_extend_record(self, q, r.spos, r.aln);
+		tm_extend_record(self, p, q, r.spos, r.aln);
 		if(tm_extend_is_complete(self)) { break; }
 	}
 
@@ -4002,7 +4018,7 @@ typedef struct {
 		size_t len;				/* converted to int when passed to printf */
 	} name;
 	struct {
-		size_t len, pos, span;
+		size_t len, spos, epos;
 	} seq;
 } tm_print_seq_t;
 
@@ -4069,8 +4085,8 @@ tm_print_seq_t tm_print_compose_query(bseq_meta_t const *query, tm_aln_t const *
 		},
 		.seq = {
 			.len = bseq_seq_len(query),
-			.pos = aln->pos.q,
-			.span = aln->span.q
+			.spos = aln->pos.q,
+			.epos = aln->pos.q + aln->span.q - 1
 		}
 	};
 	return(q);
@@ -4086,8 +4102,8 @@ tm_print_seq_t tm_print_compose_ref(tm_idx_sketch_t const *ref, tm_aln_t const *
 		},
 		.seq = {
 			.len = tm_idx_ref_seq_len(ref),
-			.pos = aln->pos.r,
-			.span = aln->span.r,
+			.spos = aln->pos.r,
+			.epos = aln->pos.r + aln->span.r - 1,
 		}
 	};
 	return(r);
@@ -4124,10 +4140,10 @@ void tm_print_aln(tm_print_t *self, tm_idx_sketch_t const **si, bseq_meta_t cons
 		/* dir   */ "%c\t"
 		/* ref   */ "%.*s\t%zu\t%zu\t%zu\t"
 		/* stats */ "*\t%u\t255\tAS:i:%u\tCG:Z:",	/* and cigar */
-		(int)l->name.len, l->name.ptr, l->seq.len, l->seq.pos, l->seq.span,
+		(int)l->name.len, l->name.ptr, l->seq.len, l->seq.spos, l->seq.epos,
 		aln->dir ? '-' : '+',
-		(int)r->name.len, r->name.ptr, r->seq.len, r->seq.pos, r->seq.span,
-		aln->span.r, aln->score
+		(int)r->name.len, r->name.ptr, r->seq.len, r->seq.spos, r->seq.epos,
+		aln->span.r, aln->score						/* patched score */
 	);
 	tm_print_cigar(self, aln->path.ptr, aln->path.len);
 	printf("\n");
@@ -4491,6 +4507,10 @@ static int tm_conf_max_gap(tm_conf_t *conf, char const *arg) {
 	conf->fallback.max_gap_len = mm_atoi(arg, 0);
 	return(0);
 }
+static int tm_conf_anc_bonus(tm_conf_t *conf, char const *arg) {
+	conf->fallback.full_length_bonus = mm_atoi(arg, 0);
+	return(0);
+}
 static int tm_conf_min_score(tm_conf_t *conf, char const *arg) {
 	conf->fallback.min_score = mm_atoi(arg, 0);
 	return(0);
@@ -4602,6 +4622,7 @@ uint64_t tm_conf_init_static(tm_conf_t *conf, char const *const *argv, FILE *fp)
 			['v'] = { OPT_OPT,  _c(tm_conf_verbose) },
 			['h'] = { OPT_BOOL, _c(tm_conf_help) },
 			['t'] = { OPT_REQ,  _c(tm_conf_threads) },
+			['r'] = { OPT_BOOL, _c(tm_conf_flip) },
 
 			/* preset and configuration file */
 			['x'] = { OPT_REQ,  _c(tm_conf_preset) },
@@ -4615,8 +4636,9 @@ uint64_t tm_conf_init_static(tm_conf_t *conf, char const *const *argv, FILE *fp)
 			['b'] = { OPT_REQ,  _c(tm_conf_mismatch) },
 			['p'] = { OPT_REQ,  _c(tm_conf_gap_open) },
 			['q'] = { OPT_REQ,  _c(tm_conf_gap_extend) },
-			['m'] = { OPT_REQ,  _c(tm_conf_min_score) },
-			['r'] = { OPT_BOOL, _c(tm_conf_flip) }
+			['g'] = { OPT_REQ,  _c(tm_conf_max_gap) },
+			['l'] = { OPT_REQ,  _c(tm_conf_anc_bonus) },
+			['m'] = { OPT_REQ,  _c(tm_conf_min_score) }
 		}
 		#undef _c
 	};
@@ -4690,6 +4712,7 @@ void tm_conf_print_help(tm_conf_t const *conf, FILE *lfp)
 	_msg(2, "  -t INT       number of threads [%zu]", conf->nth);
 	_msg(2, "  -d FILE      dump index to FILE (index construction mode)");
 	_msg(2, "  -v [INT]     show version number or set verbose level (when number passed)");
+	_msg(3, "  -f           flip reference and query in output PAF")
 	_msg(2, "");
 	_msg(2, "Indexing options:");
 	_msg(2, "  -c FILE      load profile configurations []");
@@ -4702,6 +4725,8 @@ void tm_conf_print_help(tm_conf_t const *conf, FILE *lfp)
 	_msg(2, "  -p INT       gap-open penalty []");
 	_msg(2, "  -q INT       gap-extension penalty []");
 	_msg(2, "  -m INT       minimum score threshold []");
+	_msg(3, "  -g INT       max gap length allowed (X-drop threshold) []");
+	_msg(3, "  -l INT       full-length bonus per end []");
 	_msg(2, "");
 
 	#undef _msg_impl
