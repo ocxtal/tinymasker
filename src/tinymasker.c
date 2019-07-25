@@ -4002,7 +4002,7 @@ typedef struct {
 		size_t len;				/* converted to int when passed to printf */
 	} name;
 	struct {
-		size_t len, pos, span;
+		size_t len, spos, epos;
 	} seq;
 } tm_print_seq_t;
 
@@ -4069,8 +4069,8 @@ tm_print_seq_t tm_print_compose_query(bseq_meta_t const *query, tm_aln_t const *
 		},
 		.seq = {
 			.len = bseq_seq_len(query),
-			.pos = aln->pos.q,
-			.span = aln->span.q
+			.spos = aln->pos.q,
+			.epos = aln->pos.q + aln->span.q - 1
 		}
 	};
 	return(q);
@@ -4086,8 +4086,8 @@ tm_print_seq_t tm_print_compose_ref(tm_idx_sketch_t const *ref, tm_aln_t const *
 		},
 		.seq = {
 			.len = tm_idx_ref_seq_len(ref),
-			.pos = aln->pos.r,
-			.span = aln->span.r,
+			.spos = aln->pos.r,
+			.epos = aln->pos.r + aln->span.r - 1,
 		}
 	};
 	return(r);
@@ -4124,9 +4124,9 @@ void tm_print_aln(tm_print_t *self, tm_idx_sketch_t const **si, bseq_meta_t cons
 		/* dir   */ "%c\t"
 		/* ref   */ "%.*s\t%zu\t%zu\t%zu\t"
 		/* stats */ "*\t%u\t255\tAS:i:%u\tCG:Z:",	/* and cigar */
-		(int)l->name.len, l->name.ptr, l->seq.len, l->seq.pos, l->seq.span,
+		(int)l->name.len, l->name.ptr, l->seq.len, l->seq.spos, l->seq.epos,
 		aln->dir ? '-' : '+',
-		(int)r->name.len, r->name.ptr, r->seq.len, r->seq.pos, r->seq.span,
+		(int)r->name.len, r->name.ptr, r->seq.len, r->seq.spos, r->seq.epos,
 		aln->span.r, aln->score
 	);
 	tm_print_cigar(self, aln->path.ptr, aln->path.len);
