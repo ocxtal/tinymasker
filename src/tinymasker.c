@@ -3637,7 +3637,10 @@ void tm_extend_record(tm_scan_t *self, tm_idx_profile_t const *pf, tm_chain_t co
 		/* coordinates */
 		.qmax = spos.q + span.q,	/* spos.q + span.q, */
 		.dir  = chain->dir,
-		.pos  = spos,
+		.pos  = {
+			.r = spos.r - (chain->dir ? span.r : 0),	/* convert to head position */
+			.q = spos.q
+		},
 		.span = span,
 		.attr = {
 			.rid = chain->attr.sep.rid,
