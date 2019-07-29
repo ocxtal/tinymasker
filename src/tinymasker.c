@@ -873,6 +873,12 @@ typedef struct {
 	int64_t min_score;
 } tm_idx_conf_t;
 
+/* make user-provided value different from default one */
+#define tm_idx_wrap(x)					( (x) + 1 )
+#define tm_idx_unwrap(x)				( (x) - 1 )
+#define tm_idx_is_default(x)			( (x) == 0 )
+
+
 /* matcher object; k-mer length, score matrix, and score thresholds */
 typedef struct {
 	uint32_t size;
@@ -1233,18 +1239,19 @@ void tm_idx_fill_default(tm_idx_profile_t *profile)
 static _force_inline
 void tm_idx_override_default(tm_idx_profile_t *profile, tm_idx_conf_t const *conf)
 {
-	if(conf->kmer > 0) {
-		profile->kbits = 2 * conf->kmer;
-		tm_idx_set_kadj(profile, conf->kmer);
+	if(!tm_idx_is_default(conf->kmer)) {
+		size_t const kmer = tm_idx_unwrap(conf->kmer);
+		profile->kbits = 2 * kmer;
+		tm_idx_set_kadj(profile, kmer);
 	}
 
 	/* chaining */
-	if(conf->window > 0) {
-		profile->chain.window.sep.u = conf->window;
-		profile->chain.window.sep.v = conf->window;
+	if(!tm_idx_is_default(conf->window)) {
+		profile->chain.window.sep.u = tm_idx_unwrap(conf->window);
+		profile->chain.window.sep.v = tm_idx_unwrap(conf->window);
 	}
-	if(conf->min_scnt > 0) {
-		profile->chain.min_scnt = conf->min_scnt;
+	if(!tm_idx_is_default(conf->min_scnt)) {
+		profile->chain.min_scnt = tm_idx_unwrap(conf->min_scnt);
 	}
 
 	/* filter */
@@ -1253,36 +1260,34 @@ void tm_idx_override_default(tm_idx_profile_t *profile, tm_idx_conf_t const *con
 	}
 
 	/* score matrix */
-	if(conf->match > 0 && conf->mismatch > 0) {
-		int64_t const m = conf->match;
-		int64_t const x = -((int64_t)conf->mismatch);
-
-		debug("m(%ld), x(%ld)", m, x);
-		tm_idx_fill_score(profile, m, x);
+	if(!tm_idx_is_default(conf->match) && !tm_idx_is_default(conf->mismatch)) {
+		int64_t const m = tm_idx_unwrap(conf->match);
+		int64_t const x = tm_idx_unwrap(conf->mismatch);
+		tm_idx_fill_score(profile, m, -x);		/* negate */
 	}
 
 	/* gap penalties */
-	if(conf->gap_open > 0) {
-		profile->extend.giv = conf->gap_open;
-		profile->extend.gih = conf->gap_open;
+	if(!tm_idx_is_default(conf->gap_open)) {
+		profile->extend.giv = tm_idx_unwrap(conf->gap_open);
+		profile->extend.gih = tm_idx_unwrap(conf->gap_open);
 	}
-	if(conf->gap_extend > 0) {
-		profile->extend.gev = conf->gap_extend;
-		profile->extend.geh = conf->gap_extend;
+	if(!tm_idx_is_default(conf->gap_extend)) {
+		profile->extend.gev = tm_idx_unwrap(conf->gap_extend);
+		profile->extend.geh = tm_idx_unwrap(conf->gap_extend);
 	}
-	if(conf->max_gap_len > 0) {
-		profile->extend.vlim = conf->max_gap_len;
-		profile->extend.hlim = conf->max_gap_len;
+	if(!tm_idx_is_default(conf->max_gap_len)) {
+		profile->extend.vlim = tm_idx_unwrap(conf->max_gap_len);
+		profile->extend.hlim = tm_idx_unwrap(conf->max_gap_len);
 	}
 
 	/* anchoring bonus */
-	if(conf->full_length_bonus > 0) {
-		profile->extend.bonus = conf->full_length_bonus;
+	if(!tm_idx_is_default(conf->full_length_bonus)) {
+		profile->extend.bonus = tm_idx_unwrap(conf->full_length_bonus);
 	}
 
 	/* postprocess */
-	if(conf->min_score > 0) {
-		profile->extend.min_score = conf->min_score;
+	if(!tm_idx_is_default(conf->min_score)) {
+		profile->extend.min_score = tm_idx_unwrap(conf->min_score);
 	}
 	return;
 }
@@ -3085,7 +3090,7 @@ tm_seed_t *tm_chain_find_alt(tm_seed_t *p, tm_seed_t *t, uint64_t lb)
 
 		/* nearer seed found */
 		ub = w;			/* update bounds */
-		n = p;			/* save pointer */
+		n  = p;			/* save pointer */
 	}
 	return(n);
 }
@@ -3476,12 +3481,12 @@ size_t tm_seed_and_sort(tm_idx_sketch_t const *si, tm_idx_profile_t const *profi
 	size_t const scnt = kv_cnt(*seed);
 
 	radix_sort_seed(sptr, scnt);
-/*
+
 	debug("scnt(%zu)", scnt);
 	for(size_t i = 0; i < scnt; i++) {
 		debug("i(%zu), %r", i, tm_seed_to_str, &sptr[i]);
 	}
-*/
+
 	return(scnt);
 }
 
@@ -4471,15 +4476,15 @@ static int tm_conf_profile(tm_conf_t *conf, char const *arg) {
 
 /* indexing */
 static int tm_conf_kmer(tm_conf_t *conf, char const *arg) {
-	conf->fallback.kmer = mm_atoi(arg, 0);
+	conf->fallback.kmer = tm_idx_wrap(mm_atoi(arg, 0));
 	return(0);
 }
 static int tm_conf_window(tm_conf_t *conf, char const *arg) {
-	conf->fallback.window = mm_atoi(arg, 0);
+	conf->fallback.window = tm_idx_wrap(mm_atoi(arg, 0));
 	return(0);
 }
 static int tm_conf_ccnt(tm_conf_t *conf, char const *arg) {
-	conf->fallback.min_scnt = mm_atoi(arg, 0);
+	conf->fallback.min_scnt = tm_idx_wrap(mm_atoi(arg, 0));
 	return(0);
 }
 static int tm_conf_filter(tm_conf_t *conf, char const *arg) {
@@ -4488,31 +4493,31 @@ static int tm_conf_filter(tm_conf_t *conf, char const *arg) {
 	return(0);
 }
 static int tm_conf_match(tm_conf_t *conf, char const *arg) {
-	conf->fallback.match = mm_atoi(arg, 0);
+	conf->fallback.match = tm_idx_wrap(mm_atoi(arg, 0));
 	return(0);
 }
 static int tm_conf_mismatch(tm_conf_t *conf, char const *arg) {
-	conf->fallback.mismatch = mm_atoi(arg, 0);		/* positive number expected */
+	conf->fallback.mismatch = tm_idx_wrap(mm_atoi(arg, 0));		/* positive number expected */
 	return(0);
 }
 static int tm_conf_gap_open(tm_conf_t *conf, char const *arg) {
-	conf->fallback.gap_open = mm_atoi(arg, 0);		/* positive number expected */
+	conf->fallback.gap_open = tm_idx_wrap(mm_atoi(arg, 0));		/* positive number expected */
 	return(0);
 }
 static int tm_conf_gap_extend(tm_conf_t *conf, char const *arg) {
-	conf->fallback.gap_extend = mm_atoi(arg, 0);		/* positive number expected */
+	conf->fallback.gap_extend = tm_idx_wrap(mm_atoi(arg, 0));		/* positive number expected */
 	return(0);
 }
 static int tm_conf_max_gap(tm_conf_t *conf, char const *arg) {
-	conf->fallback.max_gap_len = mm_atoi(arg, 0);
+	conf->fallback.max_gap_len = tm_idx_wrap(mm_atoi(arg, 0));
 	return(0);
 }
 static int tm_conf_anc_bonus(tm_conf_t *conf, char const *arg) {
-	conf->fallback.full_length_bonus = mm_atoi(arg, 0);
+	conf->fallback.full_length_bonus = tm_idx_wrap(mm_atoi(arg, 0));
 	return(0);
 }
 static int tm_conf_min_score(tm_conf_t *conf, char const *arg) {
-	conf->fallback.min_score = mm_atoi(arg, 0);
+	conf->fallback.min_score = tm_idx_wrap(mm_atoi(arg, 0));
 	return(0);
 }
 static int tm_conf_flip(tm_conf_t *conf, char const *arg) {
@@ -4562,6 +4567,8 @@ uint64_t tm_conf_check_sanity(tm_conf_t *conf)
 	return(opt_ecnt(&conf->opt));
 }
 
+#if 0
+/* invalidated for now; equivalent is found in tm_idx_fill_default */
 static _force_inline
 uint64_t tm_conf_restore_default(tm_conf_t *conf)
 {
@@ -4593,6 +4600,7 @@ uint64_t tm_conf_restore_default(tm_conf_t *conf)
 	}
 	return(0);
 }
+#endif
 
 static _force_inline
 void tm_conf_destroy_static(tm_conf_t *conf)
@@ -4610,6 +4618,7 @@ void tm_conf_destroy_static(tm_conf_t *conf)
 static _force_inline
 uint64_t tm_conf_init_static(tm_conf_t *conf, char const *const *argv, FILE *fp)
 {
+	/* NOTE: all the other members are cleared */
 	*conf = (tm_conf_t){
 		/* logger */
 		.log = stderr,
@@ -4643,9 +4652,11 @@ uint64_t tm_conf_init_static(tm_conf_t *conf, char const *const *argv, FILE *fp)
 		#undef _c
 	};
 
+	/* parse */
 	opt_init_static(&conf->opt, fp);
 	if(opt_parse_argv(&conf->opt, conf, argv + 1)) { goto _tm_conf_init_fail; }
-	if(tm_conf_restore_default(conf)) { goto _tm_conf_init_fail; }
+
+	/* make sure the result is correct */
 	if(tm_conf_check_sanity(conf)) { goto _tm_conf_init_fail; }
 
 	/* parsed without error */
@@ -4720,13 +4731,14 @@ void tm_conf_print_help(tm_conf_t const *conf, FILE *lfp)
 	_msg(2, "Indexing and mapping fallbacks (default params):");
 	_msg(2, "  -k INT       k-mer length [%zu]", conf->fallback.kmer);
 	_msg(2, "  -w INT       chaining window size [%zu]", conf->fallback.window);
-	_msg(2, "  -a INT       match award []");
-	_msg(2, "  -b INT       mismatch penalty []");
-	_msg(2, "  -p INT       gap-open penalty []");
-	_msg(2, "  -q INT       gap-extension penalty []");
-	_msg(2, "  -m INT       minimum score threshold []");
-	_msg(3, "  -g INT       max gap length allowed (X-drop threshold) []");
-	_msg(3, "  -l INT       full-length bonus per end []");
+	_msg(3, "  -c INT       minimum seed count for chain [%u]", (uint32_t)conf->fallback.min_scnt);
+	_msg(2, "  -a INT       match award [%u]", (uint32_t)conf->fallback.match);
+	_msg(2, "  -b INT       mismatch penalty [%u]", (uint32_t)conf->fallback.mismatch);
+	_msg(2, "  -p INT       gap-open penalty [%u]", (uint32_t)conf->fallback.gap_open);
+	_msg(2, "  -q INT       gap-extension penalty [%u]", (uint32_t)conf->fallback.gap_extend);
+	_msg(2, "  -m INT       minimum score threshold [%d]", (int32_t)conf->fallback.min_score);
+	_msg(3, "  -g INT       max gap length allowed (X-drop threshold) [%u]", (uint32_t)conf->fallback.max_gap_len);
+	_msg(3, "  -l INT       full-length bonus per end [%u]", (uint32_t)conf->fallback.full_length_bonus);
 	_msg(2, "");
 
 	#undef _msg_impl
