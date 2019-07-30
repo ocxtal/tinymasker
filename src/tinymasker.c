@@ -2636,7 +2636,7 @@ typedef struct {
 	 * vpos is placed lower of (upos, vpos) tuple to make chaining simpler.
 	 */
 	uint16_t rpos;
-	uint8_t dir, unused;
+	uint8_t dir, unused;		/* dir == 1 for reverse, 0 for forward */
 	uint32_t qpos;
 
 	/* reference and query side spans */
@@ -2664,9 +2664,9 @@ tm_pair_t tm_chain_raw_span(tm_chain_raw_t const *chain)
 
 typedef struct {
 	/* see tm_chain_compose */
-	uint16_t rpos;					/* rspos + rspan for reverse */
+	uint16_t rpos;					/* chain end position; rspos + rspan for forward and rspos for reverse */
 	uint8_t dir, unused;
-	uint32_t qpos;
+	uint32_t qpos;					/* chain end position */
 
 	union {
 		struct {
@@ -2745,7 +2745,7 @@ typedef struct { tm_aln_t *a; size_t n, m; } tm_aln_v;
 #define tm_aln_rbt_cmp_iter(a, b)	( 1 )
 
 /* intersection */
-#if 0
+#if 1
 #define tm_aln_ivt_cmp_head(a, b)	({ (a)->qmax                > (b)->pos.q; })
 #define tm_aln_ivt_cmp_tail(a, b)	({ (a)->pos.q               < (b)->pos.q + (b)->span.q; })
 #define tm_aln_ivt_cmp_iter(a, b)	({ (a)->pos.q + (a)->span.q > (b)->pos.q; })
@@ -3177,6 +3177,9 @@ tm_seed_t *tm_chain_find_nearest(uint64_t ruv, tm_seed_t *p, tm_seed_t *t, uint6
 	return(tm_chain_find_alt(n, t, lb));
 }
 
+#define _print_v2i32x(a) { \
+	debug("(v2i32_t) %s(%x, %x)", #a, _ext_v2i32(a, 1), _ext_v2i32(a, 0)); \
+}
 #define _print_v4i32x(a) { \
 	debug("(v4i32_t) %s(%x, %x, %x, %x)", #a, _ext_v4i32(a, 3), _ext_v4i32(a, 2), _ext_v4i32(a, 1), _ext_v4i32(a, 0)); \
 }
@@ -3476,22 +3479,39 @@ int64_t tm_filter_extend(tm_filter_work_t *w, tm_idx_profile_t const *profile, u
 }
 
 static _force_inline
-size_t tm_filter_save_chain(uint32_t rid, tm_chain_t *q, tm_chain_raw_t const *p)
+v2i32_t tm_filter_calc_epos(tm_chain_raw_t const *p)
 {
 	/* load */
-	v2i32_t const v = _loadu_v2i32(p);
-	uint8_t const dir = p->dir;
-	uint32_t const rspan = p->rspan;
+	v2i32_t const spos = _loadu_v2i32(&p->rpos);
+	v2i32_t const span = _loadu_v2i32(&p->rspan);
+
+	/* create mask: (0, dir ? -1 : 0) */
+	v2i32_t const thresh = _seta_v2i32(0x3fffffff, 0xffff);
+	v2i32_t const mask   = _gt_v2i32(spos, thresh);
+
+	/* (qpos + qspan, rpos + rspan) for forward, (qpos + qspan, rpos) for reverse */
+	v2i32_t const epos = _add_v2i32(spos, _andn_v2i32(mask, span));
+
+	_print_v2i32x(spos);
+	_print_v2i32x(span);
+	_print_v2i32x(mask);
+	_print_v2i32x(epos);
+	return(epos);
+}
+
+static _force_inline
+size_t tm_filter_save_chain(uint32_t rid, tm_chain_t *q, tm_chain_raw_t const *p)
+{
 	debug("p(%p), %r", p, tm_chain_raw_to_str, p);
 
 	/* calc weight */
 	ZCNT_RESULT size_t weight = _lzc_u32(p->rspan);
 
-	/* save */
+	/* adjust span to obtain end position */
+	v2i32_t const v = tm_filter_calc_epos(p);
 	_storeu_v2i32(q, v);
-	if(dir) { q->rpos += rspan; }
 
-	q->attr.sep.rid = rid;			/* overwrite */
+	q->attr.sep.rid    = rid;		/* overwrite */
 	q->attr.sep.weight = weight;	/* negated and offsetted by 32; the larger for the longer chain */
 	debug("q(%p), %r, rid(%u), weight(%u)", q, tm_chain_to_str, q, rid, weight);
 	return(1);
@@ -3866,17 +3886,19 @@ int32_t tm_extend_patched_score(tm_scan_t const *self, tm_idx_profile_t const *p
 }
 
 static _force_inline
-tm_aln_t tm_extend_compose_aln(tm_scan_t const *self, tm_idx_profile_t const *pf, tm_chain_t const *chain, tm_pair_t spos, dz_alignment_t const *aln)
+tm_aln_t tm_extend_compose_aln(tm_scan_t const *self, tm_idx_profile_t const *pf, tm_chain_t const *chain, tm_pair_t epos, dz_alignment_t const *aln)
 {
 	tm_pair_t const span = tm_aln_span(aln);
+	tm_pair_t const spos = {
+		.r = epos.r - (chain->dir ? 0 : span.r),	/* convert to head position */
+		.q = epos.q - span.q
+	};
+
 	tm_aln_t const a = {
 		/* coordinates */
-		.qmax = spos.q + span.q,	/* spos.q + span.q, */
+		.qmax = epos.q,			/* spos.q + span.q, */
 		.dir  = chain->dir,
-		.pos  = {
-			.r = spos.r - (chain->dir ? span.r : 0),	/* convert to head position */
-			.q = spos.q
-		},
+		.pos  = spos,
 		.span = span,
 		.attr = {
 			.rid = chain->attr.sep.rid,
@@ -4142,12 +4164,85 @@ tm_pair_t tm_calc_max_wrap(dz_state_t const *r, uint32_t rdir, tm_pair_t rpos)
 	dz_max_pos_t const s = dz_calc_max_pos_core(r);
 	return((tm_pair_t){
 		.r = rpos.r + (rdir ? -s.rpos : s.rpos),
-		.q = rpos.q - s.qpos
+		.q = rpos.q + s.qpos
 	});
 }
 
+
+static _force_inline
+tm_pair_t tm_extend_load_pos(tm_scan_t const *self, tm_idx_profile_t const *pf, tm_chain_t const *c)
+{
+	_unused(self);
+
+	uint32_t const kadj = pf->chain.kadj[0];
+	uint32_t const rdir = c->dir;
+	tm_pair_t const epos = tm_chain_pos(c);
+	return((tm_pair_t){
+		.r = epos.r - (rdir ? -kadj : kadj),
+		.q = epos.q -  kadj
+	});
+}
+
+static _force_inline
+tm_pair_t tm_extend_first(tm_scan_t *self, tm_idx_profile_t const *pf, tm_idx_sketch_t const *sk, uint8_t const *query, size_t qlen, uint32_t rdir, tm_pair_t rpos)
+{
+	debug("forward: rdir(%u), rpos(%u, %u)", rdir, rpos.q, rpos.r);
+
+	/* first extension is reference forward */
+	dz_query_t const *qr = tm_pack_query_wrap(self->extend.fill,
+		pf->extend.dz, sk,
+		query, qlen,
+		(tm_pair_t){ .r = rdir, .q = 0 },
+		rpos
+	);
+
+	/* extend */
+	dz_state_t const *r = tm_extend_wrap(self->extend.fill,
+		pf->extend.dz, sk,
+		qr,
+		rdir,				/* reference forward */
+		rpos
+	);
+	tm_pair_t const epos = tm_calc_max_wrap(r, rdir, rpos);
+
+	debug("forward: rpos(%u, %u) --- score(%d) --> epos(%u, %u)", rpos.q, rpos.r, r != NULL ? r->max.score : 0, epos.q, epos.r);
+	return(epos);
+}
+
+static _force_inline
+dz_alignment_t const *tm_extend_second(tm_scan_t *self, tm_idx_profile_t const *pf, tm_idx_sketch_t const *sk, uint8_t const *query, size_t qlen, uint32_t rdir, tm_pair_t epos)
+{
+	/* second extension is reference reverse */
+	dz_query_t const *qf = tm_pack_query_wrap(self->extend.fill,
+		pf->extend.dz, sk,
+		query, qlen,
+		(tm_pair_t){ .r = rdir ^ 0x01, .q = 1 },
+		epos
+	);
+	dz_state_t const *f = tm_extend_wrap(self->extend.fill,
+		pf->extend.dz, sk,
+		qf,
+		rdir ^ 0x01,		/* reference reverse */
+		epos
+	);
+	debug("reverse: score(%d)", (f != NULL ? f->max.score : -1));
+
+	/* we don't expect f becomes NULL but might happen. score == 0 indicates there is no significant alignment with length > 0 */
+	if(f == NULL || f->max.score == 0) {
+		return(NULL);		/* not promising or something is wrong */
+	}
+
+	/* traceback */
+	dz_alignment_t const *aln = dz_trace_core(self->extend.trace,
+		pf->extend.dz, f,
+		(dz_trace_get_match_t)tm_extend_get_match
+	);
+	debug("reverse: spos(%u, %u) --- score(%d) --> epos(%u, %u), f(%p), aln(%p)", epos.q - aln->query_length, epos.r + (rdir ? aln->ref_length : -aln->ref_length), aln->score, epos.q, epos.r, f, aln);
+	return(aln);
+}
+
 typedef struct {
-	tm_pair_t spos;
+	tm_pair_t epos;
 	dz_alignment_t const *aln;
 } tm_extend_res_t;
 
@@ -4160,33 +4255,18 @@ tm_extend_res_t tm_extend_core(tm_scan_t *self, tm_idx_profile_t const *pf, tm_i
 
 	/* load root position */
 	uint32_t const rdir = c->dir;
-	tm_pair_t const rpos = tm_chain_pos(c);
-	debug("reverse: rdir(%u), rpos(%u, %u)", rdir, rpos.q, rpos.r);
-
-
-	/* reference reverse */
-	dz_query_t *qr = tm_pack_query_wrap(self->extend.fill, pf->extend.dz, sk, query, qlen, (tm_pair_t){ .r = rdir ^ 0x01, .q = 1 }, rpos);
-	dz_state_t const *r = tm_extend_wrap(self->extend.fill, pf->extend.dz, sk, qr, rdir ^ 0x01, rpos);
-	tm_pair_t const spos = tm_calc_max_wrap(r, rdir ^ 0x01, rpos);
-	debug("reverse: rpos(%u, %u) --- score(%d) --> spos(%u, %u)", rpos.q, rpos.r, r != NULL ? r->max.score : 0, spos.q, spos.r);
-	if(tm_extend_mark_pos(self, rdir, spos)) { return(failed); }	/* it seems the head position is already evaluated */
-
+	tm_pair_t const rpos = tm_extend_load_pos(self, pf, c);
 
 	/* reference forward */
-	dz_query_t *qf = tm_pack_query_wrap(self->extend.fill, pf->extend.dz, sk, query, qlen, (tm_pair_t){ .r = rdir, .q = 0 }, spos);
-	dz_state_t const *f = tm_extend_wrap(self->extend.fill, pf->extend.dz, sk, qf, rdir, spos);
-	debug("forward: score(%d)", (f != NULL ? f->max.score : -1));
+	tm_pair_t const epos = tm_extend_first(self, pf, sk, query, qlen, rdir, rpos);
+	if(tm_extend_mark_pos(self, rdir, epos)) {
+		return(failed);			/* it seems the tail position is already evaluated */
+	}
 
-	/* we don't expect f becomes NULL but might happen. score == 0 indicates there is no significant alignment with length > 0 */
-	if(f == NULL || f->max.score == 0) { return(failed); }			/* not promising */
-
-
-	/* traceback */
-	dz_alignment_t const *aln = dz_trace_core(self->extend.trace, pf->extend.dz, f, (dz_trace_get_match_t)tm_extend_get_match);
-	debug("forward: spos(%u, %u) --- score(%d) --> epos(%u, %u), f(%p), aln(%p)", spos.q, spos.r, aln->score, aln->query_length + spos.q, aln->ref_length + spos.r, f, aln);
-
+	/* reference reverse */
+	dz_alignment_t const *aln = tm_extend_second(self, pf, sk, query, qlen, rdir, epos);
 	return((tm_extend_res_t){
-		.spos = spos,
+		.epos = epos,
 		.aln  = aln
 	});
 }
@@ -4227,13 +4307,13 @@ size_t tm_extend_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *query,
 		/* extend */
 		dz_freeze_t const *fz = dz_arena_freeze(self->extend.trace);
 		tm_extend_res_t r = tm_extend_core(self, p, s, query, qlen, q);
-		if(r.aln == NULL || tm_extend_patched_score(self, p, r.spos, r.aln) <= p->extend.min_score) {
+		if(r.aln == NULL || tm_extend_patched_score(self, p, r.epos, r.aln) <= p->extend.min_score) {
 			dz_arena_restore(self->extend.trace, fz);
 			continue;
 		}
 
 		/* save alignment; discard traceback object if the alignment is filtered out by an existing one */
-		tm_aln_t const a = tm_extend_compose_aln(self, p, q, r.spos, r.aln);
+		tm_aln_t const a = tm_extend_compose_aln(self, p, q, r.epos, r.aln);
 		if(tm_extend_record(self, a) == 0) {
 			dz_arena_restore(self->extend.trace, fz);
 			continue;	/* interval tree not update when the new one is discarded */
@@ -4314,8 +4394,9 @@ void tm_print_init_static(tm_print_t *self, tm_print_conf_t const *conf, char co
 	return;
 }
 
+#if 0
 static _force_inline
-void tm_print_cigar(tm_print_t *self, uint8_t const *path, size_t len)
+void tm_print_cigar_forward(tm_print_t *self, uint8_t const *path, size_t len)
 {
 	_unused(self);
 
@@ -4344,6 +4425,42 @@ void tm_print_cigar(tm_print_t *self, uint8_t const *path, size_t len)
 
 		p = q;
 		v = _set_v16i8(*p);
+	}
+	return;
+}
+#endif
+
+static _force_inline
+void tm_print_cigar_reverse(tm_print_t *self, uint8_t const *path, size_t len)
+{
+	_unused(self);
+
+	debug("path(%p), len(%zu), %s", path, len, path);
+
+	uint8_t const *p = &path[len], *t = path;
+	while(p > t) {
+		uint8_t const *q = p;
+		uint8_t const ch = p[-1];
+		v16i8_t const v = _set_v16i8(ch);
+		_print_v16i8(v);
+
+		while(q > t) {
+			v16i8_t const w = _loadu_v16i8(q - 16);
+			v16i8_t const eq = _eq_v16i8(v, w);
+			_print_v16i8(w);
+			_print_v16i8(eq);
+
+			uint64_t const mask = ((v16_masku_t){ .mask = _mask_v16i8(eq) }).all;
+			uint64_t const shifted = mask<<48;
+			ZCNT_RESULT size_t cnt = _lzc_u64(~shifted);
+			debug("cnt(%zu)", cnt);
+
+			q -= cnt;
+			if(cnt < 16) { break; }
+		}
+
+		printf("%zu%c", (size_t)(p - q), ch);
+		p = q;
 	}
 	return;
 }
@@ -4418,7 +4535,7 @@ void tm_print_aln(tm_print_t *self, tm_idx_sketch_t const **si, bseq_meta_t cons
 		(int)r->name.len, r->name.ptr, r->seq.len, r->seq.spos, r->seq.epos,
 		aln->span.r, aln->score						/* patched score */
 	);
-	tm_print_cigar(self, aln->path.ptr, aln->path.len);
+	tm_print_cigar_reverse(self, aln->path.ptr, aln->path.len);
 	printf("\n");
 	return;
 }
