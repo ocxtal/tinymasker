@@ -387,6 +387,12 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
  *   _cmp_iter(p1, p2)			( 1 )
  *   where head_anchor and tail_anchor containing lb and ub (for [lb, ub) range) respectively.
  *
+ * key search query:
+ *   _cmp_head(p1, p2)			( (p1)->val >= (p2)->val )
+ *   _cmp_tail(p1, p2)			( (p1)->val <= (p2)->val )
+ *   _cmp_iter(p1, p2)			( 1 )
+ *   where both head_anchor and tail_anchor having the key.
+ *
  * range iterator on interval tree:
  *   max_rval is defined maximum right boundary of all the children of the node:
  *     _update(parent, child)	{ if(child->max_rval > parent->max_rval) { parent->max_rval = child->max_rval; } }
@@ -482,7 +488,7 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
 	 * callback for patching metadata; for interval tree \
 	 */ \
 	static _force_inline \
-	uint64_t rbt_patch_update_core_##_sfx(uint32_t *p, _bucket_t *pptr) { \
+	uint64_t rbt_patch_core_##_sfx(uint32_t *p, _bucket_t *pptr) { \
 		/* content the same as rbt_insert_update_core */ \
 		uint32_t const lidx = _rbt_idx(_hdr(pptr)->children[0]); \
 		uint32_t const ridx = _rbt_idx(_hdr(pptr)->children[1]); \
@@ -493,11 +499,14 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
 		return(_update(pptr, lptr, rptr));			/* might be nop; then pointers are unused */ \
 	} \
 	static _force_inline \
-	void rbt_patch_##_sfx(rbt_iter_t *w, _bucket_t *arr, _bucket_t *node) { \
+	void rbt_patch_##_sfx(rbt_iter_t const *w, _bucket_t *arr) { \
 		uint32_t *p = (uint32_t *)arr; \
-		_unused(w); \
-		_unused(p); \
-		_unused(node); \
+		/* move upward until hit root */ \
+		uint32_t const *b = w->b; \
+		while(--b > &w->ibuf[0]) { \
+			_bucket_t *x = _rbt_ptr(_bucket_t, p, _rbt_idx(*b)); \
+			if(!rbt_patch_core_##_sfx(p, x)) { break; } \
+		} \
 		return; \
 	}
 

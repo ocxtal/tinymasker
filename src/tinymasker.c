@@ -2737,9 +2737,14 @@ _static_assert(sizeof(tm_aln_t) == 64);
 typedef struct { tm_aln_t *a; size_t n, m; } tm_aln_v;
 
 #define tm_aln_rbt_header(a)		( &(a)->h )
-#define tm_aln_rbt_cmp_tail(a, b)	( (a)->pos.q <  (b)->pos.q )
+#define tm_aln_rbt_cmp(a, b)		( (a)->pos.q <  (b)->pos.q )
+
+/* matcher */
 #define tm_aln_rbt_cmp_head(a, b)	( (a)->pos.q >= (b)->pos.q )
-#define tm_aln_rbt_cmp_true(a, b)	( 1 )
+#define tm_aln_rbt_cmp_tail(a, b)	( (a)->pos.q <= (b)->pos.q )
+#define tm_aln_rbt_cmp_iter(a, b)	( 1 )
+
+/* intersection */
 #if 0
 #define tm_aln_ivt_cmp_head(a, b)	({ (a)->qmax                > (b)->pos.q; })
 #define tm_aln_ivt_cmp_tail(a, b)	({ (a)->pos.q               < (b)->pos.q + (b)->span.q; })
@@ -2786,13 +2791,14 @@ uint64_t tm_aln_ivt_update(tm_aln_t *node, tm_aln_t const *left, tm_aln_t const 
 }
 
 RBT_INIT_IVT(aln, tm_aln_t, tm_aln_rbt_header,
-	tm_aln_rbt_cmp_tail,
+	tm_aln_rbt_cmp,
 	tm_aln_ivt_update
 );
-RBT_INIT_ITER(match_aln, tm_aln_t, tm_aln_rbt_header,
+RBT_INIT_ITER_PATCH(match_aln, tm_aln_t, tm_aln_rbt_header,
 	tm_aln_rbt_cmp_head,
 	tm_aln_rbt_cmp_tail,
-	tm_aln_rbt_cmp_true
+	tm_aln_rbt_cmp_iter,
+	tm_aln_ivt_update
 );
 RBT_INIT_ITER(isct_aln, tm_aln_t, tm_aln_rbt_header,
 	tm_aln_ivt_cmp_head,
@@ -3753,7 +3759,7 @@ uint64_t tm_extend_patch_bin(tm_scan_t const *self, tm_aln_t *v, rbt_iter_t *it,
 	memcpy(dst, &new, sizeof(tm_aln_t));
 
 	/* and update interval tree */
-	rbt_patch_match_aln(it, v, dst);
+	rbt_patch_match_aln(it, v);
 	return(1);			/* replaced */
 }
 
@@ -3803,6 +3809,26 @@ void tm_extend_push_bin(tm_scan_t *self, tm_aln_t a)
 	debug("allocate new bin, i(%zu)", kv_cnt(self->extend.arr));
 	kv_push(tm_aln_t, self->extend.arr, a);
 	rbt_insert_aln(kv_ptr(self->extend.arr), kv_cnt(self->extend.arr) - 1);
+
+	/* test for patch query */
+	debugblock({
+		debug("patch");
+		tm_aln_t *v = kv_ptr(self->extend.arr);
+		uint64_t const x = _loadu_u64(&a.pos);
+
+		rbt_iter_t it;
+		rbt_init_iter_match_aln(&it, v, &a);
+
+		tm_aln_t const *p = rbt_fetch_head_match_aln(&it, v, &a);
+		while(p != NULL) {
+			/* compare end pos, return iterator if matched */
+			uint64_t const y = _loadu_u64(&p->pos);
+			if(x == y && p->dir == a.dir) { debug("found"); break; }
+		}
+		rbt_patch_match_aln(&it, v);
+
+		debug("done");
+	});
 	return;
 }
 
