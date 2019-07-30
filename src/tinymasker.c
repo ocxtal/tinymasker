@@ -1895,7 +1895,8 @@ static _force_inline
 uint64_t tm_idx_load_profile(tm_idx_gen_t *mii, tm_idx_profile_t const *template, char const *fn)
 {
 	/* open file as toml */
-	toml_table_t *root = tm_idx_dump_toml(fn);
+	toml_table_t *root = tm_idx_dump_toml(fn);	/* error message printed inside */
+	if(root == NULL) { return(1); }
 
 	/* parse */
 	uint64_t const state = tm_idx_load_profile_core(mii, template, root);
@@ -1912,10 +1913,15 @@ uint64_t tm_idx_gen_profile(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, char c
 {
 	/* compose default (fallback) profile as template */
 	tm_idx_profile_t *fallback = tm_idx_default_profile(conf);
+	if(fallback == NULL) {
+		error("failed load default score profile.");
+		return(1);
+	}
 
 	if(fn != NULL) {
 		message(lfp, "reading score matrices...");
 		if(tm_idx_load_profile(mii, fallback, fn)) {
+			error("failed construct score profile.");
 			return(1);
 		}
 	} else {
@@ -2731,7 +2737,14 @@ _static_assert(sizeof(tm_aln_t) == 64);
 typedef struct { tm_aln_t *a; size_t n, m; } tm_aln_v;
 
 #define tm_aln_rbt_header(a)		( &(a)->h )
-#define tm_aln_rbt_cmp(a, b)		( (a)->pos.q < (b)->pos.q )
+#define tm_aln_rbt_cmp_tail(a, b)	( (a)->pos.q <  (b)->pos.q )
+#define tm_aln_rbt_cmp_head(a, b)	( (a)->pos.q >= (b)->pos.q )
+#define tm_aln_rbt_cmp_true(a, b)	( 1 )
+#if 0
+#define tm_aln_ivt_cmp_head(a, b)	({ (a)->qmax                > (b)->pos.q; })
+#define tm_aln_ivt_cmp_tail(a, b)	({ (a)->pos.q               < (b)->pos.q + (b)->span.q; })
+#define tm_aln_ivt_cmp_iter(a, b)	({ (a)->pos.q + (a)->span.q > (b)->pos.q; })
+#else
 #define tm_aln_ivt_cmp_head(a, b)	({ \
 	debug("compare head: a(%u, %u, %u), b(%u, %u, %u), cmp(%u > %u)", (a)->pos.q, (a)->pos.q + (a)->span.q, (a)->qmax, (b)->pos.q, (b)->pos.q + (b)->span.q, (b)->qmax, (a)->qmax, (b)->pos.q); \
 	(a)->qmax                > (b)->pos.q; \
@@ -2744,27 +2757,44 @@ typedef struct { tm_aln_t *a; size_t n, m; } tm_aln_v;
 	debug("compare iter: a(%u, %u, %u), b(%u, %u, %u), cmp(%u > %u)", (a)->pos.q, (a)->pos.q + (a)->span.q, (a)->qmax, (b)->pos.q, (b)->pos.q + (b)->span.q, (b)->qmax, (a)->pos.q + (a)->span.q, (b)->pos.q); \
 	(a)->pos.q + (a)->span.q > (b)->pos.q; \
 })
+#endif
 
 static _force_inline
-uint64_t tm_aln_ivt_update(tm_aln_t *parent, tm_aln_t *child)
+uint64_t tm_aln_ivt_update(tm_aln_t *node, tm_aln_t const *left, tm_aln_t const *right)
 {
-	if(child == NULL) { return(1); }
+	debug("update, node(%p), left(%p), right(%p)", node, left, right);
 
-	uint32_t const cepos = child->pos.q + child->span.q;
-	uint32_t const qmax = parent->qmax;
-
-	if(cepos > qmax) {
-		parent->qmax = cepos;
-		return(1);
+	if(left == NULL && right == NULL) {
+		debug("initialize, pos(%u), span(%u), qmax(%u)", node->pos.q, node->span.q, node->pos.q + node->span.q);
+		node->qmax = node->pos.q + node->span.q;	/* initialize */
+		return(1);		/* further update needed */
 	}
-	return(0);
+
+	/* calculate max of children */
+	uint32_t const lmax = left  == NULL ? 0 : left->qmax;
+	uint32_t const rmax = right == NULL ? 0 : right->qmax;
+	uint32_t const cmax = MAX2(lmax, rmax);
+
+	debug("lmax(%u), rmax(%u), cmax(%u), qmax(%u)", lmax, rmax, cmax, node->qmax);
+
+	/* update if needed */
+	if(cmax > node->qmax) {
+		node->qmax = cmax;
+		return(1);		/* further update needed */
+	}
+	return(0);			/* not updated; end update */
 }
 
 RBT_INIT_IVT(aln, tm_aln_t, tm_aln_rbt_header,
-	tm_aln_rbt_cmp,
+	tm_aln_rbt_cmp_tail,
 	tm_aln_ivt_update
 );
-RBT_INIT_ITER(aln, tm_aln_t, tm_aln_rbt_header,
+RBT_INIT_ITER(match_aln, tm_aln_t, tm_aln_rbt_header,
+	tm_aln_rbt_cmp_head,
+	tm_aln_rbt_cmp_tail,
+	tm_aln_rbt_cmp_true
+);
+RBT_INIT_ITER(isct_aln, tm_aln_t, tm_aln_rbt_header,
 	tm_aln_ivt_cmp_head,
 	tm_aln_ivt_cmp_tail,
 	tm_aln_ivt_cmp_iter
@@ -2776,6 +2806,26 @@ typedef struct {
 	size_t unused[3];
 	tm_aln_t arr[];
 } tm_alnv_t;
+
+/* alignment dedup hash; we put alignment end position in this bin */
+typedef struct {
+	uint64_t key;
+	uint64_t untouched;
+} tm_dedup_t;
+
+enum tm_dedup_state_e {
+	NOT_EVALD        = 0,
+	EVALD_BUT_FAILED = 1,
+	EVALD_AND_SUCCD  = 2,
+};
+
+#define tm_dedup_key(_p)				(_p)->key
+#define tm_dedup_val(_p)				(_p)->untouched
+#define MM_HASH_INIT_VAL				( RH_INIT_VAL )
+RH_INIT(dedup, tm_dedup_t,
+	uint64_t, tm_dedup_key,
+	uint64_t, tm_dedup_val
+);
 
 
 /* working buffers */
@@ -2793,6 +2843,9 @@ typedef struct {
 		uint32_t max_weight;	/* working variable */
 		dz_arena_t *fill, *trace;
 
+		/* dedup hash */
+		rh_dedup_t pos;
+
 		/* result bin */
 		tm_aln_v arr;
 	} extend;
@@ -2804,6 +2857,10 @@ void tm_scan_init_static(tm_scan_t *self)
 {
 	memset(self, 0, sizeof(tm_scan_t));
 
+	/* init hash */
+	rh_init_static_dedup(&self->extend.pos, 0);
+
+	/* clear DP working space */
 	size_t const size = DZ_MEM_INIT_SIZE - _roundup(sizeof(dz_arena_t), DZ_MEM_ALIGN_SIZE);
 	self->extend.fill = dz_arena_init(size);
 	self->extend.trace = NULL;
@@ -2818,6 +2875,8 @@ void tm_scan_destroy_static(tm_scan_t *self)
 	kv_destroy(self->seed.sqiv);
 	kv_destroy(self->chain.arr);
 	kv_destroy(self->extend.arr);
+
+	rh_destroy_static_dedup(&self->extend.pos);
 
 	dz_arena_destroy(self->extend.fill);
 	return;
@@ -3538,6 +3597,27 @@ size_t tm_collect_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *seq, 
 /* X-drop DP extension */
 #define TM_WEIGHT_MARGIN			( 3U )
 
+/* clear everything; called once every query */
+static _force_inline
+void tm_extend_clear(tm_scan_t *self)
+{
+	/* clear test threshold */
+	self->extend.max_weight = 32;
+
+	/* clear hash */
+	rh_clear_dedup(&self->extend.pos);
+
+	/* clear rbt */
+	kv_clear(self->extend.arr);
+	kv_pushp(tm_aln_t, self->extend.arr);
+	rbt_init_static_aln(kv_ptr(self->extend.arr));
+
+	/* we must not clear trace stack because we have saved alignments and metadata in it */
+	// dz_arena_flush(self->extend.trace);
+	return;
+}
+
+
 static _force_inline
 tm_aln_t tm_chain_as_aln(tm_chain_t const *c)
 {
@@ -3548,6 +3628,38 @@ tm_aln_t tm_chain_as_aln(tm_chain_t const *c)
 	});
 }
 
+
+/* start position hash */
+static _force_inline
+uint64_t tm_extend_hash_pos(uint32_t dir, tm_pair_t spos)
+{
+	uint64_t const x = _loadu_u64(&spos);
+	uint64_t const y = dir;					/* only the lowest bit matters */
+
+	return(5 * x ^ x ^ (x>>31) ^ y ^ (y<<7));
+}
+
+static _force_inline
+uint64_t tm_extend_mark_pos(tm_scan_t *self, uint32_t dir, tm_pair_t spos)
+{
+	/* duplicated if state is not zero */
+	uint64_t const h = tm_extend_hash_pos(dir, spos);
+	tm_dedup_t *bin = rh_put_ptr_dedup(&self->extend.pos, h);
+
+	/* we don't expect bin be NULL but sometimes happen, or already evaluated (we don't mind the last state) */
+	if(bin == NULL || bin->untouched == 0ULL) {
+		debug("already evaluated, bin(%p)", bin);
+		return(1);
+	}
+
+	/* not duplicated; put current pos */
+	bin->untouched = 0ULL;
+	debug("found new bin(%p)", bin);
+	return(0);
+}
+
+
+/* alignment bin (alignment collection); sorted by its span */
 
 static _force_inline
 uint64_t tm_extend_is_complete(tm_scan_t *self)
@@ -3586,12 +3698,14 @@ uint64_t tm_extend_is_covered(tm_scan_t *self, tm_chain_t const *c)
 	tm_aln_t const *v = kv_ptr(self->extend.arr);
 	if(v == NULL) { return(0); }	/* no result found */
 
+	/* create anchor; convert chain to alignment object so that it can be compared to existing alignments */
+	tm_aln_t const caln = tm_chain_as_aln(c);		/* convert chain position to (pseudo) alignment range */
+
 	/* init iterator */
 	rbt_iter_t it;
-	tm_aln_t const caln = tm_chain_as_aln(c);		/* convert chain position to (pseudo) alignment range */
-	rbt_init_iter_aln(&it, v, &caln);
+	rbt_init_iter_isct_aln(&it, v, &caln);
 
-	tm_aln_t const *p = rbt_fetch_head_aln(&it, v, &caln);
+	tm_aln_t const *p = rbt_fetch_head_isct_aln(&it, v, &caln);
 	while(p != NULL) {
 		debug("p(%p), weight(%u), (%u) --- %u --> (%u)", p, p->attr.max_weight, p->pos.q, p->span.q, p->pos.q + p->span.q);
 
@@ -3605,10 +3719,105 @@ uint64_t tm_extend_is_covered(tm_scan_t *self, tm_chain_t const *c)
 			return(1);		/* still too shorter than overlapping alignment */
 		}
 
-		p = rbt_fetch_next_aln(&it, v, &caln);
+		p = rbt_fetch_next_isct_aln(&it, v, &caln);
 	}
 	return(0);				/* possiblilty remains for better alignment */
 }
+
+
+typedef struct {
+	uint64_t collided;
+	uint64_t replaced;
+} tm_extend_replace_t;
+
+
+static _force_inline
+int64_t tm_extend_compare_aln(tm_aln_t const *x, tm_aln_t const *y)
+{
+	/* strcmp equivalent */
+	return((int64_t)(x->score - y->score));		/* expand sign */
+}
+
+static _force_inline
+uint64_t tm_extend_patch_bin(tm_scan_t const *self, tm_aln_t *v, rbt_iter_t *it, tm_aln_t *old, tm_aln_t new)
+{
+	_unused(self);
+
+	/* if the old one is larger than the new one, do nothing */
+	if(tm_extend_compare_aln(old, &new) >= 0) {
+		return(0);		/* not replaced (discarded) */
+	}
+
+	/* new one is larger; overwrite everything */
+	tm_aln_t *dst = old;		/* just alias */
+	memcpy(dst, &new, sizeof(tm_aln_t));
+
+	/* and update interval tree */
+	rbt_patch_match_aln(it, v, dst);
+	return(1);			/* replaced */
+}
+
+static _force_inline
+tm_extend_replace_t tm_extend_slice_bin(tm_scan_t *self, tm_aln_t new)
+{
+	tm_extend_replace_t const notfound = {
+		.collided = 0,
+		.replaced = 0
+	};
+
+	/* apparently no element matches when the result array is empty */
+	tm_aln_t *v = kv_ptr(self->extend.arr);
+	if(v == NULL) { return(notfound); }
+
+	/* position is compared at once on GP register */
+	uint64_t const x = _loadu_u64(&new.pos);
+
+	/* init iterator */
+	rbt_iter_t it;
+	rbt_init_iter_match_aln(&it, v, &new);
+
+	tm_aln_t const *p = rbt_fetch_head_match_aln(&it, v, &new);
+	while(p != NULL) {
+		/* compare end pos, return iterator if matched */
+		uint64_t const y = _loadu_u64(&p->pos);
+		if(x == y && p->dir == new.dir) {		/* compare both */
+
+			/* alignment end position collides; take better one */
+			debug("duplication found, patch bin");
+			return((tm_extend_replace_t){
+				.collided = 1,
+				.replaced = tm_extend_patch_bin(self, v, &it, (tm_aln_t *)p, new)
+			});
+		}
+
+		p = rbt_fetch_next_match_aln(&it, v, &new);
+	}
+
+	/* not found; we need to allocate new bin for the alignment */
+	return(notfound);
+}
+
+static _force_inline
+void tm_extend_push_bin(tm_scan_t *self, tm_aln_t a)
+{
+	debug("allocate new bin, i(%zu)", kv_cnt(self->extend.arr));
+	kv_push(tm_aln_t, self->extend.arr, a);
+	rbt_insert_aln(kv_ptr(self->extend.arr), kv_cnt(self->extend.arr) - 1);
+	return;
+}
+
+static _force_inline
+uint64_t tm_extend_record(tm_scan_t *self, tm_aln_t a)
+{
+	/* returns 1 if recorded */
+	tm_extend_replace_t const r = tm_extend_slice_bin(self, a);
+	if(r.collided) { return(r.replaced); }
+
+	/* allocate new bin */
+	tm_extend_push_bin(self, a);
+	return(1);		/* recorded */
+}
+
 
 
 static _force_inline
@@ -3620,8 +3829,9 @@ tm_pair_t tm_aln_span(dz_alignment_t const *aln)
 	});
 }
 
+
 static _force_inline
-int32_t tm_extend_patched_score(tm_scan_t *self, tm_idx_profile_t const *pf, tm_pair_t spos, dz_alignment_t const *aln)
+int32_t tm_extend_patched_score(tm_scan_t const *self, tm_idx_profile_t const *pf, tm_pair_t spos, dz_alignment_t const *aln)
 {
 	_unused(self);
 
@@ -3629,6 +3839,35 @@ int32_t tm_extend_patched_score(tm_scan_t *self, tm_idx_profile_t const *pf, tm_
 	return((spos.r == 0 ? pf->extend.bonus : 0) + aln->score);
 }
 
+static _force_inline
+tm_aln_t tm_extend_compose_aln(tm_scan_t const *self, tm_idx_profile_t const *pf, tm_chain_t const *chain, tm_pair_t spos, dz_alignment_t const *aln)
+{
+	tm_pair_t const span = tm_aln_span(aln);
+	tm_aln_t const a = {
+		/* coordinates */
+		.qmax = spos.q + span.q,	/* spos.q + span.q, */
+		.dir  = chain->dir,
+		.pos  = {
+			.r = spos.r - (chain->dir ? span.r : 0),	/* convert to head position */
+			.q = spos.q
+		},
+		.span = span,
+		.attr = {
+			.rid = chain->attr.sep.rid,
+			.max_weight = chain->attr.sep.weight + TM_WEIGHT_MARGIN		/* x8 */
+		},
+
+		/* stats */
+		.score = tm_extend_patched_score(self, pf, spos, aln),
+		.aln = aln,					/* save original */
+
+		/* path */
+		.path = { .ptr = aln->path, .len = aln->path_length }
+	};
+	return(a);
+}
+
+#if 0
 static _force_inline
 void tm_extend_record(tm_scan_t *self, tm_idx_profile_t const *pf, tm_chain_t const *chain, tm_pair_t spos, dz_alignment_t const *aln)
 {
@@ -3659,22 +3898,8 @@ void tm_extend_record(tm_scan_t *self, tm_idx_profile_t const *pf, tm_chain_t co
 	rbt_insert_aln(kv_ptr(self->extend.arr), kv_cnt(self->extend.arr) - 1);
 	return;
 }
+#endif
 
-static _force_inline
-void tm_extend_clear(tm_scan_t *self)
-{
-	/* clear test threshold */
-	self->extend.max_weight = 32;
-
-	/* clear rbt */
-	kv_clear(self->extend.arr);
-	kv_pushp(tm_aln_t, self->extend.arr);
-	rbt_init_static_aln(kv_ptr(self->extend.arr));
-
-	/* we must not clear trace stack because we have saved alignments and metadata in it */
-	// dz_arena_flush(self->extend.trace);
-	return;
-}
 
 static _force_inline
 size_t tm_extend_finalize_pack(tm_aln_t *dst, tm_aln_t const *src)
@@ -3687,15 +3912,15 @@ size_t tm_extend_finalize_pack(tm_aln_t *dst, tm_aln_t const *src)
 	};
 
 	rbt_iter_t it;
-	rbt_init_iter_aln(&it, src, &all);
+	rbt_init_iter_isct_aln(&it, src, &all);
 
-	tm_aln_t const *p = rbt_fetch_head_aln(&it, src, &all);
+	tm_aln_t const *p = rbt_fetch_head_isct_aln(&it, src, &all);
 	tm_aln_t *q = dst;
 	while(p != NULL) {
 		debug("p(%p), pos(%u, %u), span(%u, %u)", p, p->pos.q, p->pos.r, p->span.q, p->span.r);
 
 		*q++ = *p;
-		p = rbt_fetch_next_aln(&it, src, &all);
+		p = rbt_fetch_next_isct_aln(&it, src, &all);
 	}
 	size_t const saved = q - dst;
 	return(saved);
@@ -3912,21 +4137,28 @@ tm_extend_res_t tm_extend_core(tm_scan_t *self, tm_idx_profile_t const *pf, tm_i
 	tm_pair_t const rpos = tm_chain_pos(c);
 	debug("reverse: rdir(%u), rpos(%u, %u)", rdir, rpos.q, rpos.r);
 
+
 	/* reference reverse */
 	dz_query_t *qr = tm_pack_query_wrap(self->extend.fill, pf->extend.dz, sk, query, qlen, (tm_pair_t){ .r = rdir ^ 0x01, .q = 1 }, rpos);
 	dz_state_t const *r = tm_extend_wrap(self->extend.fill, pf->extend.dz, sk, qr, rdir ^ 0x01, rpos);
 	tm_pair_t const spos = tm_calc_max_wrap(r, rdir ^ 0x01, rpos);
 	debug("reverse: rpos(%u, %u) --- score(%d) --> spos(%u, %u)", rpos.q, rpos.r, r != NULL ? r->max.score : 0, spos.q, spos.r);
+	if(tm_extend_mark_pos(self, rdir, spos)) { return(failed); }	/* it seems the head position is already evaluated */
 
-	/* forward */
+
+	/* reference forward */
 	dz_query_t *qf = tm_pack_query_wrap(self->extend.fill, pf->extend.dz, sk, query, qlen, (tm_pair_t){ .r = rdir, .q = 0 }, spos);
 	dz_state_t const *f = tm_extend_wrap(self->extend.fill, pf->extend.dz, sk, qf, rdir, spos);
 	debug("forward: score(%d)", (f != NULL ? f->max.score : -1));
-	if(f == NULL || f->max.score == 0) { return(failed); }
+
+	/* we don't expect f becomes NULL but might happen. score == 0 indicates there is no significant alignment with length > 0 */
+	if(f == NULL || f->max.score == 0) { return(failed); }			/* not promising */
+
 
 	/* traceback */
 	dz_alignment_t const *aln = dz_trace_core(self->extend.trace, pf->extend.dz, f, (dz_trace_get_match_t)tm_extend_get_match);
 	debug("forward: spos(%u, %u) --- score(%d) --> epos(%u, %u), f(%p), aln(%p)", spos.q, spos.r, aln->score, aln->query_length + spos.q, aln->ref_length + spos.r, f, aln);
+
 	return((tm_extend_res_t){
 		.spos = spos,
 		.aln  = aln
@@ -3974,7 +4206,14 @@ size_t tm_extend_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *query,
 			continue;
 		}
 
-		tm_extend_record(self, p, q, r.spos, r.aln);
+		/* save alignment; discard traceback object if the alignment is filtered out by an existing one */
+		tm_aln_t const a = tm_extend_compose_aln(self, p, q, r.spos, r.aln);
+		if(tm_extend_record(self, a) == 0) {
+			dz_arena_restore(self->extend.trace, fz);
+			continue;	/* interval tree not update when the new one is discarded */
+		}
+
+		/* test termination condition */
 		if(tm_extend_is_complete(self)) { break; }
 	}
 
@@ -4763,7 +5002,7 @@ int main_index_error(tm_conf_t *conf, int error_code, char const *filename)
 
 	/* opening files */
 	case ERROR_OPEN_IDX: error("failed to open index file `%s' in write mode. Please check file path and its permission.", filename); break;
-	case ERROR_OPEN_RSEQ: error("failed to open sequence file `%s' for building index. Please check file path and its format.", filename); break;
+	case ERROR_OPEN_RSEQ: error("failed to build index `%s'.", filename); break;
 	}
 	return(error_code);
 }
@@ -4853,7 +5092,7 @@ int main_scan_error(tm_conf_t *conf, int error_code, char const *file)
 	case ERROR_LOAD_IDX: error("failed to load index block from `%s'. Please check file path and version, or rebuild the index.", file); break;
 
 	/* index construction */
-	case ERROR_OPEN_RSEQ: error("failed to open sequence file `%s' for building index. Please check file path and format.", file); break;
+	case ERROR_OPEN_RSEQ: error("failed to build index from `%s'.", file); break;
 	}
 	return(error_code);
 }
