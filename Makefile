@@ -56,7 +56,7 @@ debug: $(SRCS_INTL)
 	$(CC) -o $(TARGET).t $(OFLAGS) $(CFLAGS) $(SRCS_INTL) -ltcmalloc $(LDFLAGS)
 
 clean:
-	$(RM) -f $(TARGET) $(TARGET).g $(TARGET).d $(OBJS_INTL)
+	$(RM) -f $(TARGET) $(TARGET).g $(TARGET).d $(TARGET).s $(TARGET).t $(OBJS_INTL)
 
 dep: $(DEPS_INTL)
 	$(CAT) $^ > $(SRCDIR)/Makefile.dep
