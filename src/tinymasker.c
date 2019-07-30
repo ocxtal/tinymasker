@@ -3765,18 +3765,17 @@ int64_t tm_extend_compare_aln(tm_aln_t const *x, tm_aln_t const *y)
 }
 
 static _force_inline
-uint64_t tm_extend_patch_bin(tm_scan_t const *self, tm_aln_t *v, rbt_iter_t *it, tm_aln_t *old, tm_aln_t new)
+uint64_t tm_extend_patch_bin(tm_scan_t const *self, tm_aln_t *v, rbt_iter_t *it, tm_aln_t *old, tm_aln_t const *new)
 {
 	_unused(self);
 
 	/* if the old one is larger than the new one, do nothing */
-	if(tm_extend_compare_aln(old, &new) >= 0) {
+	if(tm_extend_compare_aln(old, new) >= 0) {
 		return(0);		/* not replaced (discarded) */
 	}
 
 	/* new one is larger; overwrite everything */
-	tm_aln_t *dst = old;		/* just alias */
-	memcpy(dst, &new, sizeof(tm_aln_t));
+	memcpy(old, new, sizeof(tm_aln_t));
 
 	/* and update interval tree */
 	rbt_patch_match_aln(it, v);
@@ -3784,7 +3783,7 @@ uint64_t tm_extend_patch_bin(tm_scan_t const *self, tm_aln_t *v, rbt_iter_t *it,
 }
 
 static _force_inline
-tm_extend_replace_t tm_extend_slice_bin(tm_scan_t *self, tm_aln_t new)
+tm_extend_replace_t tm_extend_slice_bin(tm_scan_t *self, tm_aln_t const *new)
 {
 	tm_extend_replace_t const notfound = {
 		.collided = 0,
@@ -3796,17 +3795,17 @@ tm_extend_replace_t tm_extend_slice_bin(tm_scan_t *self, tm_aln_t new)
 	if(v == NULL) { return(notfound); }
 
 	/* position is compared at once on GP register */
-	uint64_t const x = _loadu_u64(&new.pos);
+	uint64_t const x = _loadu_u64(&new->pos);
 
 	/* init iterator */
 	rbt_iter_t it;
-	rbt_init_iter_match_aln(&it, v, &new);
+	rbt_init_iter_match_aln(&it, v, new);
 
-	tm_aln_t const *p = rbt_fetch_head_match_aln(&it, v, &new);
+	tm_aln_t const *p = rbt_fetch_head_match_aln(&it, v, new);
 	while(p != NULL) {
 		/* compare end pos, return iterator if matched */
 		uint64_t const y = _loadu_u64(&p->pos);
-		if(x == y && p->dir == new.dir) {		/* compare both */
+		if(x == y && p->dir == new->dir) {		/* compare both */
 
 			/* alignment end position collides; take better one */
 			debug("duplication found, patch bin");
@@ -3816,7 +3815,7 @@ tm_extend_replace_t tm_extend_slice_bin(tm_scan_t *self, tm_aln_t new)
 			});
 		}
 
-		p = rbt_fetch_next_match_aln(&it, v, &new);
+		p = rbt_fetch_next_match_aln(&it, v, new);
 	}
 
 	/* not found; we need to allocate new bin for the alignment */
@@ -3824,26 +3823,31 @@ tm_extend_replace_t tm_extend_slice_bin(tm_scan_t *self, tm_aln_t new)
 }
 
 static _force_inline
-void tm_extend_push_bin(tm_scan_t *self, tm_aln_t a)
+void tm_extend_push_bin(tm_scan_t *self, tm_aln_t const *aln)
 {
 	debug("allocate new bin, i(%zu)", kv_cnt(self->extend.arr));
-	kv_push(tm_aln_t, self->extend.arr, a);
+
+	/* copy */
+	tm_aln_t *p = kv_pushp(tm_aln_t, self->extend.arr);
+	memcpy(p, aln, sizeof(tm_aln_t));
+
+	/* update tree */
 	rbt_insert_aln(kv_ptr(self->extend.arr), kv_cnt(self->extend.arr) - 1);
 
 	/* test for patch query */
 	debugblock({
 		debug("patch");
 		tm_aln_t *v = kv_ptr(self->extend.arr);
-		uint64_t const x = _loadu_u64(&a.pos);
+		uint64_t const x = _loadu_u64(&aln->pos);
 
 		rbt_iter_t it;
-		rbt_init_iter_match_aln(&it, v, &a);
+		rbt_init_iter_match_aln(&it, v, aln);
 
-		tm_aln_t const *p = rbt_fetch_head_match_aln(&it, v, &a);
+		tm_aln_t const *p = rbt_fetch_head_match_aln(&it, v, aln);
 		while(p != NULL) {
 			/* compare end pos, return iterator if matched */
 			uint64_t const y = _loadu_u64(&p->pos);
-			if(x == y && p->dir == a.dir) { debug("found"); break; }
+			if(x == y && p->dir == aln->dir) { debug("found"); break; }
 		}
 		rbt_patch_match_aln(&it, v);
 
@@ -3853,14 +3857,14 @@ void tm_extend_push_bin(tm_scan_t *self, tm_aln_t a)
 }
 
 static _force_inline
-uint64_t tm_extend_record(tm_scan_t *self, tm_aln_t a)
+uint64_t tm_extend_record(tm_scan_t *self, tm_aln_t const *aln)
 {
 	/* returns 1 if recorded */
-	tm_extend_replace_t const r = tm_extend_slice_bin(self, a);
+	tm_extend_replace_t const r = tm_extend_slice_bin(self, aln);
 	if(r.collided) { return(r.replaced); }
 
 	/* allocate new bin */
-	tm_extend_push_bin(self, a);
+	tm_extend_push_bin(self, aln);
 	return(1);		/* recorded */
 }
 
@@ -4314,7 +4318,7 @@ size_t tm_extend_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *query,
 
 		/* save alignment; discard traceback object if the alignment is filtered out by an existing one */
 		tm_aln_t const a = tm_extend_compose_aln(self, p, q, r.epos, r.aln);
-		if(tm_extend_record(self, a) == 0) {
+		if(tm_extend_record(self, &a) == 0) {
 			dz_arena_restore(self->extend.trace, fz);
 			continue;	/* interval tree not update when the new one is discarded */
 		}
