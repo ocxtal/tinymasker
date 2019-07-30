@@ -153,8 +153,11 @@ _static_assert(sizeof(rh_hdr_t) == 8);
 			i++; k1 = (uint64_t)_key(&a[(b + i) & mask]); \
 		} \
 		/* debug("found last bin for k(%lx), v(%lx) at i(%lx); max_poll_len(%lu)", k0, v0, (b + i) & mask, max_poll_len); */ \
-		_key(&a[(b + i) & mask]) = (_key_t)k0; \
-		_val(&a[(b + i) & mask]) = (_val_t)v0; \
+		/* save the last key-value pair if the bin is newly allocated one */ \
+		if(k0 != k1) { \
+			_key(&a[(b + i) & mask]) = (_key_t)k0; \
+			_val(&a[(b + i) & mask]) = (_val_t)v0; \
+		} \
 		return((rh_bidx_t){ \
 			.idx = (b + i) & mask, \
 			.cnt = k0 != k1, \
@@ -192,7 +195,7 @@ _static_assert(sizeof(rh_hdr_t) == 8);
 	void rh_put_##_sfx(rh_##_sfx##_t *h, _key_t k, _val_t v) { \
 		/* debug("search bin for k(%lx)", k); */ \
 		while(1) { \
-			rh_bidx_t b = rh_reallocate_##_sfx(h->a, k, v, h->mask);	/* allocate bin for the new key */ \
+			rh_bidx_t const b = rh_reallocate_##_sfx(h->a, k, v, h->mask);	/* allocate bin for the new key */ \
 			if(b.poll_len < RH_DST_MAX) { h->cnt += b.cnt; return; } \
 			/* debug("failed to allocate bin, key(%lx), cnt(%u), max(%u)", k, h->cnt, h->max); trap(); */ \
 			rh_extend_##_sfx(h);		/* extend table when cnt exceeded upper bound or empty bin not found within MAX_DST from base */ \
@@ -203,7 +206,7 @@ _static_assert(sizeof(rh_hdr_t) == 8);
 	_bkt_t *rh_put_ptr_##_sfx(rh_##_sfx##_t *h, _key_t k) { \
 		/* debug("search bin for k(%lx)", k); */ \
 		while(1) { \
-			rh_bidx_t b = rh_reallocate_##_sfx(h->a, k, (_val_t)RH_INIT_VAL, h->mask);		/* allocate bin for the new key */ \
+			rh_bidx_t const b = rh_reallocate_##_sfx(h->a, k, (_val_t)RH_INIT_VAL, h->mask);		/* allocate bin for the new key */ \
 			if(b.poll_len < RH_DST_MAX) { h->cnt += b.cnt; return(&h->a[b.idx]); }			/* &h->a[b.idx].u64[1] */ \
 			/* debug("failed to allocate bin, key(%lx), cnt(%u), max(%u)", k, h->cnt, h->max); trap(); */ \
 			rh_extend_##_sfx(h);		/* extend table when cnt exceeded upper bound or empty bin not found within MAX_DST from base */ \
