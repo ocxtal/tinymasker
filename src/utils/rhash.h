@@ -81,6 +81,10 @@ _static_assert(sizeof(rh_hdr_t) == 8);
 		rh_destroy_static_##_sfx(h); free(h); return; \
 	} \
 	static _force_inline \
+	void rh_resize_##_sfx(rh_##_sfx##_t *h, size_t size) { \
+		h->max = size; h->a = realloc(h->a, sizeof(_bkt_t) * h->max); \
+	} \
+	static _force_inline \
 	void rh_dump_##_sfx(rh_##_sfx##_t const *h, void *fp, write_t wfp) { \
 		rh_hdr_t hdr = { 0 }; \
 		/* dump a mark of zero-sized table */ \
@@ -127,7 +131,7 @@ _static_assert(sizeof(rh_hdr_t) == 8);
 		return; \
 	} \
 	static _force_inline \
-	rh_bidx_t rh_reallocate_##_sfx(_bkt_t *a, _key_t k0, _val_t v0, uint64_t mask) { \
+	rh_bidx_t rh_reallocate_##_sfx(_bkt_t *a, _key_t k0, _val_t v0, uint64_t mask, uint64_t force_save) { \
 		uint64_t const kmask = mask | ((uint64_t)(((_key_t)RH_MOVED)>>1) + 1); \
 		size_t const min_bin_dist = -(RH_DST_MAX + 2ULL); \
 		size_t max_poll_len = 0, nb = k0 & mask, ni = 0; \
@@ -136,25 +140,25 @@ _static_assert(sizeof(rh_hdr_t) == 8);
 		uint64_t k1 = (uint64_t)_key(&a[(b + i) & mask]); \
 		while(_unlikely(!_is_empty(_key_t, k1, _msb_mask) && k0 != k1)) { \
 			size_t bc = k1 & kmask; \
-			if(_likely(bc - b <= min_bin_dist)) { \
+			if(_likely(bc - b <= min_bin_dist)) {		/* if the origin of the polled key is larger than the key to be inserted */ \
 				uint64_t v1 = (uint64_t)_val(&a[(b + i) & mask]); \
 				/* debug("found swappable bin for k(%lx), v(%lx) at i(%lx)", k0, v0, (b + i) & mask); */ \
 				_key(&a[(b + i) & mask]) = (_key_t)k0; \
 				_val(&a[(b + i) & mask]) = (_val_t)v0; \
 				k0 = k1; v0 = v1; \
-				/* update max polled length */ \
+				/* update max polled length; skip for to-be-moved key */ \
 				max_poll_len = MAX2(max_poll_len, i); \
 				/* calculate next polling base */ \
 				nb = k0 & mask; ni = (b + i + 1 - nb) & mask; \
 				/* debug("b(%lx), i(%lx), nb(%lx), ni(%lx), test(%lu, %lu, %d)", b, i, nb, ni, nb - b, min_bin_dist, nb - b <= min_bin_dist); */ \
-				if(nb - b > min_bin_dist) { ni = 0; } \
+				/*if(nb - b > min_bin_dist) { ni = 0; }*/	/* if wraparound takes place */ \
 				goto _rh_reallocate_next_##_sfx; \
 			} \
 			i++; k1 = (uint64_t)_key(&a[(b + i) & mask]); \
 		} \
-		/* debug("found last bin for k(%lx), v(%lx) at i(%lx); max_poll_len(%lu)", k0, v0, (b + i) & mask, max_poll_len); */ \
+		 debug("found last bin for k(%lx), v(%lx) at i(%lx); max_poll_len(%lu)", k0, v0, (b + i) & mask, max_poll_len);  \
 		/* save the last key-value pair if the bin is newly allocated one */ \
-		if(k0 != k1) { \
+		if(force_save | (k0 != k1)) { \
 			_key(&a[(b + i) & mask]) = (_key_t)k0; \
 			_val(&a[(b + i) & mask]) = (_val_t)v0; \
 		} \
@@ -168,9 +172,8 @@ _static_assert(sizeof(rh_hdr_t) == 8);
 	void rh_extend_##_sfx(rh_##_sfx##_t *h) { \
 		size_t max_poll_len = 0; \
 		do { \
-			size_t prev_size = h->mask + 1, size = 2 * prev_size; \
-			uint64_t mask = size - 1; \
-			fprintf(stderr, "extend, h(%p), size(%lx)\n", h, size); \
+			size_t const prev_size = h->mask + 1, size = 2 * prev_size; \
+			uint64_t const mask = size - 1; \
 			/* debug("extend, prev_size(%lu), cnt(%u), ub(%u), max(%u)", prev_size, h->cnt, h->ub, h->max); */ \
 			h->mask = mask; h->ub = size * RH_THRESH;		/* update size */ \
 			if(size > h->max) {								/* double the table if needed */ \
@@ -181,13 +184,18 @@ _static_assert(sizeof(rh_hdr_t) == 8);
 			/* rehash */ \
 			max_poll_len = 0; \
 			for(size_t i = 0; i < size; i++) { \
-				uint64_t k0 = (uint64_t)_key(&h->a[i]);		/* load key (with val if compacted) */ \
+				uint64_t const k0 = (uint64_t)_key(&h->a[i]);		/* load key (with val if compacted) */ \
 				if(_is_empty(_key_t, k0, _msb_mask) || (k0 & mask) == i) { continue; }	/* test if rehashing is required */ \
-				uint64_t v0 = (uint64_t)_val(&h->a[i]); \
-				/* debug("k(%lx), v(%lx) at i(%lx) needs rehashing", k0, v0, i); */ \
-				rh_bidx_t b = rh_reallocate_##_sfx(h->a, k0, v0, mask); \
-				max_poll_len = MAX2(max_poll_len, b.poll_len); \
+				uint64_t const v0 = (uint64_t)_val(&h->a[i]); \
+				/* clear the current bin before re-inserting the key */ \
+				_key(&h->a[i]) = RH_INIT_VAL; \
+				_val(&h->a[i]) = RH_INIT_VAL; \
+				 debug("k(%lx), v(%lx) at i(%lx) needs rehashing", k0, v0, i);  \
+				/* re-insert the key; search an appropriate bin */ \
+				rh_bidx_t const b = rh_reallocate_##_sfx(h->a, k0, v0, mask, 1); \
+				max_poll_len = MAX2(max_poll_len, b.poll_len & (mask>>1)); \
 			} \
+			/* fprintf(stderr, "extend, h(%p), size(%zx), max_poll_len(%zu)\n", h, size, max_poll_len); */ \
 		} while(max_poll_len >= RH_DST_MAX); \
 		return; \
 	} \
@@ -195,8 +203,10 @@ _static_assert(sizeof(rh_hdr_t) == 8);
 	void rh_put_##_sfx(rh_##_sfx##_t *h, _key_t k, _val_t v) { \
 		/* debug("search bin for k(%lx)", k); */ \
 		while(1) { \
-			rh_bidx_t const b = rh_reallocate_##_sfx(h->a, k, v, h->mask);	/* allocate bin for the new key */ \
-			if(b.poll_len < RH_DST_MAX) { h->cnt += b.cnt; return; } \
+			if(h->cnt < h->ub) { \
+				rh_bidx_t const b = rh_reallocate_##_sfx(h->a, k, v, h->mask, 1);	/* allocate bin for the new key */ \
+				if(b.poll_len < RH_DST_MAX) { h->cnt += b.cnt; return; } \
+			} \
 			/* debug("failed to allocate bin, key(%lx), cnt(%u), max(%u)", k, h->cnt, h->max); trap(); */ \
 			rh_extend_##_sfx(h);		/* extend table when cnt exceeded upper bound or empty bin not found within MAX_DST from base */ \
 		} \
@@ -206,9 +216,14 @@ _static_assert(sizeof(rh_hdr_t) == 8);
 	_bkt_t *rh_put_ptr_##_sfx(rh_##_sfx##_t *h, _key_t k) { \
 		/* debug("search bin for k(%lx)", k); */ \
 		while(1) { \
-			rh_bidx_t const b = rh_reallocate_##_sfx(h->a, k, (_val_t)RH_INIT_VAL, h->mask);		/* allocate bin for the new key */ \
-			if(b.poll_len < RH_DST_MAX) { h->cnt += b.cnt; return(&h->a[b.idx]); }			/* &h->a[b.idx].u64[1] */ \
+			/* size_t poll_len = 0; */ \
+			if(h->cnt < h->ub) { \
+				rh_bidx_t const b = rh_reallocate_##_sfx(h->a, k, (_val_t)RH_INIT_VAL, h->mask, 0);		/* allocate bin for the new key */ \
+				if(b.poll_len < RH_DST_MAX) { h->cnt += b.cnt; return(&h->a[b.idx]); }			/* &h->a[b.idx].u64[1] */ \
+				/* poll_len = b.poll_len; */ \
+			} \
 			/* debug("failed to allocate bin, key(%lx), cnt(%u), max(%u)", k, h->cnt, h->max); trap(); */ \
+			/* fprintf(stderr, "try extend, cnt(%u), ub(%u), poll_len(%zu)\n", h->cnt, h->ub, poll_len); */ \
 			rh_extend_##_sfx(h);		/* extend table when cnt exceeded upper bound or empty bin not found within MAX_DST from base */ \
 		} \
 		return(NULL); \
