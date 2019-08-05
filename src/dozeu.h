@@ -1329,7 +1329,7 @@ void dz_arena_destroy(dz_arena_t *mem)
 	return;
 }
 static __dz_force_inline
-uint64_t dz_arena_add_stack(dz_arena_t *mem, size_t size)
+uint64_t dz_arena_push_stack(dz_arena_t *mem, size_t size)
 {
 	debug("add_stack, ptr(%p)", mem->stack.curr->next);
 	if(mem->stack.curr->next == NULL) {
@@ -1345,7 +1345,7 @@ uint64_t dz_arena_add_stack(dz_arena_t *mem, size_t size)
 		/* link new node to the forefront of the current chain */
 		mem->stack.curr->next = blk;
 
-		/* initialize the new memory block */
+		/* initialize the memory block */
 		blk->next = NULL;
 		blk->size = size;
 	}
@@ -1362,7 +1362,7 @@ void *dz_arena_malloc(dz_arena_t *mem, size_t size)
 	debug("size(%zu), stack(%p, %p, %zu)", size, mem->stack.top, mem->stack.end, dz_arena_stack_rem(mem));
 
 	if(size > dz_arena_stack_rem(mem) || dz_arena_stack_rem(mem) < 4096) {
-		dz_arena_add_stack(mem, size);
+		dz_arena_push_stack(mem, size);
 	}
 	void *ptr = (void *)mem->stack.top;
 	mem->stack.top += size;
@@ -1370,6 +1370,22 @@ void *dz_arena_malloc(dz_arena_t *mem, size_t size)
 	debug("size(%zu), stack(%p, %p, %zu)", size, mem->stack.top, mem->stack.end, dz_arena_stack_rem(mem));
 	return(ptr);
 }
+static __dz_force_inline
+uint64_t dz_arena_pop_stack(dz_arena_t *mem)
+{
+	dz_arena_block_t *p = &mem->blk, *q = NULL;
+	while(p->next != NULL) {
+		q = p;
+		p = p->next;
+	}
+	if(q == NULL) { return(0); }
+
+	/* free the last block and fixup link */
+	dz_free(p);
+	q->next = NULL;
+	return(1);
+}
+
 
 
 /*
@@ -1413,7 +1429,7 @@ uint8_t *dz_reserve_stack(dz_arena_t *mem, size_t size)
 {
 	/* allocate from heap */
 	if(dz_arena_stack_rem(mem) < size) {
-		dz_arena_add_stack(mem, 0);
+		dz_arena_push_stack(mem, 0);
 	}
 	return(mem->stack.top);
 }
