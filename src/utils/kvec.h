@@ -68,7 +68,9 @@ int main() {
 #define kv_tail(v)					( &(v).a[(v).n - 1] )
 
 #define kv_resize(type, v, s) ({ \
-	(v).m = (s); (v).a = realloc((v).a, sizeof(type) * (v).m); \
+	(v).m = (s); \
+	(v).n = MIN2((v).n, (v).m); \
+	(v).a = realloc((v).a, sizeof(type) * (v).m); \
 })
 #define kv_expand(type, v, s1, s2) ({ \
 	(v).m = kv_roundup32(MAX2((s1), (s2))); \
