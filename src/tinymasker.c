@@ -2909,8 +2909,6 @@ static _force_inline
 void tm_scan_tidyup(tm_scan_t *self)
 {
 	/* sort of garbage collection */
-	fprintf(stderr, "gc start\n");
-
 	size_t const seed = tm_scan_clip_size(kv_max(self->seed.arr));
 	size_t const sqiv = tm_scan_clip_size(kv_max(self->seed.sqiv));
 	size_t const chain = tm_scan_clip_size(kv_max(self->chain.arr));
@@ -2924,8 +2922,6 @@ void tm_scan_tidyup(tm_scan_t *self)
 	rh_resize_dedup(&self->extend.pos, dedup);
 
 	dz_arena_pop_stack(self->extend.fill);
-
-	fprintf(stderr, "gc end\n");
 	return;
 }
 
