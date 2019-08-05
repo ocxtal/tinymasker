@@ -3921,6 +3921,8 @@ int32_t tm_extend_patched_score(tm_scan_t const *self, tm_idx_profile_t const *p
 static _force_inline
 tm_aln_t tm_extend_compose_aln(tm_scan_t const *self, tm_idx_profile_t const *pf, tm_chain_t const *chain, tm_pair_t epos, dz_alignment_t const *aln)
 {
+	debug("compose, aln(%p), path(%s)", aln, aln->path);
+
 	tm_pair_t const span = tm_aln_span(aln);
 	tm_pair_t const spos = {
 		.r = epos.r - (chain->dir ? 0 : span.r),	/* convert to head position */
@@ -3947,40 +3949,6 @@ tm_aln_t tm_extend_compose_aln(tm_scan_t const *self, tm_idx_profile_t const *pf
 	};
 	return(a);
 }
-
-#if 0
-static _force_inline
-void tm_extend_record(tm_scan_t *self, tm_idx_profile_t const *pf, tm_chain_t const *chain, tm_pair_t spos, dz_alignment_t const *aln)
-{
-	tm_pair_t const span = tm_aln_span(aln);
-	tm_aln_t a = {
-		/* coordinates */
-		.qmax = spos.q + span.q,	/* spos.q + span.q, */
-		.dir  = chain->dir,
-		.pos  = {
-			.r = spos.r - (chain->dir ? span.r : 0),	/* convert to head position */
-			.q = spos.q
-		},
-		.span = span,
-		.attr = {
-			.rid = chain->attr.sep.rid,
-			.max_weight = chain->attr.sep.weight + TM_WEIGHT_MARGIN		/* x8 */
-		},
-
-		/* stats */
-		.score = tm_extend_patched_score(self, pf, spos, aln),
-		.aln = aln,					/* save original */
-
-		/* path */
-		.path = { .ptr = aln->path, .len = aln->path_length }
-	};
-
-	kv_push(tm_aln_t, self->extend.arr, a);
-	rbt_insert_aln(kv_ptr(self->extend.arr), kv_cnt(self->extend.arr) - 1);
-	return;
-}
-#endif
-
 
 static _force_inline
 size_t tm_extend_finalize_pack(tm_aln_t *dst, tm_aln_t const *src)
