@@ -3659,10 +3659,11 @@ tm_aln_t tm_chain_as_aln(tm_chain_t const *c)
 static _force_inline
 uint64_t tm_extend_hash_pos(uint32_t dir, tm_pair_t spos)
 {
-	uint64_t const x = _loadu_u64(&spos);
+	uint64_t const x = _loadu_u64(&spos);	/* r in lower 32bit, q in upper 32bit */
 	uint64_t const y = dir;					/* only the lowest bit matters */
+	uint64_t const magic = 0xf324a24a1111ULL;
 
-	return(5 * x ^ x ^ (x>>31) ^ y ^ (y<<7));
+	return((0x10001001 * x) ^ x ^ (x>>31) ^ (x>>18) ^ (magic * y));
 }
 
 static _force_inline
