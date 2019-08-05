@@ -2898,6 +2898,37 @@ void tm_scan_clear(tm_scan_t *self)
 	return;
 }
 
+static _force_inline
+size_t tm_scan_clip_size(size_t size)
+{
+	size_t const clipped = 0x8000000000000000>>_lzc_u64(size - 1);
+	return(clipped);
+}
+
+static _force_inline
+void tm_scan_tidyup(tm_scan_t *self)
+{
+	/* sort of garbage collection */
+	fprintf(stderr, "gc start\n");
+
+	size_t const seed = tm_scan_clip_size(kv_max(self->seed.arr));
+	size_t const sqiv = tm_scan_clip_size(kv_max(self->seed.sqiv));
+	size_t const chain = tm_scan_clip_size(kv_max(self->chain.arr));
+	size_t const aln = tm_scan_clip_size(kv_max(self->extend.arr));
+	size_t const dedup = tm_scan_clip_size(rh_max_dedup(&self->extend.pos));
+
+	kv_resize(tm_seed_t, self->seed.arr, seed);
+	kv_resize(tm_sqiv_t, self->seed.arr, sqiv);
+	kv_resize(tm_chain_t, self->chain.arr, chain);
+	kv_resize(tm_aln_t, self->extend.arr, aln);
+	rh_resize_dedup(&self->extend.pos, dedup);
+
+	dz_arena_pop_stack(self->extend.fill);
+
+	fprintf(stderr, "gc end\n");
+	return;
+}
+
 
 static _force_inline
 tm_seed_t *tm_seed_reserve(tm_seed_v *buf, tm_seed_t *q)
@@ -4704,6 +4735,9 @@ void *tm_mtscan_worker(uint32_t tid, tm_mtscan_t *self, tm_mtscan_batch_t *batch
 			debug("v(%p), cnt(%zu)", v, v != NULL ? v->cnt : 0);
 		});
 	}
+
+	/* shrink memory */
+	tm_scan_tidyup(scan);
 	return(batch);
 }
 
