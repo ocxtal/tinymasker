@@ -2413,10 +2413,12 @@ void dz_fill_load_vector(dz_fill_work_t *fw, size_t p)
 static __dz_vectorize
 void dz_fill_update_vector(dz_work_t *w, dz_fill_work_t *fw, __m128i sc)
 {
+	print_vector(_mm_alignr_epi8(fw->s, fw->ps, 14));
+	print_vector(sc);
+
 	/* E[i, j] = max{ E[i - 1, j], S[i - 1, j] - Gi } - Ge */
 	__m128i const tte = _mm_max_epu16(fw->e, _mm_subs_epu16(fw->s, w->div));
 	__m128i const te  = _mm_subs_epu16(tte, w->dev);
-	/* print_vector(_mm_alignr_epi8(s, ps, 14)); print_vector(sc); */
 
 	/* U[i, j] = max{ E[i, j], S[i - 1, j - 1] + sc(i, j) } */
 	__m128i const tts = _mm_adds_epu16(sc, _mm_alignr_epi8(fw->s, fw->ps, 14));
@@ -2424,6 +2426,13 @@ void dz_fill_update_vector(dz_work_t *w, dz_fill_work_t *fw, __m128i sc)
 	fw->ps = fw->s;
 
 	/* fold F[i, j] = max{ U[i, j] - Gi, F[i, j - 1] - Ge } */
+	#if 0
+	__m128i const uf = _mm_subs_epu16(_mm_alignr_epi8(ts, fw->s, 14), w->iiv);
+	__m128i tf = _mm_subs_epu16(_mm_max_epu16(uf, _mm_srli_si128(fw->f, 14)), w->iev1);
+	tf = _mm_max_epu16(tf, _mm_subs_epu16(_mm_slli_si128(tf, 2), w->iev1));
+	tf = _mm_max_epu16(tf, _mm_subs_epu16(_mm_slli_si128(tf, 4), w->iev2));
+	tf = _mm_max_epu16(tf, _mm_subs_epu16(_mm_slli_si128(tf, 8), w->iev4));
+	#else
 	__m128i tf = _mm_max_epu16(
 		_mm_subs_epu16(ts, w->iiv),
 		_mm_subs_epu16(_mm_srli_si128(fw->f, 14), w->iev1)
@@ -2431,6 +2440,7 @@ void dz_fill_update_vector(dz_work_t *w, dz_fill_work_t *fw, __m128i sc)
 	tf = _mm_max_epu16(tf, _mm_subs_epu16(_mm_slli_si128(tf, 2), w->iev1));
 	tf = _mm_max_epu16(tf, _mm_subs_epu16(_mm_slli_si128(tf, 4), w->iev2));
 	tf = _mm_max_epu16(tf, _mm_subs_epu16(_mm_slli_si128(tf, 8), w->iev4));
+	#endif
 
 	/* S[i, j] = max{ U[i, j], F[i, j] } */
 	__m128i const us = _mm_max_epu16(ts, tf);
@@ -3267,20 +3277,25 @@ uint64_t dz_trace_eat_ins(dz_trace_work_t *w) {
 	/* skip if score does not match */
 	uint16_t const f = dz_trace_score(DZ_F_MATRIX, w->ccap, w->idx);
 	if(dz_likely(dz_trace_score_raw(w) != f)) { debug("test ins score unmatch, idx(%zu), raw_score(%d), f(%u)", w->idx, dz_rm_ofs(dz_trace_score_raw(w)), f); return(0); }
-	debug("ins, raw_score(%d), f(%u), idx(%zu)", dz_rm_ofs(dz_trace_score_raw(w)), f, w->idx);
+	debug("ins, raw_score(%d), f(%u), idx(%zu)", dz_rm_ofs(dz_trace_score_raw(w)), dz_rm_ofs(f), w->idx);
 
-	while(!dz_trace_test_idx(w, w->ccap, 2)) {		/* do not move to F matrix when gap longer than 2 is not possible */
+	/* go vertical at least once; unwind row to test the next condition */
+	dz_trace_unwind_v(w, DZ_F_MATRIX);
+
+	/* back to S matrix if there is no room for vertical gap */
+	while(!dz_trace_test_idx(w, w->ccap, 1)) {
 		uint16_t const x = dz_trace_score(DZ_F_MATRIX, w->ccap, w->idx - 1);
-		debug("ins, raw_score(%d), x(%u), ie(%u), idx(%zu)", dz_rm_ofs(dz_trace_score_raw(w)), x, w->ie, w->idx);
+		debug("ins, raw_score(%d), x(%u), ie(%u), idx(%zu)", dz_rm_ofs(dz_trace_score_raw(w)), dz_rm_ofs(x), w->ie, w->idx);
+
 		if(dz_trace_score_raw(w) != x - w->ie) { break; }
 
-		dz_trace_push_op(w, DZ_F_MATRIX, x);
-		dz_trace_unwind_v(w, DZ_F_MATRIX);
+		/* test passed; we can go once more */
+		dz_trace_push_op(w, DZ_F_MATRIX, x);		/* push op for the current row */
+		dz_trace_unwind_v(w, DZ_F_MATRIX);			/* load the next row */
 	}
 
-	/* eat last column */
-	dz_trace_push_op(w, DZ_F_MATRIX, dz_trace_score(DZ_S_MATRIX, w->ccap, w->idx - 1));
-	dz_trace_unwind_v(w, DZ_S_MATRIX);
+	/* push op for the last column */
+	dz_trace_push_op(w, DZ_F_MATRIX, dz_trace_score(DZ_S_MATRIX, w->ccap, w->idx));
 	return(1);
 }
 
@@ -3291,12 +3306,12 @@ uint64_t dz_trace_eat_del(dz_trace_work_t *w) {
 	/* skip if score does not match */
 	uint16_t const e = dz_trace_score(DZ_E_MATRIX, w->ccap, w->idx);
 	if(dz_likely(dz_trace_score_raw(w) != e)) { debug("test del score unmatch, idx(%zu), raw_score(%d), e(%u)", w->idx, dz_rm_ofs(dz_trace_score_raw(w)), e); return(0); }
-	debug("del, raw_score(%d), f(%u)", dz_rm_ofs(dz_trace_score_raw(w)), e);
+	debug("del, raw_score(%d), e(%u)", dz_rm_ofs(dz_trace_score_raw(w)), dz_rm_ofs(e));
 
 	do {
 		uint16_t const x = dz_trace_score(DZ_E_MATRIX, w->pcap, w->idx);
+		debug("del, adj_score(%d), x(%u), de(%u)", dz_rm_ofs(dz_trace_score_adj(w)), dz_rm_ofs(x), w->de);
 		if(dz_trace_score_adj(w) != x - w->de) { break; }
-		debug("del, adj_score(%d), x(%u), de(%u)", dz_rm_ofs(dz_trace_score_adj(w)), x, w->de);
 
 		dz_trace_push_op(w, DZ_E_MATRIX, x);
 		dz_trace_unwind_h(w, DZ_E_MATRIX);
