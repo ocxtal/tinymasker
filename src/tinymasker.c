@@ -3681,6 +3681,7 @@ uint64_t tm_extend_mark_pos(tm_scan_t *self, uint32_t dir, tm_pair_t spos)
 
 	/* not duplicated; put current pos */
 	bin->untouched = 0ULL;
+	// rh_put_dedup(&self->extend.pos, h, 0ULL);
 	debug("found new bin(%p)", bin);
 	return(0);
 }
@@ -3844,11 +3845,11 @@ void tm_extend_push_bin(tm_scan_t *self, tm_aln_t const *aln)
 		rbt_iter_t it;
 		rbt_init_iter_match_aln(&it, v, aln);
 
-		tm_aln_t const *p = rbt_fetch_head_match_aln(&it, v, aln);
-		while(p != NULL) {
+		tm_aln_t const *q = rbt_fetch_head_match_aln(&it, v, aln);
+		while(q != NULL) {
 			/* compare end pos, return iterator if matched */
-			uint64_t const y = _loadu_u64(&p->pos);
-			if(x == y && p->dir == aln->dir) { debug("found"); break; }
+			uint64_t const y = _loadu_u64(&q->pos);
+			if(x == y && q->dir == aln->dir) { debug("found"); break; }
 		}
 		rbt_patch_match_aln(&it, v);
 
