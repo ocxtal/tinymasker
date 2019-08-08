@@ -4416,7 +4416,8 @@ void tm_print_cigar_forward(tm_print_t *self, uint8_t const *path, size_t len)
 			_print_v16i8(eq);
 
 			uint64_t const mask = ((v16_masku_t){ .mask = _mask_v16i8(eq) }).all;
-			ZCNT_RESULT size_t cnt = _tzc_u64(~mask);
+			ZCNT_RESULT size_t raw = _tzc_u64(~mask);
+			size_t const cnt = MIN2(raw, (size_t)(t - q));
 			debug("cnt(%zu)", cnt);
 
 			q += cnt;
@@ -4453,7 +4454,8 @@ void tm_print_cigar_reverse(tm_print_t *self, uint8_t const *path, size_t len)
 
 			uint64_t const mask = ((v16_masku_t){ .mask = _mask_v16i8(eq) }).all;
 			uint64_t const shifted = mask<<48;
-			ZCNT_RESULT size_t cnt = _lzc_u64(~shifted);
+			ZCNT_RESULT size_t raw = _lzc_u64(~shifted);
+			size_t const cnt = MIN2(raw, (size_t)(q - t));
 			debug("cnt(%zu)", cnt);
 
 			q -= cnt;
