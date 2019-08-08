@@ -1476,7 +1476,7 @@ uint64_t tm_idx_finalize_profile(tm_idx_profile_t *profile)
 		.ctx = NULL,
 		.fp = tm_idx_malloc
 	};
-	dz_score_conf_t conf = {
+	dz_score_conf_t const conf = {
 		.score_matrix = profile->extend.score_matrix,
 		.ins_open   = profile->extend.giv,
 		.ins_extend = profile->extend.gev,
@@ -1488,6 +1488,8 @@ uint64_t tm_idx_finalize_profile(tm_idx_profile_t *profile)
 		.max_del_len = profile->extend.hlim,
 		.full_length_bonus = profile->extend.bonus
 	};
+	fprintf(stderr, "(%u, %u, %u, %u)\n", profile->extend.giv, profile->extend.gev, profile->extend.gih, profile->extend.geh);
+
 	profile->extend.dz = dz_init_profile(&alloc, &conf);
 	return(0);
 }
@@ -3505,8 +3507,30 @@ int64_t tm_filter_extend(tm_filter_work_t *w, tm_idx_profile_t const *profile, u
 	return(fw + rv >= profile->filter.min_score);
 }
 
+#if 1
 static _force_inline
-v2i32_t tm_filter_calc_epos(tm_chain_raw_t const *p)
+v2i32_t tm_filter_calc_pos(tm_chain_raw_t const *p)
+{
+	/* load */
+	v2i32_t const spos = _loadu_v2i32(&p->rpos);
+	v2i32_t const span = _loadu_v2i32(&p->rspan);
+
+	/* create mask: (0, dir ? -1 : 0) */
+	v2i32_t const thresh = _seta_v2i32(0x3fffffff, 0xffff);
+	v2i32_t const mask   = _gt_v2i32(spos, thresh);
+
+	/* (qpos, rpos) for forward, (qpos, rpos + rspan) for reverse */
+	v2i32_t const epos = _add_v2i32(spos, _and_v2i32(mask, span));
+
+	_print_v2i32x(spos);
+	_print_v2i32x(span);
+	_print_v2i32x(mask);
+	_print_v2i32x(epos);
+	return(epos);
+}
+#else
+static _force_inline
+v2i32_t tm_filter_calc_pos(tm_chain_raw_t const *p)
 {
 	/* load */
 	v2i32_t const spos = _loadu_v2i32(&p->rpos);
@@ -3525,6 +3549,7 @@ v2i32_t tm_filter_calc_epos(tm_chain_raw_t const *p)
 	_print_v2i32x(epos);
 	return(epos);
 }
+#endif
 
 static _force_inline
 size_t tm_filter_save_chain(uint32_t rid, tm_chain_t *q, tm_chain_raw_t const *p)
@@ -3535,7 +3560,7 @@ size_t tm_filter_save_chain(uint32_t rid, tm_chain_t *q, tm_chain_raw_t const *p
 	ZCNT_RESULT size_t weight = _lzc_u32(p->rspan);
 
 	/* adjust span to obtain end position */
-	v2i32_t const v = tm_filter_calc_epos(p);
+	v2i32_t const v = tm_filter_calc_pos(p);
 	_storeu_v2i32(q, v);
 
 	q->attr.sep.rid    = rid;		/* overwrite */
@@ -3747,6 +3772,7 @@ uint64_t tm_extend_test_range(tm_chain_t const *c, tm_aln_t const *p)
 static _force_inline
 uint64_t tm_extend_is_covered(tm_scan_t *self, tm_chain_t const *c)
 {
+	return(0);			/* FIXME: removed */
 	debug("%r", tm_chain_to_str, c);
 
 	/* for each overlapping alignment */
@@ -4169,7 +4195,17 @@ tm_pair_t tm_calc_max_wrap(dz_state_t const *r, uint32_t rdir, tm_pair_t rpos)
 	});
 }
 
+#if 1
+static _force_inline
+tm_pair_t tm_extend_load_pos(tm_scan_t const *self, tm_idx_profile_t const *pf, tm_chain_t const *c)
+{
+	_unused(self);
+	_unused(pf);
 
+	tm_pair_t const epos = tm_chain_pos(c);
+	return(epos);
+}
+#else
 static _force_inline
 tm_pair_t tm_extend_load_pos(tm_scan_t const *self, tm_idx_profile_t const *pf, tm_chain_t const *c)
 {
@@ -4183,6 +4219,7 @@ tm_pair_t tm_extend_load_pos(tm_scan_t const *self, tm_idx_profile_t const *pf, 
 		.q = epos.q -  kadj
 	});
 }
+#endif
 
 static _force_inline
 tm_pair_t tm_extend_first(tm_scan_t *self, tm_idx_profile_t const *pf, tm_idx_sketch_t const *sk, uint8_t const *query, size_t qlen, uint32_t rdir, tm_pair_t rpos)
@@ -4896,7 +4933,7 @@ static int tm_conf_gap_open(tm_conf_t *conf, char const *arg) {
 	return(0);
 }
 static int tm_conf_gap_extend(tm_conf_t *conf, char const *arg) {
-	conf->fallback.gap_extend = tm_idx_wrap(mm_atoi(arg, 0));		/* positive number expected */
+	conf->fallback.gap_extend = tm_idx_wrap(mm_atoi(arg, 0));	/* positive number expected */
 	return(0);
 }
 static int tm_conf_max_gap(tm_conf_t *conf, char const *arg) {
