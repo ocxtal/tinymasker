@@ -1488,7 +1488,7 @@ uint64_t tm_idx_finalize_profile(tm_idx_profile_t *profile)
 		.max_del_len = profile->extend.hlim,
 		.full_length_bonus = profile->extend.bonus
 	};
-	fprintf(stderr, "(%u, %u, %u, %u)\n", profile->extend.giv, profile->extend.gev, profile->extend.gih, profile->extend.geh);
+	// fprintf(stderr, "(%u, %u, %u, %u)\n", profile->extend.giv, profile->extend.gev, profile->extend.gih, profile->extend.geh);
 
 	profile->extend.dz = dz_init_profile(&alloc, &conf);
 	return(0);
