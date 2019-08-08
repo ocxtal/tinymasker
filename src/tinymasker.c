@@ -4057,7 +4057,7 @@ dz_fill_fetch_t tm_extend_fetch_next(tm_extend_fetcher_t *self, int8_t const *sc
 	if(*self->p == '\0') {
 		return((dz_fill_fetch_t){
 			.is_term = 1,
-			.ch      = 0
+			.rch     = 0
 		});
 	}
 
@@ -4072,7 +4072,7 @@ dz_fill_fetch_t tm_extend_fetch_next(tm_extend_fetcher_t *self, int8_t const *sc
 	self->p += self->inc;
 	return((dz_fill_fetch_t){
 		.is_term = 0,
-		.ch      = e
+		.rch     = e
 	});
 }
 
@@ -4181,14 +4181,14 @@ dz_state_t const *tm_extend_wrap(dz_arena_t *mem, dz_profile_t const *profile, t
 }
 
 static _force_inline
-tm_pair_t tm_calc_max_wrap(dz_state_t const *r, uint32_t rdir, tm_pair_t rpos)
+tm_pair_t tm_calc_max_wrap(dz_query_t const *q, dz_state_t const *r, uint32_t rdir, tm_pair_t rpos)
 {
 	if(r == NULL || r->max.cap == NULL) {
 		return(rpos);
 	}
 
 	/* get downward max */
-	dz_max_pos_t const s = dz_calc_max_pos_core(r);
+	dz_max_pos_t const s = dz_calc_max_pos_core(q, r);
 	return((tm_pair_t){
 		.r = rpos.r + (rdir ? -s.rpos : s.rpos),
 		.q = rpos.q + s.qpos
@@ -4241,9 +4241,9 @@ tm_pair_t tm_extend_first(tm_scan_t *self, tm_idx_profile_t const *pf, tm_idx_sk
 		rdir,				/* reference forward */
 		rpos
 	);
-	tm_pair_t const epos = tm_calc_max_wrap(r, rdir, rpos);
+	tm_pair_t const epos = tm_calc_max_wrap(qr, r, rdir, rpos);
 
-	debug("forward: rpos(%u, %u) --- score(%d) --> epos(%u, %u)", rpos.q, rpos.r, r != NULL ? r->max.score : 0, epos.q, epos.r);
+	debug("forward: rpos(%u, %u) --- score(%d) --> epos(%u, %u)", rpos.q, rpos.r, r != NULL ? r->max.score.abs : 0, epos.q, epos.r);
 	return(epos);
 }
 
@@ -4263,17 +4263,18 @@ dz_alignment_t const *tm_extend_second(tm_scan_t *self, tm_idx_profile_t const *
 		rdir ^ 0x01,		/* reference reverse */
 		epos
 	);
-	debug("reverse: score(%d)", (f != NULL ? f->max.score : -1));
+	debug("reverse: score(%d)", (f != NULL ? f->max.score.abs : -1));
 
 	/* we don't expect f becomes NULL but might happen. score == 0 indicates there is no significant alignment with length > 0 */
-	if(f == NULL || f->max.score == 0) {
+	if(f == NULL || f->max.score.abs == 0) {
 		return(NULL);		/* not promising or something is wrong */
 	}
 
 	/* traceback */
 	dz_alignment_t const *aln = dz_trace_core(self->extend.trace,
-		pf->extend.dz, f,
-		(dz_trace_get_match_t)tm_extend_get_match
+		pf->extend.dz, qf,
+		(dz_trace_get_match_t)tm_extend_get_match,
+		f
 	);
 	debug("reverse: spos(%u, %u) --- score(%d) --> epos(%u, %u), f(%p), aln(%p)", epos.q - aln->query_length, epos.r + (rdir ? aln->ref_length : -aln->ref_length), aln->score, epos.q, epos.r, f, aln);
 	return(aln);
