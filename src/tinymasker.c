@@ -862,8 +862,9 @@ tm_ref_match_t tm_ref_get_arr(tm_ref_state_t s)
 /* index data structure */
 typedef struct {
 	/* fallback parameters */
-	size_t kmer, window, min_scnt;		/* k-mer length and chain window size */
-	uint64_t skip_filter;
+	size_t kmer, window;		/* k-mer length and chain window size */
+	size_t min_scnt;			/* minimum seed count for chain */
+	size_t qspan_thresh;		/* 0 to skip filter */
 
 	/* extension params */
 	uint64_t match, mismatch;
@@ -1219,11 +1220,16 @@ void tm_idx_fill_default(tm_idx_profile_t *profile)
 	size_t const k = 4;
 	profile->kbits = 2 * k;
 
+	/* seeding and chaining */
 	tm_idx_set_kadj(profile, k);
 	profile->chain.window.sep.u = 32;
 	profile->chain.window.sep.v = 32;
 	profile->chain.min_scnt = 4;
 
+	/* filtering */
+	profile->filter.qspan_thresh = UINT32_MAX;	/* will be overridden in tm_idx_calc_filter_thresh */
+
+	/* extension */
 	profile->extend.bonus = 10;
 	profile->extend.min_score = 30;
 	profile->extend.giv = 5;
@@ -1239,6 +1245,8 @@ void tm_idx_fill_default(tm_idx_profile_t *profile)
 static _force_inline
 void tm_idx_override_default(tm_idx_profile_t *profile, tm_idx_conf_t const *conf)
 {
+	/* load values specified by args */
+
 	if(!tm_idx_is_default(conf->kmer)) {
 		size_t const kmer = tm_idx_unwrap(conf->kmer);
 		profile->kbits = 2 * kmer;
@@ -1255,8 +1263,8 @@ void tm_idx_override_default(tm_idx_profile_t *profile, tm_idx_conf_t const *con
 	}
 
 	/* filter */
-	if(conf->skip_filter) {
-		profile->filter.qspan_thresh = UINT32_MAX;
+	if(!tm_idx_is_default(conf->qspan_thresh)) {
+		profile->filter.qspan_thresh = tm_idx_unwrap(conf->qspan_thresh);
 	}
 
 	/* score matrix */
@@ -1378,8 +1386,8 @@ void tm_idx_calc_filter_thresh(tm_idx_profile_t *profile)
 	int32_t const min_score = profile->extend.min_score / 4;
 	profile->filter.min_score = MAX2(0, min_score);
 
-	/* set -1 to disable filter */
-	if(profile->filter.qspan_thresh != UINT32_MAX) {
+	/* overwrite qspan_thresh if the value is the default one */
+	if(profile->filter.qspan_thresh == UINT32_MAX) {
 		uint32_t const qspan_thresh = profile->chain.window.sep.u * 2;
 		profile->filter.qspan_thresh = qspan_thresh;
 	}
@@ -1467,8 +1475,9 @@ uint64_t tm_idx_finalize_profile(tm_idx_profile_t *profile)
 	}
 
 	/* calc squash interval */
-	uint32_t const u = profile->chain.window.sep.u;
-	profile->chain.squash_intv = 0x40000000>>_lzc_u32(u);		/* divide by 2 */
+	uint32_t const u    = profile->chain.window.sep.u;
+	uint32_t const intv = 0x40000000>>_lzc_u32(u);		/* divide by 2 */
+	profile->chain.squash_intv = MAX2(1, intv);			/* load 1 if u == 1 */
 	debug("wu(%u), intv(%u)", u, profile->chain.squash_intv);
 
 	/* instanciate dz */
@@ -4916,9 +4925,8 @@ static int tm_conf_ccnt(tm_conf_t *conf, char const *arg) {
 	conf->fallback.min_scnt = tm_idx_wrap(mm_atoi(arg, 0));
 	return(0);
 }
-static int tm_conf_filter(tm_conf_t *conf, char const *arg) {
-	_unused(arg);
-	conf->fallback.skip_filter = 1;
+static int tm_conf_qspan(tm_conf_t *conf, char const *arg) {
+	conf->fallback.qspan_thresh = tm_idx_wrap(mm_atoi(arg, 0));
 	return(0);
 }
 static int tm_conf_match(tm_conf_t *conf, char const *arg) {
@@ -5060,7 +5068,7 @@ uint64_t tm_conf_init_static(tm_conf_t *conf, char const *const *argv, FILE *fp)
 			['v'] = { OPT_OPT,  _c(tm_conf_verbose) },
 			['h'] = { OPT_BOOL, _c(tm_conf_help) },
 			['t'] = { OPT_REQ,  _c(tm_conf_threads) },
-			['r'] = { OPT_BOOL, _c(tm_conf_flip) },
+			['f'] = { OPT_BOOL, _c(tm_conf_flip) },
 
 			/* preset and configuration file */
 			['x'] = { OPT_REQ,  _c(tm_conf_preset) },
@@ -5070,6 +5078,7 @@ uint64_t tm_conf_init_static(tm_conf_t *conf, char const *const *argv, FILE *fp)
 			['k'] = { OPT_REQ,  _c(tm_conf_kmer) },
 			['w'] = { OPT_REQ,  _c(tm_conf_window) },
 			['c'] = { OPT_REQ,  _c(tm_conf_ccnt) },
+			['S'] = { OPT_REQ,  _c(tm_conf_qspan) },
 			['a'] = { OPT_REQ,  _c(tm_conf_match) },
 			['b'] = { OPT_REQ,  _c(tm_conf_mismatch) },
 			['p'] = { OPT_REQ,  _c(tm_conf_gap_open) },
@@ -5148,11 +5157,12 @@ void tm_conf_print_help(tm_conf_t const *conf, FILE *lfp)
 			"    $ tinymasker -t4 index.tmi contigs.fa\n"
 			"")
 	_msg(2, "General options:");
-	_msg(2, "  -x STR/FILE  load preset params or load config file []");
+	_msg(2, "  -x STR       load preset params for a specific setting []");
+	_msg(3, "  -z STR       load TOML config file []");
 	_msg(2, "  -t INT       number of threads [%zu]", conf->nth);
 	_msg(2, "  -d FILE      dump index to FILE (index construction mode)");
 	_msg(2, "  -v [INT]     show version number or set verbose level (when number passed)");
-	_msg(3, "  -f           flip reference and query in output PAF")
+	_msg(3, "  -f           flip reference and query in output PAF");
 	_msg(2, "");
 	_msg(2, "Indexing options:");
 	_msg(2, "  -c FILE      load profile configurations []");
@@ -5161,6 +5171,7 @@ void tm_conf_print_help(tm_conf_t const *conf, FILE *lfp)
 	_msg(2, "  -k INT       k-mer length [%zu]", conf->fallback.kmer);
 	_msg(2, "  -w INT       chaining window size [%zu]", conf->fallback.window);
 	_msg(3, "  -c INT       minimum seed count for chain [%u]", (uint32_t)conf->fallback.min_scnt);
+	_msg(3, "  -S INT       minimum q-side span for skipping filter [%u]", (uint32_t)conf->fallback.qspan_thresh);
 	_msg(2, "  -a INT       match award [%u]", (uint32_t)conf->fallback.match);
 	_msg(2, "  -b INT       mismatch penalty [%u]", (uint32_t)conf->fallback.mismatch);
 	_msg(2, "  -p INT       gap-open penalty [%u]", (uint32_t)conf->fallback.gap_open);
