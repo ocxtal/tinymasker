@@ -1364,7 +1364,7 @@ void tm_idx_calc_filter_gap(tm_idx_profile_t *profile)
 	_storeu_v16i8(profile->filter.gap, gv);
 
 	debug("ge(%d)", (int8_t)(0 - gi - ge));
-	_print_v16i8(gv);
+	// _print_v16i8(gv);
 	return;
 }
 
@@ -3248,7 +3248,7 @@ v4i32_t tm_chain_compose(v2i32_t spos, v2i32_t epos)
 	v4i32_t const span = (v4i32_t){
 		_mm_mul_epu32(coef.v1, c.v1)			/* 6-; (qspan, -, rspan, -) */
 	};
-	_print_v4i32x(span);
+	// _print_v4i32x(span);
 
 	/* decode pos */
 	v4i32_t const e = _bsr_v4i32(c, 1);			/* 6; (-, -ye, -, -xe) */
@@ -3259,13 +3259,13 @@ v4i32_t tm_chain_compose(v2i32_t spos, v2i32_t epos)
 	v4i32_t const pos = (v4i32_t){
 		_mm_mul_epu32(coef.v1, g.v1)			/* 9-; (qpos, 0, rpos, -) */
 	};
-	_print_v4i32x(pos);
+	// _print_v4i32x(pos);
 
 	/* fold pos and span */
 	v4i32_t const h = (v4i32_t){
 		_mm_shuffle2_epi32(pos.v1, span.v1, 0xdd)		/* 15; (qspan, rspan, qpos, rpos) */
 	};
-	_print_v4i32x(h);
+	// _print_v4i32x(h);
 	return(h);		/* (qspan, rspan, qpos, rpos) */
 }
 
@@ -3335,11 +3335,13 @@ size_t tm_chain_seed(tm_idx_profile_t const *profile, tm_seed_t *seed, size_t sc
 			s->u += chained;		/* mark chained */
 		}
 
+		/*
 		debugblock({
 			if((int32_t)_ext_v2i32(spos, 2) >= 0) {
 				debug("%r ---> %r, cnt(%d)", tm_seed_to_str, p, tm_seed_to_str, s, _ext_v2i32(spos, 2));
 			}
 		});
+		*/
 
 		v2i32_t const epos = (v2i32_t){ .v1 = _mm_cvtsi64_si128(ruv) };
 		if((int32_t)_ext_v2i32(spos, 2) < 0) { continue; }		/* skip if short */
@@ -3512,7 +3514,7 @@ int64_t tm_filter_extend(tm_filter_work_t *w, tm_idx_profile_t const *profile, u
 	/* extend */
 	int64_t const fw = tm_filter_extend_core(w, w->fw);
 	int64_t const rv = tm_filter_extend_core(w, w->rv);
-	debug("fw(%ld), rv(%ld), score(%ld)", fw, rv, fw + rv);
+	// debug("fw(%ld), rv(%ld), score(%ld)", fw, rv, fw + rv);
 	return(fw + rv >= profile->filter.min_score);
 }
 
@@ -3531,10 +3533,10 @@ v2i32_t tm_filter_calc_pos(tm_chain_raw_t const *p)
 	/* (qpos, rpos) for forward, (qpos, rpos + rspan) for reverse */
 	v2i32_t const epos = _add_v2i32(spos, _and_v2i32(mask, span));
 
-	_print_v2i32x(spos);
-	_print_v2i32x(span);
-	_print_v2i32x(mask);
-	_print_v2i32x(epos);
+	// _print_v2i32x(spos);
+	// _print_v2i32x(span);
+	// _print_v2i32x(mask);
+	// _print_v2i32x(epos);
 	return(epos);
 }
 #else
@@ -3563,7 +3565,7 @@ v2i32_t tm_filter_calc_pos(tm_chain_raw_t const *p)
 static _force_inline
 size_t tm_filter_save_chain(uint32_t rid, tm_chain_t *q, tm_chain_raw_t const *p)
 {
-	debug("p(%p), %r", p, tm_chain_raw_to_str, p);
+	// debug("p(%p), %r", p, tm_chain_raw_to_str, p);
 
 	/* calc weight */
 	ZCNT_RESULT size_t weight = _lzc_u32(p->rspan);
@@ -3574,7 +3576,7 @@ size_t tm_filter_save_chain(uint32_t rid, tm_chain_t *q, tm_chain_raw_t const *p
 
 	q->attr.sep.rid    = rid;		/* overwrite */
 	q->attr.sep.weight = weight;	/* negated and offsetted by 32; the larger for the longer chain */
-	debug("q(%p), %r, rid(%u), weight(%u)", q, tm_chain_to_str, q, rid, weight);
+	// debug("q(%p), %r, rid(%u), weight(%u)", q, tm_chain_to_str, q, rid, weight);
 	return(1);
 }
 
@@ -3592,10 +3594,10 @@ size_t tm_filter_chain(tm_idx_sketch_t const *si, tm_idx_profile_t const *profil
 	tm_filter_work_t w __attribute__(( aligned(32) ));
 	tm_filter_work_init(&w, profile);
 
-	debug("min_score(%d), qspan_thresh(%u), rid(%u)", profile->filter.min_score, profile->filter.qspan_thresh, rid);
+	// debug("min_score(%d), qspan_thresh(%u), rid(%u)", profile->filter.min_score, profile->filter.qspan_thresh, rid);
 	for(size_t i = 0; i < ccnt; i++) {
 		tm_chain_raw_t const *p = &src[i];
-		debug("i(%zu), ccnt(%zu), %r", i, ccnt, tm_chain_raw_to_str, p);
+		// debug("i(%zu), ccnt(%zu), %r", i, ccnt, tm_chain_raw_to_str, p);
 
 		/* try short extension if not heavy enough */
 		if(!tm_filter_extend(&w, profile, ref, query, p)) { continue; }
@@ -3603,7 +3605,7 @@ size_t tm_filter_chain(tm_idx_sketch_t const *si, tm_idx_profile_t const *profil
 		/* copy and fold in reference id */
 		dst += tm_filter_save_chain(rid, dst, p);
 	}
-	debug("cfilt(%zu)", dst - chain);
+	// debug("cfilt(%zu)", dst - chain);
 	return(dst - chain);
 }
 
@@ -3628,11 +3630,12 @@ size_t tm_seed_and_sort(tm_idx_sketch_t const *si, tm_idx_profile_t const *profi
 
 	radix_sort_seed(sptr, scnt);
 
+	/*
 	debug("scnt(%zu)", scnt);
 	for(size_t i = 0; i < scnt; i++) {
 		debug("i(%zu), %r", i, tm_seed_to_str, &sptr[i]);
 	}
-
+	*/
 	return(scnt);
 }
 
@@ -3643,7 +3646,7 @@ size_t tm_chain_and_filter(tm_idx_sketch_t const *si, tm_idx_profile_t const *pr
 	size_t const cbase = kv_cnt(*chain);		/* save chain count */
 	size_t const ccnt  = tm_chain_seed(profile, seed, scnt, chain);
 	if(ccnt == 0) { return(0); }
-	debug("cbase(%zu), ccnt(%zu)", cbase, ccnt);
+	// debug("cbase(%zu), ccnt(%zu)", cbase, ccnt);
 
 	/* filter (try small extension with simple score matrix) */
 	size_t const cfilt = tm_filter_chain(si, profile, query, &kv_ptr(*chain)[cbase], ccnt);
@@ -4491,19 +4494,19 @@ void tm_print_cigar_reverse(tm_print_t *self, uint8_t const *path, size_t len)
 		uint8_t const *q = p;
 		uint8_t const ch = p[-1];
 		v16i8_t const v = _set_v16i8(ch);
-		_print_v16i8(v);
+		// _print_v16i8(v);
 
 		while(q > t) {
 			v16i8_t const w = _loadu_v16i8(q - 16);
 			v16i8_t const eq = _eq_v16i8(v, w);
-			_print_v16i8(w);
-			_print_v16i8(eq);
+			// _print_v16i8(w);
+			// _print_v16i8(eq);
 
 			uint64_t const mask = ((v16_masku_t){ .mask = _mask_v16i8(eq) }).all;
 			uint64_t const shifted = mask<<48;
 			ZCNT_RESULT size_t raw = _lzc_u64(~shifted);
 			size_t const cnt = MIN2(raw, (size_t)(q - t));
-			debug("cnt(%zu)", cnt);
+			// debug("cnt(%zu)", cnt);
 
 			q -= cnt;
 			if(cnt < 16) { break; }
