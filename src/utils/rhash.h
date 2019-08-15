@@ -133,40 +133,74 @@ _static_assert(sizeof(rh_hdr_t) == 8);
 	static _force_inline \
 	rh_bidx_t rh_reallocate_##_sfx(_bkt_t *a, _key_t k0, _val_t v0, uint64_t mask, uint64_t force_save) { \
 		uint64_t const kmask = mask | ((uint64_t)(((_key_t)RH_MOVED)>>1) + 1); \
-		size_t const min_bin_dist = -(RH_DST_MAX + 2ULL); \
-		size_t max_poll_len = 0, nb = k0 & mask, ni = 0; \
-	_rh_reallocate_next_##_sfx:; \
-		size_t b = nb, i = ni;	/* open next bin */ \
-		uint64_t k1 = (uint64_t)_key(&a[(b + i) & mask]); \
-		while(_unlikely(!_is_empty(_key_t, k1, _msb_mask) && k0 != k1)) { \
-			size_t bc = k1 & kmask; \
-			if(_likely(bc - b <= min_bin_dist)) {		/* if the origin of the polled key is larger than the key to be inserted */ \
-				uint64_t v1 = (uint64_t)_val(&a[(b + i) & mask]); \
-				/* debug("found swappable bin for k(%lx), v(%lx) at i(%lx)", k0, v0, (b + i) & mask); */ \
-				_key(&a[(b + i) & mask]) = (_key_t)k0; \
-				_val(&a[(b + i) & mask]) = (_val_t)v0; \
-				k0 = k1; v0 = v1; \
-				/* update max polled length; skip for to-be-moved key */ \
-				max_poll_len = MAX2(max_poll_len, i); \
-				/* calculate next polling base */ \
-				nb = k0 & mask; ni = (b + i + 1 - nb) & mask; \
-				/* debug("b(%lx), i(%lx), nb(%lx), ni(%lx), test(%lu, %lu, %d)", b, i, nb, ni, nb - b, min_bin_dist, nb - b <= min_bin_dist); */ \
-				/*if(nb - b > min_bin_dist) { ni = 0; }*/	/* if wraparound takes place */ \
-				goto _rh_reallocate_next_##_sfx; \
-			} \
-			i++; k1 = (uint64_t)_key(&a[(b + i) & mask]); \
-		} \
-		 debug("found last bin for k(%lx), v(%lx) at i(%lx); max_poll_len(%lu)", k0, v0, (b + i) & mask, max_poll_len);  \
-		/* save the last key-value pair if the bin is newly allocated one */ \
-		if(force_save | (k0 != k1)) { \
+		size_t const min_bin_dist = -(RH_DST_MAX + 1ULL); \
+		size_t max_poll_len = 0; \
+		/* nb: base index; ni: offset from base index */ \
+		size_t nb = k0 & mask, ni = 0; \
+		/* initialize working variables */ \
+		size_t b = nb, i = ni - 1; \
+		debug("find bin for k(%lx), v(%lx), start from b(%lx)", k0, v0, b); \
+		uint64_t k1; \
+		do { \
+			i++; \
+			k1 = (uint64_t)_key(&a[(b + i) & mask]); \
+			debug("test k1(%lx) at i(%lx)", k1, (b + i) & mask); \
+			if(_unlikely(_is_empty(_key_t, k1, _msb_mask))) { goto _rh_reallodate_found_new; } \
+			if(_unlikely(k0 == k1)) { goto _rh_reallocate_found_replace; } \
+			/* if the origin of the polled key is larger than the key to be inserted */ \
+		} while(b - (k1 & kmask) < min_bin_dist); \
+		/* save bin location */ \
+		size_t idx = (b + i) & mask; \
+		do { \
+			uint64_t v1 = (uint64_t)_val(&a[(b + i) & mask]); \
+			debug("found swappable bin for k(%lx), v(%lx) at i(%lx), pushed out k(%lx), v(%lx)", k0, v0, (b + i) & mask, k1, v1); \
 			_key(&a[(b + i) & mask]) = (_key_t)k0; \
 			_val(&a[(b + i) & mask]) = (_val_t)v0; \
+			k0 = k1; v0 = v1; \
+			/* update max polled length; skip for to-be-moved key */ \
+			max_poll_len = MAX2(max_poll_len, i); \
+			/* calculate next polling base */ \
+			nb = k0 & mask; \
+			ni = (b + i + 1 - nb) & mask; \
+			/* reset working variables */ \
+			b = nb; \
+			i = ni - 1; \
+			/* load the next key */ \
+			do { \
+				i++; \
+				k1 = (uint64_t)_key(&a[(b + i) & mask]); \
+				debug("test k1(%lx) at i(%lx)", k1, (b + i) & mask); \
+				if(_unlikely(_is_empty(_key_t, k1, _msb_mask))) { goto _rh_reallodate_found_tail; } \
+				if(_unlikely(k0 == k1)) { goto _rh_reallocate_found_replace; } \
+			} while(b - (k1 & kmask) < min_bin_dist); \
+		} while(1); \
+	_rh_reallodate_found_new:; { \
+			idx = (b + i) & mask; \
+		_rh_reallodate_found_tail:; \
+			debug("found last bin for k(%lx), v(%lx) at i(%lx); idx(%lx), max_poll_len(%lu), save(%u)", k0, v0, (b + i) & mask, idx, MAX2(max_poll_len, i), force_save | (k0 != k1)); \
+			/* save the last key-value pair if the bin is newly allocated one */ \
+			_key(&a[(b + i) & mask]) = (_key_t)k0; \
+			_val(&a[(b + i) & mask]) = (_val_t)v0; \
+			return((rh_bidx_t){ \
+				.idx = idx, \
+				.cnt = 1, \
+				.poll_len = MAX2(max_poll_len, i)	/* max polled length */ \
+			}); \
 		} \
-		return((rh_bidx_t){ \
-			.idx = (b + i) & mask, \
-			.cnt = k0 != k1, \
-			.poll_len = MAX2(max_poll_len, i)	/* max polled length */ \
-		}); \
+	_rh_reallocate_found_replace:; { \
+			debug("found replacable bin for k(%lx), v(%lx) at i(%lx); max_poll_len(%lu), save(%u)", k0, v0, (b + i) & mask, MAX2(max_poll_len, i), force_save | (k0 != k1)); \
+			/* b and i correspond to key when jumped here */ \
+			size_t const nidx = (b + i) & mask; \
+			if(force_save) { \
+				_key(&a[nidx]) = (_key_t)k0; \
+				_val(&a[nidx]) = (_val_t)v0; \
+			} \
+			return((rh_bidx_t){ \
+				.idx = nidx, \
+				.cnt = 0, \
+				.poll_len = MAX2(max_poll_len, i) \
+			}); \
+		} \
 	} \
 	static _force_inline \
 	void rh_extend_##_sfx(rh_##_sfx##_t *h) { \
