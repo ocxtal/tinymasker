@@ -35,6 +35,12 @@
 #define DZ_FULL_LENGTH_BONUS	( 1 )
 #include "dozeu.h"
 
+#undef _DEBUG_H_INCLUDED
+#undef NDEBUG_PRINT
+#define DEBUG_PRINT
+#include "utils/debug.h"
+
+
 
 /* toml parser and regex */
 #include "toml.h"
@@ -2827,7 +2833,13 @@ typedef struct {
 /* alignment dedup hash; we put alignment end position in this bin */
 typedef struct {
 	uint64_t key;
-	uint64_t untouched;
+	union {
+		struct {
+			uint32_t untouched;
+			uint32_t rid;			/* record reference-side id */
+		} s;
+		uint64_t val;
+	} u;
 } tm_dedup_t;
 
 enum tm_dedup_state_e {
@@ -2837,7 +2849,7 @@ enum tm_dedup_state_e {
 };
 
 #define tm_dedup_key(_p)				(_p)->key
-#define tm_dedup_val(_p)				(_p)->untouched
+#define tm_dedup_val(_p)				(_p)->u.val
 #define MM_HASH_INIT_VAL				( RH_INIT_VAL )
 RH_INIT(dedup, tm_dedup_t,
 	uint64_t, tm_dedup_key,
@@ -3721,32 +3733,33 @@ tm_aln_t tm_chain_as_aln(tm_chain_t const *c)
 
 /* start position hash */
 static _force_inline
-uint64_t tm_extend_hash_pos(uint32_t dir, tm_pair_t spos)
+uint64_t tm_extend_hash_pos(uint32_t rid, uint32_t dir, tm_pair_t spos)
 {
 	uint64_t const x = _loadu_u64(&spos);	/* r in lower 32bit, q in upper 32bit */
-	uint64_t const y = dir;					/* only the lowest bit matters */
+	uint64_t const y = (rid<<1) + dir;		/* only the lowest bit matters for dir */
 	uint64_t const magic = 0xf324a24a1111ULL;
 
 	return((0x10001001 * x) ^ x ^ (x>>31) ^ (x>>18) ^ (magic * y));
 }
 
 static _force_inline
-uint64_t tm_extend_mark_pos(tm_scan_t *self, uint32_t dir, tm_pair_t spos)
+uint64_t tm_extend_mark_pos(tm_scan_t *self, uint32_t rid, uint32_t dir, tm_pair_t spos)
 {
 	/* duplicated if state is not zero */
-	uint64_t const h = tm_extend_hash_pos(dir, spos);
+	uint64_t const h = tm_extend_hash_pos(rid, dir, spos);
 	tm_dedup_t *bin = rh_put_ptr_dedup(&self->extend.pos, h);
 
 	/* we don't expect bin be NULL but sometimes happen, or already evaluated (we don't mind the last state) */
-	if(bin == NULL || bin->untouched == 0ULL) {
-		debug("already evaluated, bin(%p)", bin);
+	if(bin == NULL || bin->u.s.untouched == 0ULL) {
+		debug("already evaluated, bin(%p), untouched(%u), rid(%u, %u), h(%lx, %lx)", bin, bin->u.s.untouched, bin->u.s.rid, rid, bin->key, h);
 		return(1);
 	}
 
 	/* not duplicated; put current pos */
-	bin->untouched = 0ULL;
+	bin->u.s.untouched = 0ULL;
+	bin->u.s.rid       = rid;
 	// rh_put_dedup(&self->extend.pos, h, 0ULL);
-	debug("found new bin(%p)", bin);
+	debug("found new bin(%p), h(%lx)", bin, h);
 	return(0);
 }
 
@@ -3915,6 +3928,8 @@ void tm_extend_push_bin(tm_scan_t *self, tm_aln_t const *aln)
 			/* compare end pos, return iterator if matched */
 			uint64_t const y = _loadu_u64(&q->pos);
 			if(x == y && q->dir == aln->dir) { debug("found"); break; }
+
+			q = rbt_fetch_next_match_aln(&it, v, aln);
 		}
 		rbt_patch_match_aln(&it, v);
 
@@ -4310,7 +4325,7 @@ tm_extend_res_t tm_extend_core(tm_scan_t *self, tm_idx_profile_t const *pf, tm_i
 
 	/* reference forward */
 	tm_pair_t const epos = tm_extend_first(self, pf, sk, query, qlen, rdir, rpos);
-	if(tm_extend_mark_pos(self, rdir, epos)) {
+	if(tm_extend_mark_pos(self, tm_idx_ref_rid(sk), rdir, epos)) {
 		return(failed);			/* it seems the tail position is already evaluated */
 	}
 
@@ -4353,7 +4368,7 @@ size_t tm_extend_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *query,
 		// tm_aln_t const caln = tm_chain_as_aln(q);
 		tm_idx_sketch_t const *s  = sk[q->attr.sep.rid];
 		tm_idx_profile_t const *p = pf[s->h.pid];
-		debug("%r, rid(%u), pid(%u)", tm_chain_to_str, q, q->attr.sep.rid, s->h.pid);
+		debug("%r, rid(%u), pid(%u), rname(%s)", tm_chain_to_str, q, q->attr.sep.rid, tm_idx_ref_pid(s), tm_idx_ref_name_ptr(s));
 
 		/* extend */
 		dz_freeze_t const *fz = dz_arena_freeze(self->extend.trace);
