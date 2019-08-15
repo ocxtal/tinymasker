@@ -35,12 +35,6 @@
 #define DZ_FULL_LENGTH_BONUS	( 1 )
 #include "dozeu.h"
 
-#undef _DEBUG_H_INCLUDED
-#undef NDEBUG_PRINT
-#define DEBUG_PRINT
-#include "utils/debug.h"
-
-
 
 /* toml parser and regex */
 #include "toml.h"
