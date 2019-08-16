@@ -5179,7 +5179,8 @@ void tm_conf_print_help(tm_conf_t const *conf, FILE *lfp)
 	_msg(2, "Indexing options:");
 	_msg(2, "  -c FILE      load profile configurations []");
 	_msg(2, "");
-	_msg(2, "Indexing and mapping fallbacks (default params):");
+	_msg(2, "Indexing and mapping fallbacks:");
+	_msg(2, "  NOTE: ignored for prebuilt indices; only applicable when index is built");
 	_msg(2, "  -k INT       k-mer length [%zu]", conf->fallback.kmer);
 	_msg(2, "  -w INT       chaining window size [%zu]", conf->fallback.window);
 	_msg(3, "  -c INT       minimum seed count for chain [%u]", (uint32_t)conf->fallback.min_scnt);
@@ -5198,6 +5199,19 @@ void tm_conf_print_help(tm_conf_t const *conf, FILE *lfp)
 
 	return;
 }
+
+/* return 1 if overridden */
+static _force_inline
+uint64_t tm_conf_is_overridden(tm_conf_t *conf)
+{
+	/* we assume all element is sized 64bit */
+	uint64_t *q = (uint64_t *)&conf->fallback;
+	for(size_t i = 0; i < sizeof(tm_idx_conf_t) / sizeof(uint64_t); i++) {
+		if(!tm_idx_is_default(q[i])) { return(1); }
+	}
+	return(0);
+}
+
 
 
 /* index construction */
@@ -5311,26 +5325,26 @@ int main_scan_error(tm_conf_t *conf, int error_code, char const *file)
 typedef struct {
 	/* always available */
 	tm_conf_t *conf;
-	size_t fcnt;					/* fetched count */
+	size_t fcnt;				/* fetched count */
 
 	pt_t *pt;
 	tm_print_t *printer;
 
-	char const *ref;				/* reference filename */
-	char const *const *query;		/* query filename */
+	char const *ref;			/* reference filename */
+	char const *const *query;	/* query filename */
 	size_t qcnt;
 
 
 	/* for prebuilt index */
-	FILE *fp;				/* != NULL if prebuilt index is available */
+	FILE *prebuilt;				/* != NULL if prebuilt index is available */
 	pg_t pg;
 } main_scan_tbuf_t;
 
 static _force_inline
 int main_scan_tbuf_destroy_static(main_scan_tbuf_t *w)
 {
-	if(w->fp != NULL) {
-		fclose(w->fp);
+	if(w->prebuilt != NULL) {
+		fclose(w->prebuilt);
 		pg_destroy_static(&w->pg);
 	}
 	return(0);
@@ -5359,10 +5373,12 @@ int main_scan_tbuf_init_static(main_scan_tbuf_t *w, tm_conf_t *conf, char const 
 	}
 
 	/* open; if fails, it would be invalid path or permission */
-	if((w->fp = fopen(parg[0], "rb")) == NULL) {
+	if((w->prebuilt = fopen(parg[0], "rb")) == NULL) {
 		return(main_scan_error(conf, ERROR_OPEN_IDX, parg[0]));
 	}
-	pg_init_static(&w->pg, w->fp, pt);
+
+	/* done; create threads */
+	pg_init_static(&w->pg, w->prebuilt, pt);
 	return(0);
 }
 
@@ -5420,7 +5436,7 @@ int main_scan_foreach_idx(main_scan_tbuf_t *w)
 	while(1) {
 		tm_idx_t *mi = NULL;
 
-		int fetcher_error_code = (w->fp == NULL
+		int const fetcher_error_code = (w->prebuilt == NULL
 			? main_scan_idx_gen(w, &mi)
 			: main_scan_idx_load(w, &mi)
 		);
@@ -5459,13 +5475,18 @@ int main_scan_intl(tm_conf_t *conf, tm_print_t *printer, pt_t *pt)
 
 	/* instanciate thread-local working buffers */
 	main_scan_tbuf_t w;
-	int init_error_code = main_scan_tbuf_init_static(&w, conf, parg, pcnt, printer, pt);
+	int const init_error_code = main_scan_tbuf_init_static(&w, conf, parg, pcnt, printer, pt);
 	if(init_error_code != 0) {
 		return(init_error_code);
 	}
 
+	/* print warning if conf is overridden */
+	if(w.prebuilt != NULL && tm_conf_is_overridden(conf)) {
+		warn("Indexing and mapping parameters are ignored for prebuilt indices.");
+	}
+
 	/* we consider the first argument as reference */
-	int scan_error_code = main_scan_foreach_idx(&w);
+	int const scan_error_code = main_scan_foreach_idx(&w);
 
 	/* done */
 	main_scan_tbuf_destroy_static(&w);
