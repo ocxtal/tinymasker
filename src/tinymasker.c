@@ -5167,7 +5167,7 @@ void tm_conf_print_help(tm_conf_t const *conf, FILE *lfp)
 			"    $ tinymasker -t4 -d index.tmi repeats.fa\n"
 			"  mask:\n"
 			"    $ tinymasker -t4 index.tmi contigs.fa\n"
-			"")
+			"");
 	_msg(2, "General options:");
 	_msg(2, "  -x STR       load preset params for a specific setting []");
 	_msg(3, "  -z STR       load TOML config file []");
