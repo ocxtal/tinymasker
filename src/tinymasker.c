@@ -2063,7 +2063,7 @@ tm_idx_batch_t *tm_idx_collect(uint32_t tid, tm_idx_gen_t *self, tm_idx_batch_t 
 		*/
 
 		/* get score matrix for this sequence from its name with regex matching */
-		size_t pid = tm_idx_find_profile(self,
+		size_t const pid = tm_idx_find_profile(self,
 			bseq_name(p),    bseq_name_len(p),
 			bseq_comment(p), bseq_comment_len(p)
 		);
@@ -2435,7 +2435,7 @@ size_t tm_idx_dump(tm_idx_t const *mi, void *fp, write_t wfp)
 		.ofs = 0
 	};
 	cmi.profile.arr = tm_idx_dump_profile(&w, &cmi);
-	cmi.sketch.arr = tm_idx_dump_sketch(&w, &cmi);
+	cmi.sketch.arr  = tm_idx_dump_sketch(&w, &cmi);
 
 	/* input seqence names */
 	cmi.filename.ref     = tm_idx_dump_string(&w, cmi.filename.ref);
@@ -2491,7 +2491,7 @@ static _force_inline
 tm_idx_t *tm_idx_load(void *fp, read_t rfp)
 {
 	tm_idx_hdr_t hdr;
-	size_t hdr_size = rfp(fp, &hdr, sizeof(tm_idx_hdr_t));
+	size_t const hdr_size = rfp(fp, &hdr, sizeof(tm_idx_hdr_t));
 	if(hdr_size != sizeof(tm_idx_hdr_t)) {
 		if(hdr_size > 0) { error("failed to read header"); }
 		return(NULL);
@@ -2510,7 +2510,7 @@ tm_idx_t *tm_idx_load(void *fp, read_t rfp)
 
 	/* sanity check */
 	if(bytes != hdr.size) {
-		error("truncated index file. please rebuild the index (%zu, %zu).", bytes, hdr.size);
+		error("truncated index file. please rebuild the index (expected: %zu, got: %zu).", hdr.size, bytes);
 		free(base);
 		return(NULL);
 	}
@@ -5528,7 +5528,7 @@ int main(int argc, char *argv[])
 	}
 
 	/* always print version */
-	tm_conf_outfp_t out = tm_conf_get_outfp(&conf);
+	tm_conf_outfp_t const out = tm_conf_get_outfp(&conf);
 	message(out.fp, "Version: %s (%s), Build: %s", tm_version(), tm_commit(), tm_arch_name());
 
 	/* when -h is passed or no input file is given, print help message */
