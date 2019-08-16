@@ -5451,7 +5451,7 @@ int main_scan_foreach_idx(main_scan_tbuf_t *w)
 		}
 
 		/* do the task; for each query file */
-		int scan_error_code = main_scan_foreach_qfile(w, mt);
+		int const scan_error_code = main_scan_foreach_qfile(w, mt);
 
 		/* done for this index chunk */
 		tm_mtscan_destroy(mt);
@@ -5466,7 +5466,7 @@ static _force_inline
 int main_scan_intl(tm_conf_t *conf, tm_print_t *printer, pt_t *pt)
 {
 	char const *const *parg = (char const *const *)opt_parg(&conf->opt);
-	size_t pcnt = opt_parg_cnt(&conf->opt);
+	size_t const pcnt = opt_parg_cnt(&conf->opt);
 
 	/* error if no argument is given */
 	if(pcnt < 2) {
@@ -5502,7 +5502,7 @@ int main_scan(tm_conf_t *conf, pt_t *pt)
 	tm_print_init_static(&printer, &conf->print, conf->args);
 
 	/* dispatch */
-	int error_code = main_scan_intl(conf, &printer, pt);
+	int const error_code = main_scan_intl(conf, &printer, pt);
 
 	tm_print_destory_static(&printer);
 	return(error_code);
@@ -5518,7 +5518,7 @@ int main_dispatch(tm_conf_t *conf)
 	}
 
 	/* dispatch either index or scan */
-	int error_code = (conf->idxdump ? main_index : main_scan)(conf, pt);
+	int const error_code = (conf->idxdump ? main_index : main_scan)(conf, pt);
 
 	/* done */
 	pt_destroy(pt);
