@@ -940,7 +940,7 @@ typedef struct {
 
 	/* stats */
 	struct {
-		double rlambda;
+		double rlambda;				/* 1 / lambda */
 	} stat;
 
 	/* extension */
@@ -1204,6 +1204,7 @@ tm_idx_matcher_t tm_idx_parse_matcher(char const *pname, toml_table_t const *tab
 }
 
 
+/* K-A stat and related */
 typedef struct {
 	double escore;
 	double lambda;
@@ -4640,15 +4641,12 @@ void tm_extend_count_base_core(size_t *acc, v32i8_t v, uint32_t window)
 	v32i8_t const x = _shl_v32i8(v, 5);
 	v32i8_t const y = _shl_v32i8(v, 4);
 
-	uint64_t const l = ((v32_masku_t){ .mask = _mask_v32i8(x) }).all & ~(uint64_t)window;
+	uint64_t const l = ((v32_masku_t){ .mask = _mask_v32i8(x) }).all & ~(uint64_t)window;	/* vpmovmskb, andnq */
 	uint64_t const h = ((v32_masku_t){ .mask = _mask_v32i8(y) }).all & ~(uint64_t)window;
 
-	size_t const ccnt = _popc_u64(~h & l);		/* andn-popcnt */
+	size_t const ccnt = _popc_u64(~h & l);		/* andnq, popcntq */
 	size_t const gcnt = _popc_u64(h & ~l);
 	size_t const tcnt = _popc_u64(h & l);
-
-	_print_v32i8(v);
-	debug("raw(%x, %x), mask(%x, %x, %x), cnt(%zu, %zu, %zu)", l, h, ~h & l, h & ~l, h & l, ccnt, gcnt, tcnt);
 
 	acc[0] += ccnt;
 	acc[1] += gcnt;
@@ -4668,13 +4666,13 @@ void tm_extend_count_base(size_t *acc, uint8_t const *query, size_t qlen)
 		tm_extend_count_base_core(&acc[1], v, 0);
 	}
 
-	/* accumulate tail */ {
+	/* tail */ {
 		v32i8_t const v = _loadu_v32i8(&query[qpos - 32]);
 		uint32_t const window = 0xffffffff<<(qlen & 0x1f);
 		tm_extend_count_base_core(&acc[1], v, window);
 	}
 
-	/* fixup acnt */
+	/* derive count of 'A' from the others and length */
 	acc[0] = qlen - (acc[1] + acc[2] + acc[3]);
 	return;
 }
