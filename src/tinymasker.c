@@ -4643,16 +4643,12 @@ void tm_extend_count_base_core(size_t *acc, v32i8_t v)
 	uint32_t const l = ((v32_masku_t){ .mask = _mask_v32i8(x) }).all;
 	uint32_t const h = ((v32_masku_t){ .mask = _mask_v32i8(y) }).all;
 
-	uint32_t const cmask = ~h & l;		/* andn */
-	uint32_t const gmask = h & ~l;
-	uint32_t const tmask = h & l;
-
-	ZCNT_RESULT size_t ccnt = _popc_u32(cmask);
-	ZCNT_RESULT size_t gcnt = _popc_u32(gmask);
-	ZCNT_RESULT size_t tcnt = _popc_u32(tmask);
+	size_t const ccnt = _popc_u32(~h & l);		/* andn-popcnt */
+	size_t const gcnt = _popc_u32(h & ~l);
+	size_t const tcnt = _popc_u32(h & l);
 
 	_print_v32i8(v);
-	debug("raw(%x, %x), mask(%x, %x, %x), cnt(%zu, %zu, %zu)", l, h, cmask, gmask, tmask, ccnt, gcnt, tcnt);
+	debug("raw(%x, %x), mask(%x, %x, %x), cnt(%zu, %zu, %zu)", l, h, ~h & l, h & ~l, h & l, ccnt, gcnt, tcnt);
 
 	acc[0] += ccnt;
 	acc[1] += gcnt;
