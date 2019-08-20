@@ -4329,7 +4329,8 @@ uint64_t dz_calc_max_qpos(dz_t *self, dz_forefront_t const *ff)
 
 	dz_state_t const *tail = dz_cstate(ff);
 	dz_meta_t const meta = dz_extract_meta(tail);
-	return(dz_calc_max_qpos_core(meta.query, tail));
+	dz_max_qpos_t const q = dz_calc_max_qpos_core(meta.query, tail);
+	return(q.qpos);
 }
 
 static __dz_vectorize
