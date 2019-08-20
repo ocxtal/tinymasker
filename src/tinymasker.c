@@ -4635,17 +4635,17 @@ tm_extend_res_t tm_extend_core(tm_scan_t *self, tm_idx_profile_t const *pf, tm_i
 
 
 static _force_inline
-void tm_extend_count_base_core(size_t *acc, v32i8_t v)
+void tm_extend_count_base_core(size_t *acc, v32i8_t v, uint32_t window)
 {
 	v32i8_t const x = _shl_v32i8(v, 5);
 	v32i8_t const y = _shl_v32i8(v, 4);
 
-	uint32_t const l = ((v32_masku_t){ .mask = _mask_v32i8(x) }).all;
-	uint32_t const h = ((v32_masku_t){ .mask = _mask_v32i8(y) }).all;
+	uint64_t const l = ((v32_masku_t){ .mask = _mask_v32i8(x) }).all & ~(uint64_t)window;
+	uint64_t const h = ((v32_masku_t){ .mask = _mask_v32i8(y) }).all & ~(uint64_t)window;
 
-	size_t const ccnt = _popc_u32(~h & l);		/* andn-popcnt */
-	size_t const gcnt = _popc_u32(h & ~l);
-	size_t const tcnt = _popc_u32(h & l);
+	size_t const ccnt = _popc_u64(~h & l);		/* andn-popcnt */
+	size_t const gcnt = _popc_u64(h & ~l);
+	size_t const tcnt = _popc_u64(h & l);
 
 	_print_v32i8(v);
 	debug("raw(%x, %x), mask(%x, %x, %x), cnt(%zu, %zu, %zu)", l, h, ~h & l, h & ~l, h & l, ccnt, gcnt, tcnt);
@@ -4665,26 +4665,13 @@ void tm_extend_count_base(size_t *acc, uint8_t const *query, size_t qlen)
 	size_t qpos = 0;
 	while((qpos += 32) < qlen) {
 		v32i8_t const v = _loadu_v32i8(&query[qpos - 32]);
-		tm_extend_count_base_core(&acc[1], v);
+		tm_extend_count_base_core(&acc[1], v, 0);
 	}
 
 	/* accumulate tail */ {
 		v32i8_t const v = _loadu_v32i8(&query[qpos - 32]);
-
-		/* create mask and clear out the tail */
-		static uint8_t const inc[32] __attribute__(( aligned(32) )) = {
-			 -1,  -2,  -3,  -4,  -5,  -6,  -7,  -8,  -9, -10, -11, -12, -13, -14, -15, -16,
-			-17, -18, -19, -20, -21, -22, -23, -24, -25, -26, -27, -28, -29, -30, -31, -32
-		};
-		v32i8_t const iv = _load_v32i8(inc);
-		v32i8_t const rv = _set_v32i8(qlen & 0x1f);		/* remainder length */
-		v32i8_t const sv = _add_v32i8(iv, rv);			/* first <rem> elements are non-negative */
-
-		/* apply mask */
-		v32i8_t const z = _zero_v32i8();
-		v32i8_t const s = _sel_v32i8(sv, z, v);
-
-		tm_extend_count_base_core(&acc[1], s);
+		uint32_t const window = 0xffffffff<<(qlen & 0x1f);
+		tm_extend_count_base_core(&acc[1], v, window);
 	}
 
 	/* fixup acnt */
