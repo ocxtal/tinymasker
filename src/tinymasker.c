@@ -1259,27 +1259,33 @@ double tm_idx_calc_stat_core(double p0, double p1, int8_t const *score_matrix, d
 }
 
 static _force_inline
+double tm_idx_estimate_lambda(double pp, int8_t const *score_matrix)
+{
+	double est = 1.0;
+	double bounds[2] = { 0.0, 2.0 };
+
+	while(bounds[1] - bounds[0] > 0.00001) {
+		double const sum = tm_idx_calc_stat_core(pp, est, score_matrix, tm_idx_calc_stat_lambda);
+		uint64_t const sup = sum > 1.0;
+		bounds[sup] = est;
+		est = (est + bounds[1 - sup]) / 2.0;
+	}
+	return(est);
+}
+
+static _force_inline
 tm_idx_stat_t tm_idx_calc_stat(int8_t const *score_matrix)
 {
 	double const pp = 0.25 * 0.25;
 
-	/* match in positive and mismatch in negative */
-	double l = 1.0, x = 2.0, y = 0.0;
-	while(x - y > 0.0001) {
-		double const sum = tm_idx_calc_stat_core(pp, l, score_matrix, tm_idx_calc_stat_lambda);
-		if(sum > 1.0) {
-			x = l; l = (l + y) / 2.0;
-		} else {
-			y = l; l = (l + x) / 2.0;
-		}
-	}
+	double const lambda   = tm_idx_estimate_lambda(pp, score_matrix);
+	double const identity = tm_idx_calc_stat_core(pp, lambda, score_matrix, tm_idx_calc_stat_id);
 
-	double const id = tm_idx_calc_stat_core(pp, l, score_matrix, tm_idx_calc_stat_id);
 	return((tm_idx_stat_t){
 		.escore = tm_idx_calc_stat_core(pp, 0.0, score_matrix, tm_idx_calc_stat_escore),
-		.lambda = l,
-		.h = tm_idx_calc_stat_core(id, l, score_matrix, tm_idx_calc_stat_h) / 4.0,
-		.identity = id 
+		.lambda = lambda,
+		.h = tm_idx_calc_stat_core(identity, lambda, score_matrix, tm_idx_calc_stat_h) / 4.0,
+		.identity = identity
 	});
 }
 
