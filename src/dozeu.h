@@ -1062,14 +1062,14 @@ typedef struct dz_arena_block_s {
 typedef struct dz_stack_s {
 	dz_arena_block_t *curr;
 	uint8_t *top, *end;
-	uint64_t zero;
+	uint64_t _pad;
 } dz_stack_t;
 
 /* typedef */
 struct dz_arena_s {
 	dz_arena_block_t blk;
 	dz_stack_t stack;
-	uint64_t zero[2];
+	uint64_t _pad[2];
 } /* dz_arena_t */;
 dz_static_assert(sizeof(dz_arena_t) == 64);
 #define dz_arena_stack_rem(_mem)		( (size_t)((_mem)->stack.end - (_mem)->stack.top) )
@@ -1113,28 +1113,11 @@ unittest() {
 
 /* chained stack */
 static __dz_force_inline
-void dz_arena_check_sanity(dz_arena_t const *mem)
-{
-	if((uintptr_t)mem->blk.next > 0x7fffffffffff) { trap(); }
-	if((uintptr_t)mem->blk.size >= 4ULL * 1024 * 1024 * 1024) { trap(); }
-
-	if((uintptr_t)mem->stack.curr > 0x7fffffffffff) { trap(); }
-	if((uintptr_t)mem->stack.top  > 0x7fffffffffff) { trap(); }
-	if((uintptr_t)mem->stack.end  > 0x7fffffffffff) { trap(); }
-	if((uintptr_t)mem->stack.zero != 0ULL) { trap(); }
-
-	if((uintptr_t)mem->zero[0] != 0ULL) { trap(); }
-	if((uintptr_t)mem->zero[1] != 0ULL) { trap(); }
-	return;
-}
-
-static __dz_force_inline
 void dz_arena_flush(dz_arena_t *mem)
 {
 	mem->stack.curr = &mem->blk;
-	mem->stack.top  = (uint8_t *)dz_roundup((uintptr_t)(mem + 1), DZ_MEM_ALIGN_SIZE);
-	mem->stack.end  = (uint8_t *)mem + mem->blk.size - DZ_MEM_MARGIN_SIZE;
-	mem->stack.zero = 0ULL;
+	mem->stack.top = (uint8_t *)dz_roundup((uintptr_t)(mem + 1), DZ_MEM_ALIGN_SIZE);
+	mem->stack.end = (uint8_t *)mem + mem->blk.size - DZ_MEM_MARGIN_SIZE;
 	return;
 }
 
@@ -1151,19 +1134,12 @@ dz_arena_t *dz_arena_init(size_t size)
 	/* init mem object then stack pointers */
 	mem->blk = (dz_arena_block_t){ .next = NULL, .size = size };
 	dz_arena_flush(mem);
-
-	/* clear padding */
-	mem->zero[0] = 0ULL;
-	mem->zero[1] = 0ULL;
 	return(mem);
 }
 
 static __dz_force_inline
 void dz_arena_destroy(dz_arena_t *mem)
 {
-	/* debug */
-	dz_arena_check_sanity(mem);
-
 	dz_arena_block_t *blk = mem->blk.next;
 	debug("cleanup memory chain, blk(%p)", blk);
 	while(blk != NULL) {
@@ -1205,9 +1181,6 @@ uint64_t dz_arena_push_stack(dz_arena_t *mem, size_t size)
 static __dz_force_inline
 void *dz_arena_malloc(dz_arena_t *mem, size_t size)
 {
-	/* debug */
-	dz_arena_check_sanity(mem);
-
 	size = dz_roundup(size, sizeof(__m128i));
 	debug("size(%zu), stack(%p, %p, %zu)", size, mem->stack.top, mem->stack.end, dz_arena_stack_rem(mem));
 
@@ -1223,9 +1196,6 @@ void *dz_arena_malloc(dz_arena_t *mem, size_t size)
 static __dz_force_inline
 uint64_t dz_arena_pop_stack(dz_arena_t *mem)
 {
-	/* debug */
-	dz_arena_check_sanity(mem);
-
 	dz_arena_block_t *p = &mem->blk, *q = NULL;
 	while(p->next != NULL) {
 		q = p;
