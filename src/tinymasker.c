@@ -27,12 +27,17 @@
 #define UNITTEST_UNIQUE_ID		1
 #include "utils/utils.h"		/* include all */
 
+
+#define TM_REF_ALPH_SIZE		( 16 )
+#define TM_QUERY_ALPH_SIZE		( 4 )
+
+
 #define DZ_WRAPPED_API			( 0 )
 #define DZ_CIGAR_OP				0x44494d4d
-#define DZ_REF_MAT_SIZE			( 16 )
-#define DZ_QUERY_MAT_SIZE		( 4 )
+#define DZ_REF_MAT_SIZE			( TM_REF_ALPH_SIZE )
+#define DZ_QUERY_MAT_SIZE		( 2 * TM_QUERY_ALPH_SIZE )	/* with / without bonus */
 #define DZ_TRANSPOSE_MATRIX		( 1 )
-#define DZ_FULL_LENGTH_BONUS	( 1 )
+// #define DZ_FULL_LENGTH_BONUS	( 1 )				/* query-side bonus disabled */
 #include "dozeu.h"
 
 
@@ -92,12 +97,26 @@ enum alphabet_iupac {
 };
 
 /* shifted by 2bits */
-enum alphabet_2bit {
+enum alphabet_query {
 	nA = 0x00,
 	nC = 0x04,
 	nG = 0x08,
 	nT = 0x0c
 };
+
+enum alphabet_reference {
+	tA = 0x00, tT = 0x0f,
+	tC = 0x01, tG = 0x0e,
+
+	tR = 0x02, tY = 0x0d,
+	tS = 0x03,	/* 0x0c */
+	tW = 0x04,	/* 0x0b */
+	tK = 0x05, tM = 0x0a,
+
+	tB = 0x06, tV = 0x09,
+	tD = 0x07, tH = 0x08
+};
+
 
 /* FASTA/Q parser */
 #include "bseq.h"
@@ -217,15 +236,21 @@ static _force_inline
 uint64_t tm_ref_base_to_2bit(uint8_t base)
 {
 	/* convert iupac nucleotide to pair of 2-bit encoded bases */
-	uint64_t const magic = 0x498e4dc399824100;
-	return((magic>>(4 * base)) & 0x0f);
+	// uint64_t const magic = 0x498e4dc399824100;
+	// return((magic>>(4 * base)) & 0x0f);
+
+	uint64_t const magic = 0x32d9c44d8edc9810 * 4ULL;
+	return((magic>>(2 * base) & 0x0f));
 }
 
 static _force_inline
 uint64_t tm_ref_is_ambiguous(uint8_t base)
 {
-	uint64_t const magic = 0x1111111011101000;
-	return((magic>>(4 * base)) & 0x01);
+	// uint64_t const magic = 0x1111111011101000;
+	// return((magic>>(4 * base)) & 0x01);
+
+	uint64_t const magic = 0x0011111111111100 * 4ULL;
+	return((magic>>(2 * base) & 0x01));
 }
 
 static _force_inline
@@ -864,7 +889,7 @@ typedef struct {
 	/* fallback parameters */
 	size_t kmer, window;		/* k-mer length and chain window size */
 	size_t min_scnt;			/* minimum seed count for chain */
-	size_t qspan_thresh;		/* 0 to skip filter */
+	size_t span_thresh;			/* 0 to skip filter */
 
 	/* extension params */
 	uint64_t match, mismatch;
@@ -904,7 +929,7 @@ typedef struct {
 		uint8_t score_matrix[16];	/* match-mismatch score matrix */
 		uint8_t gap[16];			/* gap */
 		uint8_t init[16];			/* p = 0 */
-		uint32_t qspan_thresh;		/* -1 to disable */
+		uint32_t span_thresh;		/* -1 to disable */
 		int32_t min_score;			/* discard if sum of extension scores is smaller than min_score */
 	} filter;
 
@@ -913,12 +938,19 @@ typedef struct {
 		char *name;
 	} meta;
 
+	/* stats */
+	struct {
+		double rlambda;				/* 1 / lambda */
+	} stat;
+
 	/* extension */
 	struct {
 		dz_profile_t *dz;
+
+		/* Smith-Waterman params */
 		int32_t min_score;
-		uint32_t bonus;				/* DZ_FULL_LENGTH_BONUS */
-		uint32_t vlim, hlim;		/* max_ins_len and max_del_len */
+		uint32_t bonus;				/* reference-side bonus; handled manually */
+		uint16_t vlim, hlim;		/* max_ins_len and max_del_len */
 		uint8_t giv, gev, gih, geh;
 		int8_t score_matrix[DZ_QUERY_MAT_SIZE * DZ_REF_MAT_SIZE];
 	} extend;
@@ -1172,13 +1204,134 @@ tm_idx_matcher_t tm_idx_parse_matcher(char const *pname, toml_table_t const *tab
 }
 
 
+/* K-A stat and related */
+typedef struct {
+	double escore;
+	double lambda;
+	double h;
+	double identity;
+} tm_idx_stat_t;
+
+static
+double tm_idx_calc_stat_lambda(double pp, double lambda, double score)
+{
+	return(pp * exp(lambda * score));
+}
+
+static
+double tm_idx_calc_stat_escore(double pp, double unused, double score)
+{
+	_unused(unused);
+	return(pp * score);
+}
+
+static
+double tm_idx_calc_stat_id(double pp, double lambda, double score)
+{
+	return(score > 0.0 ? pp * exp(lambda * score) : 0.0);
+}
+
+static
+double tm_idx_calc_stat_h(double id, double lambda, double score)
+{
+	if(score > 0.0) {
+		return(id * lambda * score);
+	} else {
+		return((1.0 - id) * lambda * score / 3.0);
+	}
+}
+
+static _force_inline
+double tm_idx_calc_stat_core(double p0, double p1, int8_t const *score_matrix, double (*callback)(double, double, double))
+{
+	static uint8_t const ridx[4] = { tA, tC, tG, tT };
+
+	double sum = 0.0;
+	for(size_t q = 0; q < 4; q++) {
+		int8_t const *qrow = &score_matrix[q * DZ_REF_MAT_SIZE];
+
+		for(size_t r = 0; r < 4; r++) {
+			double const score = (double)qrow[ridx[r]];
+			sum += callback(p0, p1, score);
+		}
+	}
+	return(sum);
+}
+
+static _force_inline
+double tm_idx_estimate_lambda(double pp, int8_t const *score_matrix)
+{
+	double est = 1.0;
+	double bounds[2] = { 0.0, 2.0 };
+
+	while(bounds[1] - bounds[0] > 0.00001) {
+		double const sum = tm_idx_calc_stat_core(pp, est, score_matrix, tm_idx_calc_stat_lambda);
+		uint64_t const sup = sum > 1.0;
+		bounds[sup] = est;
+		est = (est + bounds[1 - sup]) / 2.0;
+	}
+	return(est);
+}
+
+static _force_inline
+tm_idx_stat_t tm_idx_calc_stat(int8_t const *score_matrix)
+{
+	double const pp = 0.25 * 0.25;
+
+	double const lambda   = tm_idx_estimate_lambda(pp, score_matrix);
+	double const identity = tm_idx_calc_stat_core(pp, lambda, score_matrix, tm_idx_calc_stat_id);
+
+	return((tm_idx_stat_t){
+		.escore = tm_idx_calc_stat_core(pp, 0.0, score_matrix, tm_idx_calc_stat_escore),
+		.lambda = lambda,
+		.h = tm_idx_calc_stat_core(identity, lambda, score_matrix, tm_idx_calc_stat_h) / 4.0,
+		.identity = identity
+	});
+}
+
+static _force_inline
+void tm_idx_fill_stat(tm_idx_profile_t *profile, int8_t const *score_matrix)
+{
+	_unused(profile);
+
+	tm_idx_stat_t const stat = tm_idx_calc_stat(score_matrix);
+	profile->stat.rlambda = 1.0 / stat.lambda;
+
+	debug("e(%f), lambda(%f), H(%f), id(%f)", stat.escore, stat.lambda, stat.h, stat.identity);
+	return;
+}
+
+
+/* calc matching state between query and reference bases */
+static _force_inline
+uint64_t tm_idx_is_match(size_t qidx, size_t ridx)
+{
+	/* query in 2bit and reference in 4bit */
+	static uint8_t const qconv[TM_QUERY_ALPH_SIZE] = {
+		[nA>>2] = A,
+		[nC>>2] = C,
+		[nG>>2] = G,
+		[nT>>2] = T
+	};
+	static uint8_t const rconv[TM_REF_ALPH_SIZE] = {
+		[tA] = A, [tC] = C, [tG] = G, [tT] = T,
+		[tR] = R, [tY] = Y, [tS] = S, [tS ^ 0x0f] = S,
+		[tK] = K, [tM] = M, [tW] = W, [tW ^ 0x0f] = W,
+		[tB] = B, [tD] = D, [tH] = H, [tV] = V
+	};
+
+	return((qconv[qidx] & rconv[ridx]) != 0);
+}
+
+
 typedef void (*tm_idx_score_foreach_t)(void *opaque, int8_t *p, size_t qidx, size_t ridx);
 
 static _force_inline
 void tm_idx_score_foreach(tm_idx_profile_t *profile, void *opaque, tm_idx_score_foreach_t fp)
 {
-	for(size_t q = 0; q < DZ_QUERY_MAT_SIZE; q++) {
-		for(size_t r = 0; r < DZ_REF_MAT_SIZE; r++) {
+	/* do not touch latter half */
+	for(size_t q = 0; q < TM_QUERY_ALPH_SIZE; q++) {
+		for(size_t r = 0; r < TM_REF_ALPH_SIZE; r++) {
 			fp(opaque, &profile->extend.score_matrix[q * DZ_REF_MAT_SIZE + r], q, r);
 		}
 	}
@@ -1186,22 +1339,44 @@ void tm_idx_score_foreach(tm_idx_profile_t *profile, void *opaque, tm_idx_score_
 }
 
 static
-void tm_idx_fill_score_callback(int64_t *s, int8_t *p, size_t q, size_t r)
+void tm_idx_fill_score_callback(int64_t *s, int8_t *p, size_t qidx, size_t ridx)
 {
-	/* query in 2bit and reference in 4bit */
-	size_t const q4 = (0x8421>>(4 * q)) & 0x0f;
-	*p = s[(q4 & r) == 0];
+	uint64_t const matching = tm_idx_is_match(qidx, ridx);
+	*p = s[1 - matching];
 	return;
 }
 
 static _force_inline
 void tm_idx_fill_score(tm_idx_profile_t *profile, int64_t m, int64_t x)
 {
-	int64_t s[2] = { m, x };
+	int64_t const s[2] = { m, x };
 	tm_idx_score_foreach(profile,
 		(void *)s,
 		(tm_idx_score_foreach_t)tm_idx_fill_score_callback
 	);
+	return;
+}
+
+static _force_inline
+void tm_idx_fill_bonus(tm_idx_profile_t *profile, uint32_t bonus)
+{
+	debug("called");
+
+	v16i8_t const bv = _set_v16i8(bonus);
+
+	/* copy former half to latter */
+	int8_t const *src = profile->extend.score_matrix;
+	int8_t *dst = &profile->extend.score_matrix[TM_QUERY_ALPH_SIZE * TM_REF_ALPH_SIZE];
+
+	for(size_t q = 0; q < TM_QUERY_ALPH_SIZE; q++) {
+		v16i8_t const x = _loadu_v16i8(&src[q * DZ_REF_MAT_SIZE]);
+		v16i8_t const y = _adds_v16i8(x, bv);
+
+		_storeu_v16i8(&dst[q * DZ_REF_MAT_SIZE], y);
+
+		_print_v16i8(x);
+		_print_v16i8(y);
+	}
 	return;
 }
 
@@ -1227,7 +1402,7 @@ void tm_idx_fill_default(tm_idx_profile_t *profile)
 	profile->chain.min_scnt = 4;
 
 	/* filtering */
-	profile->filter.qspan_thresh = UINT32_MAX;	/* will be overridden in tm_idx_calc_filter_thresh */
+	profile->filter.span_thresh = UINT32_MAX;	/* will be overridden in tm_idx_calc_filter_thresh */
 
 	/* extension */
 	profile->extend.bonus = 10;
@@ -1263,8 +1438,8 @@ void tm_idx_override_default(tm_idx_profile_t *profile, tm_idx_conf_t const *con
 	}
 
 	/* filter */
-	if(!tm_idx_is_default(conf->qspan_thresh)) {
-		profile->filter.qspan_thresh = tm_idx_unwrap(conf->qspan_thresh);
+	if(!tm_idx_is_default(conf->span_thresh)) {
+		profile->filter.span_thresh = tm_idx_unwrap(conf->span_thresh);
 	}
 
 	/* score matrix */
@@ -1288,7 +1463,7 @@ void tm_idx_override_default(tm_idx_profile_t *profile, tm_idx_conf_t const *con
 		profile->extend.hlim = tm_idx_unwrap(conf->max_gap_len);
 	}
 
-	/* anchoring bonus */
+	/* anchoring bonus; score matrix refilled afterward */
 	if(!tm_idx_is_default(conf->full_length_bonus)) {
 		profile->extend.bonus = tm_idx_unwrap(conf->full_length_bonus);
 	}
@@ -1306,10 +1481,10 @@ typedef struct {
 } tm_idx_calc_acc_t;
 
 static
-void tm_idx_acc_filter_score(tm_idx_calc_acc_t *acc, int8_t *p, size_t q, size_t r)
+void tm_idx_acc_filter_score(tm_idx_calc_acc_t *acc, int8_t *p, size_t qidx, size_t ridx)
 {
-	size_t const q4 = (0x8421>>(4 * q)) & 0x0f;
-	tm_idx_calc_acc_t *ptr = &acc[(q4 & r) == 0];
+	uint64_t const matching = tm_idx_is_match(qidx, ridx);
+	tm_idx_calc_acc_t *ptr = &acc[1 - matching];
 
 	int64_t const s = *p;
 	ptr->acc += s;
@@ -1386,10 +1561,10 @@ void tm_idx_calc_filter_thresh(tm_idx_profile_t *profile)
 	int32_t const min_score = profile->extend.min_score / 4;
 	profile->filter.min_score = MAX2(0, min_score);
 
-	/* overwrite qspan_thresh if the value is the default one */
-	if(profile->filter.qspan_thresh == UINT32_MAX) {
-		uint32_t const qspan_thresh = profile->chain.window.sep.u * 2;
-		profile->filter.qspan_thresh = qspan_thresh;
+	/* overwrite span_thresh if the value is the default one */
+	if(profile->filter.span_thresh == UINT32_MAX) {
+		uint32_t const span_thresh = profile->chain.window.sep.u * 2;
+		profile->filter.span_thresh = span_thresh;
 	}
 	return;
 }
@@ -1458,6 +1633,10 @@ uint64_t tm_idx_check_sanity(tm_idx_profile_t const *profile)
 
 		tm_idx_assert(vlim >= 1 && vlim <= 256, "max gap length (-g) must be >= 1 and <= 256.");
 		tm_idx_assert(hlim >= 1 && hlim <= 256, "max gap length (-g) must be >= 1 and <= 256.");
+	}
+
+	/* full-length bonus */ {
+		tm_idx_assert(profile->extend.bonus < 128, "full-length bonus must be smaller than 127.");
 	}
 
 	/* min_score */ {
@@ -1565,6 +1744,10 @@ tm_idx_profile_t *tm_idx_default_profile(tm_idx_conf_t const *conf)
 	/* derive filtering parameters from extension parameters */
 	tm_idx_calc_filter_params(profile);
 
+	/* always refill bonus */
+	tm_idx_fill_bonus(profile, profile->extend.bonus);
+	tm_idx_fill_stat(profile, profile->extend.score_matrix);
+
 	/* instanciate dz */
 	if(tm_idx_finalize_profile(profile)) {
 		free(profile);
@@ -1587,7 +1770,7 @@ typedef struct {
 } tm_idx_parse_t;
 
 typedef struct {
-	uint8_t idx[DZ_REF_MAT_SIZE];
+	uint8_t idx[TM_REF_ALPH_SIZE];
 	uint64_t has_header;
 	size_t qsize, rsize;
 } tm_idx_dim_t;
@@ -1636,7 +1819,7 @@ tm_idx_dim_t tm_idx_parse_header(toml_array_t const *arr, tm_idx_dim_t dim)
 static _force_inline
 size_t tm_idx_determine_rsize(toml_array_t const *arr, tm_idx_dim_t dim)
 {
-	size_t rsize[DZ_QUERY_MAT_SIZE + 1] = { 0 };
+	size_t rsize[TM_QUERY_ALPH_SIZE + 1] = { 0 };
 
 	/* copy lengths */
 	for(size_t i = 0; i < dim.qsize + dim.has_header; i++) {
@@ -1665,11 +1848,11 @@ tm_idx_dim_t tm_idx_fill_idx(toml_array_t const *arr, tm_idx_dim_t dim)
 	if(dim.rsize != 4 || dim.rsize != 16) { return(error); }
 
 	/* prebuilt conversion table */
-	static uint8_t const idx[2][DZ_REF_MAT_SIZE] __attribute__(( aligned(16) )) = {
+	static uint8_t const idx[2][TM_REF_ALPH_SIZE] __attribute__(( aligned(16) )) = {
 		{ 1, 2, 4, 8 },		/* A, C, G, T */
 		{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }	/* id(x) */
 	};
-	memcpy(&dim.idx, &idx[dim.rsize == 16], DZ_REF_MAT_SIZE);
+	memcpy(&dim.idx, &idx[dim.rsize == 16], TM_REF_ALPH_SIZE);
 	return(dim);
 }
 
@@ -1683,11 +1866,11 @@ tm_idx_dim_t tm_idx_parse_dim(toml_array_t const *arr)
 		.rsize = 0
 	};
 
-	if(dim.qsize == DZ_QUERY_MAT_SIZE + 1) {
+	if(dim.qsize == TM_QUERY_ALPH_SIZE + 1) {
 		/* table seems to have header; inspect the header row */
 		return(tm_idx_parse_header(arr, dim));
 
-	} else if(dim.qsize == DZ_QUERY_MAT_SIZE) {
+	} else if(dim.qsize == TM_QUERY_ALPH_SIZE) {
 		/* header missing; we expect the matrix is 4 x 4 or 16 x 4 */
 		return(tm_idx_fill_idx(arr, dim));
 	}
@@ -1700,6 +1883,13 @@ tm_idx_dim_t tm_idx_parse_dim(toml_array_t const *arr)
 static _force_inline
 uint64_t tm_idx_parse_row(tm_idx_profile_t *profile, toml_array_t const *row, size_t qidx, tm_idx_dim_t dim)
 {
+	static uint8_t const conv[16] = {
+		[A] = tA, [C] = tC, [G] = tG, [T] = tT,
+		[R] = tR, [Y] = tY, [S] = tS,
+		[K] = tK, [M] = tM, [W] = tW,
+		[B] = tB, [D] = tD, [H] = tH, [V] = tV
+	};
+
 	for(size_t ridx = 0; ridx < dim.rsize; ridx++) {
 		/* retrieve string at (qidx, ridx) */
 		char const *val = toml_raw_at(row, ridx);
@@ -1709,8 +1899,10 @@ uint64_t tm_idx_parse_row(tm_idx_profile_t *profile, toml_array_t const *row, si
 		if(n == INT64_MIN) { return(1); }
 
 		/* save (others are left -DZ_SCORE_OFS) */
-		profile->extend.score_matrix[qidx * DZ_REF_MAT_SIZE + dim.idx[ridx]] = n;
+		profile->extend.score_matrix[qidx * DZ_REF_MAT_SIZE + conv[dim.idx[ridx]]] = n;
 	}
+
+	/* we need to patch bonus afterward */
 	return(0);
 }
 
@@ -1768,7 +1960,7 @@ static uint64_t tm_idx_set_ccnt(tm_idx_profile_t *profile, char const *str) {
 }
 static uint64_t tm_idx_set_filter(tm_idx_profile_t *profile, char const *str) {
 	if(mm_strcmp(str, "false") == 0) {
-		profile->filter.qspan_thresh = UINT32_MAX;
+		profile->filter.span_thresh = UINT32_MAX;
 	} else if(mm_strcmp(str, "true") != 0) {
 		error("boolean (true or false) expected for enable-filter (%s) in parsing `%s'.", str, profile->meta.name);
 		return(1);
@@ -1864,8 +2056,10 @@ tm_idx_profile_t *tm_idx_parse_table(tm_idx_profile_t const *template, char cons
 		}
 	}
 
-	/* always recalc filtering scores */
+	/* always recalc filtering scores and refill bonus */
 	tm_idx_calc_filter_params(profile);
+	tm_idx_fill_bonus(profile, profile->extend.bonus);
+	tm_idx_fill_stat(profile, profile->extend.score_matrix);
 
 	/* instanciate dz */
 	if(tm_idx_finalize_profile(profile)) {
@@ -2126,7 +2320,29 @@ uint64_t tm_idx_gen_core(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, char cons
 	/* do not keep comment nor qual, do not use head margin */
 	bseq_conf_t const bseq_conf = {
 		.batch_size  = BATCH_SIZE,
-		.head_margin = sizeof(tm_idx_batch_t)
+		.head_margin = sizeof(tm_idx_batch_t),
+
+		/* irregular 4bit encoding for reference */
+		#define _c(x)		( ((x)<<1) | 0x01 )		/* make different from '\0' */
+		.conv_table  = {
+			[A] = _c(tA),
+			[C] = _c(tC),
+			[G] = _c(tG),
+			[T] = _c(tT),
+
+			[R] = _c(tR),
+			[Y] = _c(tY),
+			[S] = _c(tS),	/* 0x0c */
+			[W] = _c(tW),	/* 0x0b */
+			[K] = _c(tK),
+			[M] = _c(tM),
+
+			[B] = _c(tB),
+			[D] = _c(tD),
+			[H] = _c(tH),
+			[V] = _c(tV)
+		}
+		#undef _c
 	};
 	mii->col.fp = bseq_open(&bseq_conf, fn);
 	if(mii->col.fp == NULL) {
@@ -2541,6 +2757,58 @@ tm_pair_t tm_add_pair(tm_pair_t a, tm_pair_t b)
 	});
 }
 
+
+/* position-direction */
+typedef struct {
+	uint16_t r;
+	uint8_t dir, unused;		/* dir == 1 for reverse, 0 for forward */
+	uint32_t q;
+} tm_pos_t;
+
+static _force_inline
+tm_pair_t tm_pos_to_pair(tm_pos_t pos)
+{
+	/* drop dir and unused */
+	return((tm_pair_t){
+		.r = pos.r,
+		.q = pos.q
+	});
+}
+
+static _force_inline
+tm_pos_t tm_add_pos(tm_pos_t a, tm_pair_t b)
+{
+	return((tm_pos_t){
+		.r   = a.r + (a.dir ? -b.r : b.r),
+		.q   = a.q + b.q,
+		.dir = a.dir,
+		.unused = a.unused
+	});
+}
+
+static _force_inline
+tm_pos_t tm_sub_pos(tm_pos_t a, tm_pair_t b)
+{
+	return((tm_pos_t){
+		.r   = a.r + (a.dir ? b.r : -b.r),
+		.q   = a.q - b.q,
+		.dir = a.dir,
+		.unused = a.unused
+	});
+}
+
+static _force_inline
+tm_pos_t tm_canon_pos(tm_pos_t pos, tm_pair_t span)
+{
+	return((tm_pos_t){
+		.r   = pos.r - (pos.dir ? span.r : 0),	/* convert to head position */
+		.q   = pos.q,
+		.dir = pos.dir,
+		.unused = pos.unused
+	});
+}
+
+
 /* seed; see comment below for the definition */
 typedef struct {
 	uint32_t v, u;
@@ -2585,14 +2853,6 @@ tm_pair_t tm_seed_decode(tm_seed_t const *p)
 #endif
 
 
-#if 0
-static _force_inline
-tm_chain_t tm_chain_decode(tm_chain_t const *p)
-{
-	return((tm_chain_t){ 0 });
-}
-#endif
-
 static _force_inline
 uint64_t tm_seed_dir(tm_seed_t const *s)
 {
@@ -2620,46 +2880,24 @@ typedef struct { tm_sqiv_t *a; size_t n, m; } tm_sqiv_v;
 
 /* chain */
 
-#if 0
-typedef struct {
-	uint16_t v, u;
-} tm_span_t;
-
-static _force_inline
-tm_pair_t tm_span_decode(tm_span_t const *s)
-{
-	uint32_t const u = s->u, v = s->v;
-	uint32_t const r = (2 * v + u) / 3U;
-	uint32_t const q = (2 * u + v) / 3U;
-
-	// debug("v(%x), u(%u), r(%u), q(%u)", v, u, r, q);
-	return((tm_pair_t){
-		.r = r,
-		.q = q
-	});
-}
-#endif
-
 typedef struct {
 	/*
 	 * base seed position;
 	 * rpos comes first because vpos comes first in seed_t.
 	 * vpos is placed lower of (upos, vpos) tuple to make chaining simpler.
 	 */
-	uint16_t rpos;
-	uint8_t dir, unused;		/* dir == 1 for reverse, 0 for forward */
-	uint32_t qpos;
+	tm_pos_t pos;				/* dir == 1 for reverse, 0 for forward */
 
 	/* reference and query side spans */
-	uint32_t rspan, qspan;
+	tm_pair_t span;
 } tm_chain_raw_t;
 
 static _force_inline
 tm_pair_t tm_chain_raw_pos(tm_chain_raw_t const *chain)
 {
 	return((tm_pair_t){
-		.q = chain->qpos,
-		.r = chain->rpos		/* upper 16bits are masked out */
+		.q = chain->pos.q,
+		.r = chain->pos.r		/* upper 16bits are masked out */
 	});
 }
 
@@ -2667,17 +2905,15 @@ static _force_inline
 tm_pair_t tm_chain_raw_span(tm_chain_raw_t const *chain)
 {
 	return((tm_pair_t){
-		.q = chain->qspan,
-		.r = chain->rspan
+		.q = chain->span.q,
+		.r = chain->span.r
 	});
 }
 
 
 typedef struct {
 	/* see tm_chain_compose */
-	uint16_t rpos;					/* chain end position; rspos + rspan for forward and rspos for reverse */
-	uint8_t dir, unused;
-	uint32_t qpos;					/* chain end position */
+	tm_pos_t pos;					/* chain end position; rspos + rspan for forward and rspos for reverse */
 
 	union {
 		struct {
@@ -2686,7 +2922,11 @@ typedef struct {
 		} sep;
 		uint32_t all;
 	} attr;
-	uint32_t qspan;
+
+	/* half remaining of span */
+	struct {
+		uint32_t q;
+	} span;
 } tm_chain_t;
 typedef struct { tm_chain_t *a; size_t n, m; } tm_chain_v;
 
@@ -2699,25 +2939,38 @@ KRADIX_SORT_INIT(chain, tm_chain_t, tm_chain_attr, 4);
 
 static char *tm_chain_raw_to_str(tm_chain_raw_t const *c)
 {
-	uint32_t const rspos = c->dir ? c->rpos + c->rspan : c->rpos;
-	uint32_t const repos = c->dir ? c->rpos : c->rpos + c->rspan;
-	return(xbprintf("dir(%u), (%u, %u) -- (%u, %u) --> (%u, %u)", c->dir, c->qpos, rspos, c->qspan, c->rspan, c->qpos + c->qspan, repos));
+	uint32_t const rspos = c->pos.dir ? c->pos.r + c->span.r : c->pos.r;
+	uint32_t const repos = c->pos.dir ? c->pos.r : c->pos.r + c->span.r;
+	return(xbprintf("dir(%u), (%u, %u) -- (%u, %u) --> (%u, %u)", c->pos.dir, c->pos.q, rspos, c->span.q, c->span.r, c->pos.q + c->span.q, repos));
 }
 static char *tm_chain_to_str(tm_chain_t const *c)
 {
-	return(xbprintf("dir(%u), pos(%u, %u), qspan(%u), rid(%u), weight(%u)", c->dir & 0x01, c->qpos, c->rpos, c->qspan, c->attr.sep.rid, c->attr.sep.weight));
+	return(xbprintf("dir(%u), pos(%u, %u), qspan(%u), rid(%u), weight(%u)", c->pos.dir & 0x01, c->pos.q, c->pos.r, c->span.q, c->attr.sep.rid, c->attr.sep.weight));
 }
 
 static _force_inline
-tm_pair_t tm_chain_pos(tm_chain_t const *chain)
+tm_pair_t tm_chain_head(tm_chain_t const *chain)
 {
-	debug("(%x, %x)", chain->qpos, chain->rpos);
+	debug("(%x, %x)", chain->pos.q, chain->pos.r);
 
 	return((tm_pair_t){
-		.q = chain->qpos,
-		.r = chain->rpos		/* upper 16bits are masked out */
+		.q = chain->pos.q,
+		.r = chain->pos.r		/* upper 16bits are masked out */
 	});
 }
+
+static _force_inline
+tm_pos_t tm_chain_pos(tm_chain_t const *chain)
+{
+	return(chain->pos);
+}
+
+
+/* alignment scores */
+typedef struct {
+	int32_t raw;			/* raw SW score + end bonus */
+	int32_t patched;		/* raw SW score + end bonus + adjustment */
+} tm_score_t;
 
 
 /* alignment result */
@@ -2726,23 +2979,26 @@ typedef struct {
 	rbt_header_t h;
 	uint32_t qmax;
 
-	/* stats */
-	int32_t score;				/* patched score, including bonus on both ends */
-	dz_alignment_t const *aln;
-
 	/* positions */
 	struct {
 		uint32_t rid : 24;
 		uint32_t max_weight : 8;
 	} attr;
-	uint8_t dir, unused[3];		/* 1 if reverse */
-	tm_pair_t pos, span;
+
+	tm_pos_t pos;
+	tm_pair_t span;
+
+	/* scores */
+	tm_score_t score;
 
 	/* alignment path */
 	struct {
 		uint8_t const *ptr;
 		size_t len;
 	} path;
+
+	/* everything else in dz_alignment_t */
+	dz_alignment_t const *aln;
 } tm_aln_t;
 _static_assert(sizeof(tm_aln_t) == 64);
 typedef struct { tm_aln_t *a; size_t n, m; } tm_aln_v;
@@ -3395,57 +3651,67 @@ v32i8_t tm_filter_load_rf(uint8_t const *p) {
 
 static _force_inline
 v32i8_t tm_filter_load_rr(uint8_t const *p) {
-	v32i8_t const v = _loadu_v32i8(p - 32);
-	return(v);
+	return(_loadu_v32i8(p - 32));
 }
+
 
 /* 2-bit encoding at [3:2] for query side */
 static _force_inline
-v32i8_t tm_filter_load_qf(uint8_t const *p, uint64_t dir) {
-	/* convert to 4bit */
-	static uint8_t const conv[16] __attribute__(( aligned(16) )) = {
-		[nA]     = A, [nC]     = C, [nG]     = G, [nT]     = T,	/* forward */
-		[nA + 1] = T, [nC + 1] = G, [nG + 1] = C, [nT + 1] = A	/* reverse-complemented */
-	};
-
-	v32i8_t const cv = _from_v16i8_v32i8(_load_v16i8(conv));
-	v32i8_t const v = _loadu_v32i8(p), d = _set_v32i8(dir);
-	v32i8_t const w = _shuf_v32i8(cv, _add_v32i8(v, d));
-	return(w);
+v32i8_t tm_filter_load_qf(uint8_t const *p) {
+	return(_loadu_v32i8(p));
 }
 
 static _force_inline
-v32i8_t tm_filter_load_qr(uint8_t const *p, uint64_t dir) {
-	/* reverse and complement */
-	static uint8_t const conv[16] __attribute__(( aligned(16) )) = {
+v32i8_t tm_filter_load_qr(uint8_t const *p) {
+	v32i8_t const v = _loadu_v32i8(p - 32);
+	return(_swap_v32i8(v));
+}
+
+static _force_inline
+v32i8_t tm_filter_conv_r(v32i8_t v)
+{
+	static uint8_t const rconv[16] __attribute__(( aligned(16) )) = {
+		[tA] = A, [tC] = C, [tG] = G, [tT] = T,
+		[tR] = R, [tY] = Y, [tS] = S, [tS ^ 0x0f] = S,
+		[tK] = K, [tM] = M, [tW] = W, [tW ^ 0x0f] = W,
+		[tB] = B, [tD] = D, [tH] = H, [tV] = V
+	};
+	v32i8_t const cv = _from_v16i8_v32i8(_load_v16i8(rconv));
+	return(_shuf_v32i8(cv, v));
+}
+
+static _force_inline
+v32i8_t tm_filter_conv_q(v32i8_t v, uint64_t dir)
+{
+	/* convert to 4bit */
+	static uint8_t const qconv[16] __attribute__(( aligned(16) )) = {
 		[nA]     = A, [nC]     = C, [nG]     = G, [nT]     = T,	/* forward */
 		[nA + 1] = T, [nC + 1] = G, [nG + 1] = C, [nT + 1] = A	/* reverse-complemented */
 	};
-
-	v32i8_t const cv = _from_v16i8_v32i8(_load_v16i8(conv));
-	v32i8_t const v = _loadu_v32i8(p - 32), d = _set_v32i8(dir);
-	v32i8_t const w = _shuf_v32i8(cv, _add_v32i8(v, d));
-	return(_swap_v32i8(w));
+	v32i8_t const cv = _from_v16i8_v32i8(_load_v16i8(qconv));
+	v32i8_t const x = _set_v32i8(dir);
+	v32i8_t const y = _add_v32i8(v, x);
+	return(_shuf_v32i8(cv, y));
 }
 
 static _force_inline
 void tm_filter_load_seq(tm_filter_work_t *w, uint8_t const *r, uint8_t const *q, tm_chain_raw_t const *c)
 {
 	/* load positions */
-	uint64_t const dir = c->dir;
+	uint64_t const dir = c->pos.dir;
 	tm_pair_t const pos  = tm_chain_raw_pos(c);
 	tm_pair_t const span = tm_chain_raw_span(c);
 	// debug("rr(%u), rf(%u), qr(%u), qf(%u), dir(%x)", pos.r, pos.r + span.r, pos.q, pos.q + span.q, dir);
 
-	/* ref */
-	v32i8_t const rf = tm_filter_load_rf(&r[pos.r + span.r]);
-	v32i8_t const rr = tm_filter_load_rr(&r[pos.r]);
+	/* ref; convert before save */
+	v32i8_t const rf = tm_filter_conv_r(tm_filter_load_rf(&r[pos.r + span.r]));
+	v32i8_t const rr = tm_filter_conv_r(tm_filter_load_rr(&r[pos.r]));
 	_store_v32i8(&w->fw[0], rf);
 	_store_v32i8(&w->rv[0], rr);
 
-	/* query */
-	v32i8_t const qf = tm_filter_load_qf(&q[pos.q + span.q], dir);
-	v32i8_t const qr = tm_filter_load_qr(&q[pos.q], dir);
+	/* query; already converted */
+	v32i8_t const qf = tm_filter_conv_q(tm_filter_load_qf(&q[pos.q + span.q]), dir);
+	v32i8_t const qr = tm_filter_conv_q(tm_filter_load_qr(&q[pos.q]), dir);
 
 	uint8_t *qfp = (dir & 0x01) ? &w->rv[32] : &w->fw[32];
 	uint8_t *qrp = (dir & 0x01) ? &w->fw[32] : &w->rv[32];
@@ -3511,8 +3777,8 @@ static _force_inline
 int64_t tm_filter_extend(tm_filter_work_t *w, tm_idx_profile_t const *profile, uint8_t const *r, uint8_t const *q, tm_chain_raw_t const *c)
 {
 	/* skip if long enough */
-	uint32_t const qth = profile->filter.qspan_thresh + 1;
-	if(c->qspan >= qth) { return(1); }
+	uint32_t const qth = profile->filter.span_thresh + 1;
+	if(c->span.q >= qth) { return(1); }
 
 	/* load sequences */
 	tm_filter_load_seq(w, r, q, c);
@@ -3529,8 +3795,8 @@ static _force_inline
 v2i32_t tm_filter_calc_pos(tm_chain_raw_t const *p)
 {
 	/* load */
-	v2i32_t const spos = _loadu_v2i32(&p->rpos);
-	v2i32_t const span = _loadu_v2i32(&p->rspan);
+	v2i32_t const spos = _loadu_v2i32(&p->pos.r);
+	v2i32_t const span = _loadu_v2i32(&p->span.r);
 
 	/* create mask: (0, dir ? -1 : 0) */
 	v2i32_t const thresh = _seta_v2i32(0x3fffffff, 0xffff);
@@ -3550,8 +3816,8 @@ static _force_inline
 v2i32_t tm_filter_calc_pos(tm_chain_raw_t const *p)
 {
 	/* load */
-	v2i32_t const spos = _loadu_v2i32(&p->rpos);
-	v2i32_t const span = _loadu_v2i32(&p->rspan);
+	v2i32_t const spos = _loadu_v2i32(&p->pos.r);
+	v2i32_t const span = _loadu_v2i32(&p->span.r);
 
 	/* create mask: (0, dir ? -1 : 0) */
 	v2i32_t const thresh = _seta_v2i32(0x3fffffff, 0xffff);
@@ -3574,7 +3840,7 @@ size_t tm_filter_save_chain(uint32_t rid, tm_chain_t *q, tm_chain_raw_t const *p
 	// debug("p(%p), %r", p, tm_chain_raw_to_str, p);
 
 	/* calc weight */
-	ZCNT_RESULT size_t weight = _lzc_u32(p->rspan);
+	ZCNT_RESULT size_t weight = _lzc_u32(p->span.r);
 
 	/* adjust span to obtain end position */
 	v2i32_t const v = tm_filter_calc_pos(p);
@@ -3600,7 +3866,7 @@ size_t tm_filter_chain(tm_idx_sketch_t const *si, tm_idx_profile_t const *profil
 	tm_filter_work_t w __attribute__(( aligned(32) ));
 	tm_filter_work_init(&w, profile);
 
-	// debug("min_score(%d), qspan_thresh(%u), rid(%u)", profile->filter.min_score, profile->filter.qspan_thresh, rid);
+	// debug("min_score(%d), span_thresh(%u), rid(%u)", profile->filter.min_score, profile->filter.span_thresh, rid);
 	for(size_t i = 0; i < ccnt; i++) {
 		tm_chain_raw_t const *p = &src[i];
 		// debug("i(%zu), ccnt(%zu), %r", i, ccnt, tm_chain_raw_to_str, p);
@@ -3719,7 +3985,7 @@ tm_aln_t tm_chain_as_aln(tm_chain_t const *c)
 {
 	return((tm_aln_t){
 		.pos  = tm_chain_pos(c),
-		.span = { .q = c->qspan, .r = c->qspan },	/* duplicate qspan because rspan is missing in chain object */
+		.span = { .q = c->span.q, .r = c->span.q },	/* duplicate qspan because rspan is missing in chain object */
 		.qmax = 0
 	});
 }
@@ -3727,20 +3993,23 @@ tm_aln_t tm_chain_as_aln(tm_chain_t const *c)
 
 /* start position hash */
 static _force_inline
-uint64_t tm_extend_hash_pos(uint32_t rid, uint32_t dir, tm_pair_t spos)
+uint64_t tm_extend_hash_pos(uint32_t rid, tm_pos_t spos)
 {
-	uint64_t const x = _loadu_u64(&spos);	/* r in lower 32bit, q in upper 32bit */
-	uint64_t const y = (rid<<1) + dir;		/* only the lowest bit matters for dir */
-	uint64_t const magic = 0xf324a24a1111ULL;
+	/* FIXME: better performance */
+	tm_pair_t const p = tm_pos_to_pair(spos);
 
+	uint64_t const x = _loadu_u64(&p);			/* r in lower 32bit, q in upper 32bit */
+	uint64_t const y = (rid<<1) + spos.dir;		/* only the lowest bit matters for dir */
+
+	uint64_t const magic = 0xf324a24a1111ULL;
 	return((0x10001001 * x) ^ x ^ (x>>31) ^ (x>>18) ^ (magic * y));
 }
 
 static _force_inline
-uint64_t tm_extend_mark_pos(tm_scan_t *self, uint32_t rid, uint32_t dir, tm_pair_t spos)
+uint64_t tm_extend_mark_pos(tm_scan_t *self, uint32_t rid, tm_pos_t spos)
 {
 	/* duplicated if state is not zero */
-	uint64_t const h = tm_extend_hash_pos(rid, dir, spos);
+	uint64_t const h = tm_extend_hash_pos(rid, spos);
 	tm_dedup_t *bin = rh_put_ptr_dedup(&self->extend.pos, h);
 
 	/* we don't expect bin be NULL but sometimes happen, or already evaluated (we don't mind the last state) */
@@ -3774,11 +4043,11 @@ uint64_t tm_extend_test_range(tm_chain_t const *c, tm_aln_t const *p)
 {
 	/*
 	 * test q-range; skip if entirely covered
-	 * c->qpos > p->qpos && c->qpos + c->qspan < p->qpos + p->qspan
+	 * c->pos.q > p->pos.q && c->pos.q + c->span.q < p->pos.q + p->span.q
 	 */
-	tm_pair_t const pos = tm_chain_pos(c);
-	if((uint32_t)(pos.q - p->pos.q) < (uint32_t)(p->span.q - c->qspan)) {
-		debug("covered, (%u, %u), (%u, %u)", pos.q, pos.q + c->qspan, p->pos.q, p->pos.q + p->span.q);
+	tm_pair_t const pos = tm_chain_head(c);
+	if((uint32_t)(pos.q - p->pos.q) < (uint32_t)(p->span.q - c->span.q)) {
+		debug("covered, (%u, %u), (%u, %u)", pos.q, pos.q + c->span.q, p->pos.q, p->pos.q + p->span.q);
 
 		if(c->attr.sep.weight + TM_WEIGHT_MARGIN > p->attr.max_weight + 1U) {
 			debug("weight not enough, weight(%u), max_weight(%u)", c->attr.sep.weight, p->attr.max_weight);
@@ -3835,7 +4104,7 @@ static _force_inline
 int64_t tm_extend_compare_aln(tm_aln_t const *x, tm_aln_t const *y)
 {
 	/* strcmp equivalent */
-	return((int64_t)(x->score - y->score));		/* expand sign */
+	return((int64_t)(x->score.raw - y->score.raw));		/* expand sign */
 }
 
 static _force_inline
@@ -3879,7 +4148,7 @@ tm_extend_replace_t tm_extend_slice_bin(tm_scan_t *self, tm_aln_t const *new)
 	while(p != NULL) {
 		/* compare end pos, return iterator if matched */
 		uint64_t const y = _loadu_u64(&p->pos);
-		if(x == y && p->dir == new->dir) {		/* compare both */
+		if(x == y && p->pos.dir == new->pos.dir) {		/* compare both */
 
 			/* alignment end position collides; take better one */
 			debug("duplication found, patch bin");
@@ -3921,7 +4190,7 @@ void tm_extend_push_bin(tm_scan_t *self, tm_aln_t const *aln)
 		while(q != NULL) {
 			/* compare end pos, return iterator if matched */
 			uint64_t const y = _loadu_u64(&q->pos);
-			if(x == y && q->dir == aln->dir) { debug("found"); break; }
+			if(x == y && q->pos.dir == aln->pos.dir) { debug("found"); break; }
 
 			q = rbt_fetch_next_match_aln(&it, v, aln);
 		}
@@ -3955,44 +4224,36 @@ tm_pair_t tm_aln_span(dz_alignment_t const *aln)
 	});
 }
 
-
 static _force_inline
-int32_t tm_extend_patched_score(tm_scan_t const *self, tm_idx_profile_t const *pf, tm_pair_t spos, dz_alignment_t const *aln)
+tm_aln_t tm_extend_compose_aln(tm_scan_t const *self, tm_chain_t const *chain, tm_pos_t epos, dz_alignment_t const *aln, tm_score_t score)
 {
 	_unused(self);
-
-	/* add bonus if anchored at the head */
-	return((spos.r == 0 ? pf->extend.bonus : 0) + aln->score);
-}
-
-static _force_inline
-tm_aln_t tm_extend_compose_aln(tm_scan_t const *self, tm_idx_profile_t const *pf, tm_chain_t const *chain, tm_pair_t epos, dz_alignment_t const *aln)
-{
 	debug("compose, aln(%p), path(%s)", aln, aln->path);
 
+	/* calc pos and span */
 	tm_pair_t const span = tm_aln_span(aln);
-	tm_pair_t const spos = {
-		.r = epos.r - (chain->dir ? 0 : span.r),	/* convert to head position */
-		.q = epos.q - span.q
-	};
+	tm_pos_t const spos = tm_sub_pos(epos, span);		/* convert to head position */
+	tm_pos_t const pos  = tm_canon_pos(spos, span);		/* spos.r < epos.r whichever direction is */
 
 	tm_aln_t const a = {
-		/* coordinates */
-		.qmax = epos.q,			/* spos.q + span.q, */
-		.dir  = chain->dir,
-		.pos  = spos,
+		/* coordinates and scores */
+		.qmax = epos.q,		/* spos.q + span.q, */
+		.pos  = pos,
 		.span = span,
+		.score = score,
+
+		/* attributes */
 		.attr = {
-			.rid = chain->attr.sep.rid,
+			.rid        = chain->attr.sep.rid,
 			.max_weight = chain->attr.sep.weight + TM_WEIGHT_MARGIN		/* x8 */
 		},
 
-		/* stats */
-		.score = tm_extend_patched_score(self, pf, spos, aln),
-		.aln = aln,					/* save original */
-
-		/* path */
-		.path = { .ptr = aln->path, .len = aln->path_length }
+		/* path and others */
+		.path = {
+			.ptr = aln->path,
+			.len = aln->path_length
+		},
+		.aln  = aln			/* save original */
 	};
 	return(a);
 }
@@ -4049,15 +4310,37 @@ typedef struct {
 	__m128i mv;
 	uint8_t const *p;
 	ptrdiff_t inc;
-	uint64_t conv;
+
+	dz_fill_fetch_t next;
 } tm_extend_fetcher_t;
+
+static _force_inline
+dz_fill_fetch_t tm_extend_fetch_core(uint8_t const *p, ptrdiff_t inc)
+{
+	uint32_t const x = (uint32_t)(*p);
+	uint32_t const y = x ^ (uint32_t)inc;
+
+	return((dz_fill_fetch_t){
+		.is_term = x == '\0',
+		.rch     = y & 0x1e
+	});
+}
+
+static _force_inline
+dz_fill_fetch_t tm_extend_fetch_patch(dz_fill_fetch_t curr, uint32_t is_term)
+{
+	return((dz_fill_fetch_t){
+		.is_term = curr.is_term,
+		.rch     = curr.rch + is_term		/* shift to bonus matrix if tail */
+	});
+}
 
 static _force_inline
 void tm_extend_fetcher_init(tm_extend_fetcher_t *self, uint8_t const *ref, uint32_t dir)
 {
 	self->p    = ref - dir;
 	self->inc  = dir ? -1LL : 1LL;
-	self->conv = dir ? 0xf7b3d591e6a2c480 : 0xfedcba9876543210;
+	self->next = tm_extend_fetch_core(self->p, self->inc);
 
 /*
 	uint8_t const *p = ref - dir;
@@ -4075,6 +4358,29 @@ dz_fill_fetch_t tm_extend_fetch_next(tm_extend_fetcher_t *self, int8_t const *sc
 {
 	_unused(query);
 
+	dz_fill_fetch_t const prev = self->next;
+
+	/* do nothing if reached tail */
+	if(prev.is_term) { return(prev); }
+
+	/* fetch next base */
+	dz_fill_fetch_t const next = tm_extend_fetch_core(self->p + self->inc, self->inc);
+	dz_fill_fetch_t const curr = tm_extend_fetch_patch(prev, next.is_term);
+
+	/* load score matrix for current char */
+	self->mv = _mm_cvtsi64_si128(
+		_loadu_u32(&score_matrix[curr.rch * DZ_QUERY_MAT_SIZE / 2])		/* already x2 */
+	);
+
+	/* save */
+	self->p += self->inc;
+	self->next = next;
+
+	debug("p(%p), inc(%ld), is_term(%u), c(%x, %c)", self->p, self->inc, next.is_term, curr.rch, "ACRSWKBDHVMWSYGT"[curr.rch>>1]);
+	_print_v16i8((v16i8_t){ self->mv });
+	return(curr);
+
+	#if 0
 	if(*self->p == '\0') {
 		return((dz_fill_fetch_t){
 			.is_term = 1,
@@ -4095,6 +4401,7 @@ dz_fill_fetch_t tm_extend_fetch_next(tm_extend_fetcher_t *self, int8_t const *sc
 		.is_term = 0,
 		.rch     = e
 	});
+	#endif
 }
 
 static _force_inline
@@ -4119,7 +4426,7 @@ dz_trace_match_t tm_extend_get_match(int8_t const *score_matrix, dz_query_t cons
 	uint8_t const *packed = dz_query_packed_array(query);
 
 	return((dz_trace_match_t){
-		.score = score_matrix[ch * DZ_QUERY_MAT_SIZE + packed[qidx]],
+		.score = score_matrix[ch * DZ_QUERY_MAT_SIZE / 2 + packed[qidx]],
 		.match = packed[qidx] == ch
 	});
 }
@@ -4152,7 +4459,7 @@ __m128i tm_extend_conv(int8_t const *score_matrix, uint32_t dir, __m128i v)
 }
 
 static _force_inline
-dz_query_t *tm_pack_query_wrap(dz_arena_t *mem, dz_profile_t const *profile, tm_idx_sketch_t const *sk, uint8_t const *query, size_t qlen, tm_pair_t dir, tm_pair_t pos)
+dz_query_t *tm_pack_query_wrap(dz_arena_t *mem, dz_profile_t const *profile, tm_idx_sketch_t const *sk, uint8_t const *query, size_t qlen, uint32_t qdir, tm_pos_t pos)
 {
 	dz_pack_query_t const pack = {
 		.dir      = 0,		/* ignored */
@@ -4163,9 +4470,9 @@ dz_query_t *tm_pack_query_wrap(dz_arena_t *mem, dz_profile_t const *profile, tm_
 
 	/* calc reference remaining length */
 	size_t const rlen = tm_idx_ref_seq_len(sk);
-	size_t const rrem = dir.r ? pos.r : rlen - pos.r;
+	size_t const rrem = pos.dir ? pos.r : rlen - pos.r;
 
-	if(dir.q) {
+	if(qdir) {
 		size_t const qrem = MIN2(2 * rrem, pos.q);
 		debug("reverse: qpos(%u) --- qspan(%u) --> qspos(%u)", pos.q, qrem, pos.q - qrem);
 
@@ -4183,14 +4490,14 @@ dz_query_t *tm_pack_query_wrap(dz_arena_t *mem, dz_profile_t const *profile, tm_
 }
 
 static _force_inline
-dz_state_t const *tm_extend_wrap(dz_arena_t *mem, dz_profile_t const *profile, tm_idx_sketch_t const *sk, dz_query_t const *q, uint32_t rdir, tm_pair_t pos)
+dz_state_t const *tm_extend_wrap(dz_arena_t *mem, dz_profile_t const *profile, tm_idx_sketch_t const *sk, dz_query_t const *q, tm_pos_t pos)
 {
 	uint8_t const *ref = tm_idx_ref_seq_ptr(sk);
 
 	/* use 4bit fetcher */
 	tm_extend_fetcher_t w __attribute__(( aligned(16) ));
-	tm_extend_fetcher_init(&w, &ref[pos.r], rdir);
-	debug("ref(%p, %p, %zu), rlen(%zu), rdir(%u), rpos(%u)", ref, &ref[pos.r], &ref[pos.r] - ref, tm_idx_ref_seq_len(sk), rdir, pos.r);
+	tm_extend_fetcher_init(&w, &ref[pos.r], pos.dir);
+	debug("ref(%p, %p, %zu), rlen(%zu), rdir(%u), rpos(%u)", ref, &ref[pos.r], &ref[pos.r] - ref, tm_idx_ref_seq_len(sk), pos.dir, pos.r);
 
 	dz_fetcher_t fetcher = {
 		.opaque      = (void *)&w,
@@ -4202,7 +4509,7 @@ dz_state_t const *tm_extend_wrap(dz_arena_t *mem, dz_profile_t const *profile, t
 }
 
 static _force_inline
-tm_pair_t tm_calc_max_wrap(dz_query_t const *q, dz_state_t const *r, uint32_t rdir, tm_pair_t rpos)
+tm_pos_t tm_calc_max_wrap(dz_query_t const *q, dz_state_t const *r, tm_pos_t rpos)
 {
 	if(r == NULL || r->max.cap == NULL) {
 		return(rpos);
@@ -4210,31 +4517,41 @@ tm_pair_t tm_calc_max_wrap(dz_query_t const *q, dz_state_t const *r, uint32_t rd
 
 	/* get downward max */
 	dz_max_pos_t const s = dz_calc_max_pos_core(q, r);
-	return((tm_pair_t){
-		.r = rpos.r + (rdir ? -s.rpos : s.rpos),
-		.q = rpos.q + s.qpos
-	});
+
+	/* insert bonus */
+	tm_pos_t const pos = {
+		.r   = rpos.r,
+		.q   = rpos.q,
+		.dir = rpos.dir
+	};
+
+	/* compose span */
+	tm_pair_t const span = {
+		.r = s.rpos,
+		.q = s.qpos
+	};
+	return(tm_add_pos(pos, span));	/* direction and bonus copied */
 }
 
 #if 1
 static _force_inline
-tm_pair_t tm_extend_load_pos(tm_scan_t const *self, tm_idx_profile_t const *pf, tm_chain_t const *c)
+tm_pos_t tm_extend_load_rpos(tm_scan_t const *self, tm_idx_profile_t const *pf, tm_chain_t const *c)
 {
 	_unused(self);
 	_unused(pf);
 
-	tm_pair_t const epos = tm_chain_pos(c);
-	return(epos);
+	tm_pos_t const pos = tm_chain_pos(c);		/* head pos with direction */
+	return(pos);
 }
 #else
 static _force_inline
-tm_pair_t tm_extend_load_pos(tm_scan_t const *self, tm_idx_profile_t const *pf, tm_chain_t const *c)
+tm_pair_t tm_extend_load_rpos(tm_scan_t const *self, tm_idx_profile_t const *pf, tm_chain_t const *c)
 {
 	_unused(self);
 
 	uint32_t const kadj = pf->chain.kadj[0];
-	uint32_t const rdir = c->dir;
-	tm_pair_t const epos = tm_chain_pos(c);
+	uint32_t const rdir = c->pos.dir;
+	tm_pair_t const epos = tm_chain_head(c);
 	return((tm_pair_t){
 		.r = epos.r - (rdir ? -kadj : kadj),
 		.q = epos.q -  kadj
@@ -4243,46 +4560,39 @@ tm_pair_t tm_extend_load_pos(tm_scan_t const *self, tm_idx_profile_t const *pf, 
 #endif
 
 static _force_inline
-tm_pair_t tm_extend_first(tm_scan_t *self, tm_idx_profile_t const *pf, tm_idx_sketch_t const *sk, uint8_t const *query, size_t qlen, uint32_t rdir, tm_pair_t rpos)
+tm_pos_t tm_extend_first(tm_scan_t *self, tm_idx_profile_t const *pf, tm_idx_sketch_t const *sk, uint8_t const *query, size_t qlen, tm_pos_t rpos)
 {
-	debug("forward: rdir(%u), rpos(%u, %u)", rdir, rpos.q, rpos.r);
+	debug("forward: rdir(%u), rpos(%u, %u)", rpos.dir, rpos.q, rpos.r);
 
 	/* first extension is reference forward */
 	dz_query_t const *qr = tm_pack_query_wrap(self->extend.fill,
 		pf->extend.dz, sk,
-		query, qlen,
-		(tm_pair_t){ .r = rdir, .q = 0 },
+		query, qlen, 0,
 		rpos
 	);
 
-	/* extend */
+	/* extend; reference forward */
 	dz_state_t const *r = tm_extend_wrap(self->extend.fill,
-		pf->extend.dz, sk,
-		qr,
-		rdir,				/* reference forward */
-		rpos
+		pf->extend.dz, sk, qr, rpos
 	);
-	tm_pair_t const epos = tm_calc_max_wrap(qr, r, rdir, rpos);
+	tm_pos_t const epos = tm_calc_max_wrap(qr, r, rpos);
 
 	debug("forward: rpos(%u, %u) --- score(%d) --> epos(%u, %u)", rpos.q, rpos.r, r != NULL ? r->max.score.abs : 0, epos.q, epos.r);
 	return(epos);
 }
 
 static _force_inline
-dz_alignment_t const *tm_extend_second(tm_scan_t *self, tm_idx_profile_t const *pf, tm_idx_sketch_t const *sk, uint8_t const *query, size_t qlen, uint32_t rdir, tm_pair_t epos)
+dz_alignment_t const *tm_extend_second(tm_scan_t *self, tm_idx_profile_t const *pf, tm_idx_sketch_t const *sk, uint8_t const *query, size_t qlen, tm_pos_t epos)
 {
-	/* second extension is reference reverse */
+	/* second extension is reference reverse: flip direction */
+	epos.dir ^= 0x01;
 	dz_query_t const *qf = tm_pack_query_wrap(self->extend.fill,
 		pf->extend.dz, sk,
-		query, qlen,
-		(tm_pair_t){ .r = rdir ^ 0x01, .q = 1 },
+		query, qlen, 1,		/* reverse */
 		epos
 	);
 	dz_state_t const *f = tm_extend_wrap(self->extend.fill,
-		pf->extend.dz, sk,
-		qf,
-		rdir ^ 0x01,		/* reference reverse */
-		epos
+		pf->extend.dz, sk, qf, epos
 	);
 	debug("reverse: score(%d)", (f != NULL ? f->max.score.abs : -1));
 
@@ -4297,12 +4607,12 @@ dz_alignment_t const *tm_extend_second(tm_scan_t *self, tm_idx_profile_t const *
 		(dz_trace_get_match_t)tm_extend_get_match,
 		f
 	);
-	debug("reverse: spos(%u, %u) --- score(%d) --> epos(%u, %u), f(%p), aln(%p)", epos.q - aln->query_length, epos.r + (rdir ? aln->ref_length : -aln->ref_length), aln->score, epos.q, epos.r, f, aln);
+	debug("reverse: spos(%u, %u) --- score(%d) --> epos(%u, %u), f(%p), aln(%p)", epos.q - aln->query_length, epos.r + (epos.dir ? aln->ref_length : -aln->ref_length), aln->score, epos.q, epos.r, f, aln);
 	return(aln);
 }
 
 typedef struct {
-	tm_pair_t epos;
+	tm_pos_t epos;
 	dz_alignment_t const *aln;
 } tm_extend_res_t;
 
@@ -4314,21 +4624,128 @@ tm_extend_res_t tm_extend_core(tm_scan_t *self, tm_idx_profile_t const *pf, tm_i
 	tm_extend_res_t const failed = { .aln  = NULL };
 
 	/* load root position */
-	uint32_t const rdir = c->dir;
-	tm_pair_t const rpos = tm_extend_load_pos(self, pf, c);
+	tm_pos_t const rpos = tm_extend_load_rpos(self, pf, c);
 
 	/* reference forward */
-	tm_pair_t const epos = tm_extend_first(self, pf, sk, query, qlen, rdir, rpos);
-	if(tm_extend_mark_pos(self, tm_idx_ref_rid(sk), rdir, epos)) {
+	tm_pos_t const epos = tm_extend_first(self, pf, sk, query, qlen, rpos);
+	if(tm_extend_mark_pos(self, tm_idx_ref_rid(sk), epos)) {
 		return(failed);			/* it seems the tail position is already evaluated */
 	}
 
 	/* reference reverse */
-	dz_alignment_t const *aln = tm_extend_second(self, pf, sk, query, qlen, rdir, epos);
+	dz_alignment_t const *aln = tm_extend_second(self, pf, sk, query, qlen, epos);	/* direction flipped internally */
 	return((tm_extend_res_t){
 		.epos = epos,
 		.aln  = aln
 	});
+}
+
+
+static _force_inline
+void tm_extend_count_base_core(size_t *acc, v32i8_t v, uint32_t window)
+{
+	v32i8_t const x = _shl_v32i8(v, 5);
+	v32i8_t const y = _shl_v32i8(v, 4);
+
+	uint64_t const l = ((v32_masku_t){ .mask = _mask_v32i8(x) }).all & ~(uint64_t)window;	/* vpmovmskb, andnq */
+	uint64_t const h = ((v32_masku_t){ .mask = _mask_v32i8(y) }).all & ~(uint64_t)window;
+
+	size_t const ccnt = _popc_u64(~h & l);		/* andnq, popcntq */
+	size_t const gcnt = _popc_u64(h & ~l);
+	size_t const tcnt = _popc_u64(h & l);
+
+	acc[0] += ccnt;
+	acc[1] += gcnt;
+	acc[2] += tcnt;
+	return;
+}
+
+static _force_inline
+void tm_extend_count_base(size_t *acc, uint8_t const *query, size_t qlen)
+{
+	debug("qlen(%zu)", qlen);
+
+	/* body */
+	size_t qpos = 0;
+	while((qpos += 32) < qlen) {
+		v32i8_t const v = _loadu_v32i8(&query[qpos - 32]);
+		tm_extend_count_base_core(&acc[1], v, 0);
+	}
+
+	/* tail */ {
+		v32i8_t const v = _loadu_v32i8(&query[qpos - 32]);
+		uint32_t const window = 0xffffffff<<(qlen & 0x1f);
+		tm_extend_count_base_core(&acc[1], v, window);
+	}
+
+	/* derive count of 'A' from the others and length */
+	acc[0] = qlen - (acc[1] + acc[2] + acc[3]);
+	return;
+}
+
+static _force_inline
+int32_t tm_extend_calc_complexity(tm_scan_t const *self, tm_idx_profile_t const *pf, uint8_t const *query, size_t qlen)
+{
+	_unused(self);
+
+	/* initialize accumulators */
+	size_t acc[4] = { 0 };
+	tm_extend_count_base(acc, query, qlen);
+
+	/* adjustment */
+	size_t const tot = acc[0] + acc[1] + acc[2] + acc[3];
+	double adj = 0.0;
+	for(size_t i = 0; i < 4; i++) {
+		if(acc[i] == 0) { continue; }
+
+		double const c = (double)acc[i];
+		double const f = (double)(acc[i]<<2) / (double)tot;
+
+		adj -= c * log(f);
+	}
+
+	debug("(%zu, %zu, %zu, %zu), adj(%f)", acc[0], acc[1], acc[2], acc[3], adj);
+	return((int32_t)(adj * pf->stat.rlambda));
+}
+
+static _force_inline
+tm_score_t tm_extend_patch_score(tm_scan_t const *self, tm_idx_profile_t const *pf, tm_idx_sketch_t const *sk, uint8_t const *query, size_t qlen, tm_pos_t epos, dz_alignment_t const *aln)
+{
+	_unused(qlen);
+
+	/* add bonus if anchored at the head */
+	uint32_t const rend  = epos.dir ? 0 : tm_idx_ref_seq_len(sk);
+	uint32_t const bonus = epos.r == rend ? pf->extend.bonus : 0;
+	int32_t const raw    = bonus + aln->score;
+	// fprintf(stderr, "dir(%u), (%u, %u), rend(%u), maximal(%u), bonus(%u)\n", epos.dir, epos.r, tm_aln_span(aln).r, rend, epos.r == rend, bonus);
+
+	/* calc complexity */
+	uint32_t const qspan = aln->query_length;
+	uint32_t const qpos  = epos.q - qspan;
+	int32_t const adj = tm_extend_calc_complexity(self, pf, &query[qpos], qspan);
+
+	// fprintf(stderr, "score(%d, %d)\n", raw, raw + adj);
+	return((tm_score_t){
+		.raw     = raw,
+		.patched = MAX2(0, raw + adj)
+	});
+}
+
+static _force_inline
+uint64_t tm_extend_single(tm_scan_t *self, tm_idx_profile_t const *pf, tm_idx_sketch_t const *sk, uint8_t const *query, size_t qlen, tm_chain_t const *q)
+{
+	tm_extend_res_t const r = tm_extend_core(self, pf, sk, query, qlen, q);
+	if(r.aln == NULL) { return(0); }
+
+	/* check score */
+	tm_score_t const score = tm_extend_patch_score(self, pf, sk, query, qlen, r.epos, r.aln);
+	if(score.patched <= pf->extend.min_score) { return(0); }
+
+	/* save alignment; discard traceback object if the alignment is filtered out by an existing one */
+	tm_aln_t const a = tm_extend_compose_aln(self, q, r.epos, r.aln, score);
+
+	/* interval tree not update when the new one is discarded */
+	return(tm_extend_record(self, &a));		/* 1 if succeeded */
 }
 
 static _force_inline
@@ -4359,28 +4776,21 @@ size_t tm_extend_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *query,
 		/* skip if already covered (and there is no possibility that this chain surpasses the previous ones) */
 		if(tm_extend_is_covered(self, q)) { continue; }
 
-		// tm_aln_t const caln = tm_chain_as_aln(q);
+		/* save current traceback stack for unwinding */
+		dz_freeze_t const *fz = dz_arena_freeze(self->extend.trace);
+
+		/* extend */
 		tm_idx_sketch_t const *s  = sk[q->attr.sep.rid];
 		tm_idx_profile_t const *p = pf[s->h.pid];
 		debug("%r, rid(%u), pid(%u), rname(%s)", tm_chain_to_str, q, q->attr.sep.rid, tm_idx_ref_pid(s), tm_idx_ref_name_ptr(s));
 
-		/* extend */
-		dz_freeze_t const *fz = dz_arena_freeze(self->extend.trace);
-		tm_extend_res_t r = tm_extend_core(self, p, s, query, qlen, q);
-		if(r.aln == NULL || tm_extend_patched_score(self, p, r.epos, r.aln) <= p->extend.min_score) {
+		if(tm_extend_single(self, p, s, query, qlen, q) == 0) {
+			/* failure; unwind traceback stack */
 			dz_arena_restore(self->extend.trace, fz);
-			continue;
+		} else {
+			/* succeeded */
+			if(tm_extend_is_complete(self)) { break; }
 		}
-
-		/* save alignment; discard traceback object if the alignment is filtered out by an existing one */
-		tm_aln_t const a = tm_extend_compose_aln(self, p, q, r.epos, r.aln);
-		if(tm_extend_record(self, &a) == 0) {
-			dz_arena_restore(self->extend.trace, fz);
-			continue;	/* interval tree not update when the new one is discarded */
-		}
-
-		/* test termination condition */
-		if(tm_extend_is_complete(self)) { break; }
 	}
 
 	/* anything else? */
@@ -4591,11 +5001,13 @@ void tm_print_aln(tm_print_t *self, tm_idx_sketch_t const **si, bseq_meta_t cons
 		/* query */ "%.*s\t%zu\t%zu\t%zu\t"
 		/* dir   */ "%c\t"
 		/* ref   */ "%.*s\t%zu\t%zu\t%zu\t"
-		/* stats */ "*\t%u\t255\tAS:i:%u\tCG:Z:",	/* and cigar */
+		/* stats */ "*\t%u\t255\tAS:i:%u\tRS:i:%u\tCG:Z:",	/* and cigar */
 		(int)l->name.len, l->name.ptr, l->seq.len, l->seq.spos, l->seq.epos,
-		aln->dir ? '-' : '+',
+		aln->pos.dir ? '-' : '+',
 		(int)r->name.len, r->name.ptr, r->seq.len, r->seq.spos, r->seq.epos,
-		aln->span.r, aln->score						/* patched score */
+		aln->span.r,
+		(uint32_t)aln->score.patched,		/* patched score */
+		(uint32_t)aln->score.raw			/* raw score (with bonus) */
 	);
 	tm_print_cigar_reverse(self, aln->path.ptr, aln->path.len);
 	printf("\n");
@@ -4938,7 +5350,7 @@ static int tm_conf_ccnt(tm_conf_t *conf, char const *arg) {
 	return(0);
 }
 static int tm_conf_qspan(tm_conf_t *conf, char const *arg) {
-	conf->fallback.qspan_thresh = tm_idx_wrap(mm_atoi(arg, 0));
+	conf->fallback.span_thresh = tm_idx_wrap(mm_atoi(arg, 0));
 	return(0);
 }
 static int tm_conf_match(tm_conf_t *conf, char const *arg) {
@@ -5184,7 +5596,7 @@ void tm_conf_print_help(tm_conf_t const *conf, FILE *lfp)
 	_msg(2, "  -k INT       k-mer length [%zu]", conf->fallback.kmer);
 	_msg(2, "  -w INT       chaining window size [%zu]", conf->fallback.window);
 	_msg(3, "  -c INT       minimum seed count for chain [%u]", (uint32_t)conf->fallback.min_scnt);
-	_msg(3, "  -S INT       minimum q-side span for skipping filter [%u]", (uint32_t)conf->fallback.qspan_thresh);
+	_msg(3, "  -S INT       minimum q-side span for skipping filter [%u]", (uint32_t)conf->fallback.span_thresh);
 	_msg(2, "  -a INT       match award [%u]", (uint32_t)conf->fallback.match);
 	_msg(2, "  -b INT       mismatch penalty [%u]", (uint32_t)conf->fallback.mismatch);
 	_msg(2, "  -p INT       gap-open penalty [%u]", (uint32_t)conf->fallback.gap_open);
