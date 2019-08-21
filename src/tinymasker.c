@@ -1850,7 +1850,7 @@ tm_idx_dim_t tm_idx_fill_idx(toml_array_t const *arr, tm_idx_dim_t dim)
 	/* prebuilt conversion table */
 	static uint8_t const idx[2][TM_REF_ALPH_SIZE] __attribute__(( aligned(16) )) = {
 		{ 1, 2, 4, 8 },		/* A, C, G, T */
-		{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }	/* id(x) */
+		{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }	/* FIXME? id(x) */
 	};
 	memcpy(&dim.idx, &idx[dim.rsize == 16], TM_REF_ALPH_SIZE);
 	return(dim);
@@ -1883,12 +1883,17 @@ tm_idx_dim_t tm_idx_parse_dim(toml_array_t const *arr)
 static _force_inline
 uint64_t tm_idx_parse_row(tm_idx_profile_t *profile, toml_array_t const *row, size_t qidx, tm_idx_dim_t dim)
 {
-	static uint8_t const conv[16] = {
-		[A] = tA, [C] = tC, [G] = tG, [T] = tT,
-		[R] = tR, [Y] = tY, [S] = tS,
-		[K] = tK, [M] = tM, [W] = tW,
-		[B] = tB, [D] = tD, [H] = tH, [V] = tV
+	static uint8_t const rconv[16] __attribute__(( aligned(16) )) = {
+		[tA] = A, [tC] = C, [tG] = G, [tT] = T,
+		[tR] = R, [tY] = Y, [tS] = S, [tS ^ 0x0f] = S,
+		[tK] = K, [tM] = M, [tW] = W, [tW ^ 0x0f] = W,
+		[tB] = B, [tD] = D, [tH] = H, [tV] = V
 	};
+	v16i8_t const mv = _load_v16i8(rmap);
+
+	/* load current row */
+	int8_t *p = &profile->extend.score_matrix[qidx * DZ_REF_MAT_SIZE];
+	v16i8_t v = _loadu_v16i8(p);
 
 	for(size_t ridx = 0; ridx < dim.rsize; ridx++) {
 		/* retrieve string at (qidx, ridx) */
@@ -1899,8 +1904,17 @@ uint64_t tm_idx_parse_row(tm_idx_profile_t *profile, toml_array_t const *row, si
 		if(n == INT64_MIN) { return(1); }
 
 		/* save (others are left -DZ_SCORE_OFS) */
-		profile->extend.score_matrix[qidx * DZ_REF_MAT_SIZE + conv[dim.idx[ridx]]] = n;
+		uint8_t const ch = dim.idx[ridx];	/* 4bit encoded */
+		v16i8_t const cv = _set_v16i8(ch);
+		v16i8_t const eq = _eq_v16i8(mv, cv);
+
+		/* fold char into vector */
+		v16i8_t const nv = _set_v16i8(n);
+		v = _sel_v16i8(eq, nv, v);
 	}
+
+	/* write back */
+	_storeu_v16i8(p, v);
 
 	/* we need to patch bonus afterward */
 	return(0);
