@@ -1889,7 +1889,7 @@ uint64_t tm_idx_parse_row(tm_idx_profile_t *profile, toml_array_t const *row, si
 		[tK] = K, [tM] = M, [tW] = W, [tW ^ 0x0f] = W,
 		[tB] = B, [tD] = D, [tH] = H, [tV] = V
 	};
-	v16i8_t const mv = _load_v16i8(rmap);
+	v16i8_t const mv = _load_v16i8(rconv);
 
 	/* load current row */
 	int8_t *p = &profile->extend.score_matrix[qidx * DZ_REF_MAT_SIZE];
