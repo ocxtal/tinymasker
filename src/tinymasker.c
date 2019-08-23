@@ -966,6 +966,7 @@ typedef struct {
 	uint64_t max_gap_len;
 	uint64_t full_length_bonus;			/* anchoring bonus */
 	int64_t min_score;
+	uint64_t use_raw_score;
 } tm_idx_conf_t;
 
 /* make user-provided value different from default one */
@@ -1018,7 +1019,8 @@ typedef struct {
 
 		/* Smith-Waterman params */
 		int32_t min_score;
-		uint32_t bonus;				/* reference-side bonus; handled manually */
+		uint16_t is_raw;
+		uint16_t bonus;				/* reference-side bonus; handled manually */
 		uint16_t vlim, hlim;		/* max_ins_len and max_del_len */
 		uint8_t giv, gev, gih, geh;
 		int8_t score_matrix[DZ_QUERY_MAT_SIZE * DZ_REF_MAT_SIZE];
@@ -1476,6 +1478,7 @@ void tm_idx_fill_default(tm_idx_profile_t *profile)
 	/* extension */
 	profile->extend.bonus = 10;
 	profile->extend.min_score = 30;
+	profile->extend.is_raw = 0;
 	profile->extend.giv = 5;
 	profile->extend.gev = 1;
 	profile->extend.gih = 5;
@@ -1540,6 +1543,9 @@ void tm_idx_override_default(tm_idx_profile_t *profile, tm_idx_conf_t const *con
 	/* postprocess */
 	if(!tm_idx_is_default(conf->min_score)) {
 		profile->extend.min_score = tm_idx_unwrap(conf->min_score);
+	}
+	if(!tm_idx_is_default(conf->use_raw_score)) {
+		profile->extend.is_raw = tm_idx_unwrap(conf->use_raw_score);
 	}
 	return;
 }
@@ -5477,6 +5483,11 @@ static int tm_conf_min_score(tm_conf_t *conf, char const *arg) {
 	conf->fallback.min_score = tm_idx_wrap(mm_atoi(arg, 0));
 	return(0);
 }
+static int tm_conf_use_raw(tm_conf_t *conf, char const *arg) {
+	_unused(arg);
+	conf->fallback.use_raw_score = tm_idx_wrap(1);
+	return(0);
+}
 static int tm_conf_flip(tm_conf_t *conf, char const *arg) {
 	_unused(arg);
 	conf->print.flip = 1;
@@ -5605,7 +5616,8 @@ uint64_t tm_conf_init_static(tm_conf_t *conf, char const *const *argv, FILE *fp)
 			['q'] = { OPT_REQ,  _c(tm_conf_gap_extend) },
 			['g'] = { OPT_REQ,  _c(tm_conf_max_gap) },
 			['l'] = { OPT_REQ,  _c(tm_conf_anc_bonus) },
-			['m'] = { OPT_REQ,  _c(tm_conf_min_score) }
+			['m'] = { OPT_REQ,  _c(tm_conf_min_score) },
+			['R'] = { OPT_BOOL, _c(tm_conf_use_raw) }
 		}
 		#undef _c
 	};
