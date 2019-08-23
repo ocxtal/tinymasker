@@ -1019,7 +1019,7 @@ typedef struct {
 
 		/* Smith-Waterman params */
 		int32_t min_score;
-		uint16_t is_raw;
+		uint16_t use_raw;
 		uint16_t bonus;				/* reference-side bonus; handled manually */
 		uint16_t vlim, hlim;		/* max_ins_len and max_del_len */
 		uint8_t giv, gev, gih, geh;
@@ -1478,7 +1478,7 @@ void tm_idx_fill_default(tm_idx_profile_t *profile)
 	/* extension */
 	profile->extend.bonus = 10;
 	profile->extend.min_score = 30;
-	profile->extend.is_raw = 0;
+	profile->extend.use_raw = 0;
 	profile->extend.giv = 5;
 	profile->extend.gev = 1;
 	profile->extend.gih = 5;
@@ -1545,7 +1545,7 @@ void tm_idx_override_default(tm_idx_profile_t *profile, tm_idx_conf_t const *con
 		profile->extend.min_score = tm_idx_unwrap(conf->min_score);
 	}
 	if(!tm_idx_is_default(conf->use_raw_score)) {
-		profile->extend.is_raw = tm_idx_unwrap(conf->use_raw_score);
+		profile->extend.use_raw = tm_idx_unwrap(conf->use_raw_score);
 	}
 	return;
 }
@@ -4841,7 +4841,8 @@ uint64_t tm_extend_single(tm_scan_t *self, tm_idx_profile_t const *pf, tm_idx_sk
 
 	/* check score */
 	tm_score_t const score = tm_extend_patch_score(self, pf, sk, query, qlen, r.epos, r.aln);
-	if(score.patched <= pf->extend.min_score) { return(0); }
+	int32_t const s = pf->extend.use_raw ? score.raw : score.patched;
+	if(s <= pf->extend.min_score) { return(0); }
 
 	/* save alignment; discard traceback object if the alignment is filtered out by an existing one */
 	tm_aln_t const a = tm_extend_compose_aln(self, q, r.epos, r.aln, score);
