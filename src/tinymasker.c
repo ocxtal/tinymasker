@@ -5599,7 +5599,7 @@ uint64_t tm_conf_init_static(tm_conf_t *conf, char const *const *argv, FILE *fp)
 			['v'] = { OPT_OPT,  _c(tm_conf_verbose) },
 			['h'] = { OPT_BOOL, _c(tm_conf_help) },
 			['t'] = { OPT_REQ,  _c(tm_conf_threads) },
-			['f'] = { OPT_BOOL, _c(tm_conf_flip) },
+			['F'] = { OPT_BOOL, _c(tm_conf_flip) },
 
 			/* preset and configuration file */
 			['x'] = { OPT_REQ,  _c(tm_conf_preset) },
