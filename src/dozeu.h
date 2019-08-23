@@ -166,18 +166,11 @@ extern "C" {
 
 
 /* unittest and debug configuration */
-#if (defined(DEBUG) || (defined(UNITTEST) && UNITTEST != 0)) && !defined(__cplusplus)
-#  include "utils/debug.h"
-#  if !defined(UNITTEST_UNIQUE_ID)
-#    define UNITTEST_ALIAS_MAIN		0
-#    define UNITTEST_UNIQUE_ID		3213
-#  endif
-#  include "utils/unittest.h"
-unittest_config( .name = "dozeu" );
-unittest() { debug("hello"); }
+#if (defined(DZ_UNITTEST) && !defined(__cplusplus))
+/* nothing */
 #else
 #  ifndef UNITTEST_H_INCLUDED
-#    define unittest(...)				static void dz_pp_cat(dz_unused_, __LINE__)(void)
+#    define unittest(...)			static void dz_pp_cat(dz_unused_, __LINE__)(void)
 #    define ut_assert(...)			;
 #    define debug(...)				;
 #    define debugblock(...)			;

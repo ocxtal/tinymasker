@@ -19,17 +19,17 @@
 #  define MAX_THREADS			( 256 )
 #endif
 
-
-#ifndef UNITTEST
-#  define UNITTEST				( 0 )
-#endif
-
-#define UNITTEST_UNIQUE_ID		1
-#include "utils/utils.h"		/* include all */
-
-
 #define TM_REF_ALPH_SIZE		( 16 )
 #define TM_QUERY_ALPH_SIZE		( 4 )
+
+
+#ifndef UNITTEST
+#  define UNITTEST				( 1 )
+#endif
+#define UNITTEST_UNIQUE_ID		1
+
+#include "utils/utils.h"		/* include all */
+unittest_config( .name = "tinymasker" );
 
 
 #define DZ_WRAPPED_API			( 0 )
@@ -69,7 +69,6 @@ char const *tm_version(void)
 static _force_inline char const *tm_commit(void) { return(TM_COMMIT); }
 static _force_inline char const *tm_arch_name(void) { return(TM_ARCH_NAME); }
 
-unittest_config( .name = "tinymasker" );
 
 
 /* alphabets */
@@ -105,17 +104,19 @@ enum alphabet_query {
 };
 
 enum alphabet_reference {
-	tA = 0x00, tT = 0x0f,
-	tC = 0x01, tG = 0x0e,
+	tA = 0x0c, tT = 0x03,
+	tC = 0x0a, tG = 0x05,
 
-	tR = 0x02, tY = 0x0d,
-	tS = 0x03,	/* 0x0c */
-	tW = 0x04,	/* 0x0b */
-	tK = 0x05, tM = 0x0a,
+	tR = 0x0d, tY = 0x02,
+	tS = 0x0f,	/* 0x00; does not appear in canonical sequence */
+	tW = 0x0e,	/* 0x01 */
+	tK = 0x0b, tM = 0x04,
 
-	tB = 0x06, tV = 0x09,
-	tD = 0x07, tH = 0x08
+	tB = 0x09, tV = 0x06,
+	tD = 0x08, tH = 0x07
 };
+#define tm_pack_ref_base(x)		( (x)<<1 )
+#define tm_unpack_ref_base(x)	( (x)>>1 )
 
 
 /* FASTA/Q parser */
@@ -139,7 +140,7 @@ enum alphabet_reference {
 
 
 /* debug supplementary */
-#define _printu_v16i8(a) { \
+#define _print_v16u8(a) { \
 	uint8_t _buf[16]; \
 	_storeu_v16i8(_buf, a); \
 	debug("(v16i8_t) %s(%d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d)", \
@@ -161,6 +162,46 @@ enum alphabet_reference {
 		_buf[1] - 128, \
 		_buf[0] - 128); \
 }
+
+#define _print_v32i8x(a) { \
+	uint8_t _buf[32]; \
+	_storeu_v32i8(_buf, a); \
+	debug("(v32i8_t) %s(%x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x)", \
+		#a, \
+		_buf[16 + 15], \
+		_buf[16 + 14], \
+		_buf[16 + 13], \
+		_buf[16 + 12], \
+		_buf[16 + 11], \
+		_buf[16 + 10], \
+		_buf[16 + 9], \
+		_buf[16 + 8], \
+		_buf[16 + 7], \
+		_buf[16 + 6], \
+		_buf[16 + 5], \
+		_buf[16 + 4], \
+		_buf[16 + 3], \
+		_buf[16 + 2], \
+		_buf[16 + 1], \
+		_buf[16 + 0], \
+		_buf[15], \
+		_buf[14], \
+		_buf[13], \
+		_buf[12], \
+		_buf[11], \
+		_buf[10], \
+		_buf[9], \
+		_buf[8], \
+		_buf[7], \
+		_buf[6], \
+		_buf[5], \
+		_buf[4], \
+		_buf[3], \
+		_buf[2], \
+		_buf[1], \
+		_buf[0]); \
+}
+
 
 
 /* 1-origin coorrdinates for seed positions */
@@ -232,25 +273,53 @@ typedef struct {
 	tm_ref_kmer_pair_t kmer[256];	/* branch stack; max ambiguity = 4^4 */
 } tm_ref_work_t;
 
-static _force_inline
-uint64_t tm_ref_base_to_2bit(uint8_t base)
-{
-	/* convert iupac nucleotide to pair of 2-bit encoded bases */
-	// uint64_t const magic = 0x498e4dc399824100;
-	// return((magic>>(4 * base)) & 0x0f);
-
-	uint64_t const magic = 0x32d9c44d8edc9810 * 4ULL;
-	return((magic>>(2 * base) & 0x0f));
-}
 
 static _force_inline
 uint64_t tm_ref_is_ambiguous(uint8_t base)
 {
-	// uint64_t const magic = 0x1111111011101000;
-	// return((magic>>(4 * base)) & 0x01);
+	uint64_t const magic = 0x1110101111010111;
+	return((magic>>(2 * base)) & 0x01);
+}
 
-	uint64_t const magic = 0x0011111111111100 * 4ULL;
-	return((magic>>(2 * base) & 0x01));
+static _force_inline
+uint64_t tm_ref_base_to_2bit(uint8_t base)
+{
+	/* convert iupac nucleotide to pair of 2-bit encoded bases */
+	uint64_t const magic = 0x9c80e1e8d4243dc9;
+	return((magic>>(2 * base)) & 0x0f);
+}
+
+unittest( .name = "ref.conv.magic" ) {
+	struct { uint8_t base, amb, enc; } const x[16] = {
+		{ A, 0, tm_pack_ref_base(tA) },
+		{ C, 0, tm_pack_ref_base(tC) },
+		{ G, 0, tm_pack_ref_base(tG) },
+		{ T, 0, tm_pack_ref_base(tT) },
+		{ R, 1, tm_pack_ref_base(tR) },
+		{ Y, 1, tm_pack_ref_base(tY) },
+		{ S, 1, tm_pack_ref_base(tS) },
+		{ S, 1, tm_pack_ref_base(tS ^ 0x0f) },
+		{ W, 1, tm_pack_ref_base(tW) },
+		{ W, 1, tm_pack_ref_base(tW ^ 0x0f) },
+		{ K, 1, tm_pack_ref_base(tK) },
+		{ M, 1, tm_pack_ref_base(tM) },
+		{ B, 1, tm_pack_ref_base(tB) },
+		{ D, 1, tm_pack_ref_base(tD) },
+		{ H, 1, tm_pack_ref_base(tH) },
+		{ V, 1, tm_pack_ref_base(tV) }
+	};
+	uint8_t const conv[4] = { A, C, G, T };
+
+	for(size_t i = 0; i < 16; i++) {
+		ut_assert(tm_ref_is_ambiguous(x[i].enc) == x[i].amb);
+		ut_assert((conv[tm_ref_base_to_2bit(x[i].enc) & 0x03] & x[i].base) != 0);
+		ut_assert((conv[tm_ref_base_to_2bit(x[i].enc) & 0x03] & ~x[i].base) == 0);
+
+		if(x[i].amb) {
+			ut_assert((conv[tm_ref_base_to_2bit(x[i].enc)>>2] & x[i].base) != 0);
+			ut_assert((conv[tm_ref_base_to_2bit(x[i].enc)>>2] & ~x[i].base) == 0);
+		}
+	}
 }
 
 static _force_inline
@@ -2337,7 +2406,7 @@ uint64_t tm_idx_gen_core(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, char cons
 		.head_margin = sizeof(tm_idx_batch_t),
 
 		/* irregular 4bit encoding for reference */
-		#define _c(x)		( ((x)<<1) | 0x01 )		/* make different from '\0' */
+		#define _c(x)		( tm_pack_ref_base(x) )		/* make different from '\0' */
 		.conv_table  = {
 			[A] = _c(tA),
 			[C] = _c(tC),
@@ -2346,8 +2415,8 @@ uint64_t tm_idx_gen_core(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, char cons
 
 			[R] = _c(tR),
 			[Y] = _c(tY),
-			[S] = _c(tS),	/* 0x0c */
-			[W] = _c(tW),	/* 0x0b */
+			[S] = _c(tS),
+			[W] = _c(tW),
 			[K] = _c(tK),
 			[M] = _c(tM),
 
@@ -2475,7 +2544,7 @@ _tm_idx_gen_error:;
 
 
 /* index I/O */
-#define TM_IDX_MAGIC				( 0x33494d54 )
+#define TM_IDX_MAGIC				( 0x34494d54 )
 
 typedef struct {
 	uint64_t magic;
@@ -3659,13 +3728,19 @@ void tm_filter_work_init(tm_filter_work_t *w, tm_idx_profile_t const *profile)
 /* 4-bit encoding for reference side; return in reversed orientation */
 static _force_inline
 v32i8_t tm_filter_load_rf(uint8_t const *p) {
-	v32i8_t const v = _loadu_v32i8(p);
-	return(_swap_v32i8(v));
+	v32i8_t const x = _loadu_v32i8(p);
+	v32i8_t const y = _swap_v32i8(x);
+
+	_print_v32i8x(y);
+	return(y);
 }
 
 static _force_inline
 v32i8_t tm_filter_load_rr(uint8_t const *p) {
-	return(_loadu_v32i8(p - 32));
+	v32i8_t const x = _loadu_v32i8(p - 32);
+
+	_print_v32i8x(x);
+	return(x);
 }
 
 
@@ -3686,12 +3761,13 @@ v32i8_t tm_filter_conv_r(v32i8_t v)
 {
 	static uint8_t const rconv[16] __attribute__(( aligned(16) )) = {
 		[tA] = A, [tC] = C, [tG] = G, [tT] = T,
-		[tR] = R, [tY] = Y, [tS] = S, [tS ^ 0x0f] = S,
-		[tK] = K, [tM] = M, [tW] = W, [tW ^ 0x0f] = W,
+		[tR] = R, [tY] = Y, [tS] = S,	/* tS ^ 0x0f and tW ^ 0x0f never happen since the input sequence is always canonical */
+		[tK] = K, [tM] = M, [tW] = W,
 		[tB] = B, [tD] = D, [tH] = H, [tV] = V
 	};
 	v32i8_t const cv = _from_v16i8_v32i8(_load_v16i8(rconv));
-	return(_shuf_v32i8(cv, v));
+	v32i8_t const x = _shr_v32i8(v, 1);
+	return(_shuf_v32i8(cv, x));
 }
 
 static _force_inline
@@ -3732,10 +3808,16 @@ void tm_filter_load_seq(tm_filter_work_t *w, uint8_t const *r, uint8_t const *q,
 	_store_v32i8(qfp, qf);
 	_store_v32i8(qrp, qr);
 
-	// _print_v32i8(rf);
-	// _print_v32i8(rr);
-	// _print_v32i8(qf);
-	// _print_v32i8(qr);
+	debugblock({
+		v32i8_t const sf = _swap_v32i8(rf);
+		v32i8_t const sr = _swap_v32i8(rr);
+		v32i8_t const tf = _load_v32i8(qfp);
+		v32i8_t const tr = _load_v32i8(qrp);
+		_print_v32i8(sf);
+		_print_v32i8(tf);
+		_print_v32i8(sr);
+		_print_v32i8(tr);
+	});
 	return;
 }
 
@@ -3765,16 +3847,16 @@ int64_t tm_filter_extend_core(tm_filter_work_t *w, uint8_t const *buf)
 		v16i8_t const rv = _loadu_v16i8(r);	/* move rightward */
 		v16i8_t const ev = _calc_next(rv, qv, pv, cv, _bsl_v16i8);
 		mv = _maxu_v16i8(mv, ev);
-		// _printu_v16i8(ev);
-		// _printu_v16i8(mv);
+		// _print_v16u8(ev);
+		// _print_v16u8(mv);
 
 		/* #1 (odd) */
 		q++;
 		qv = _loadu_v16i8(q);	/* move downward */
 		v16i8_t const ov = _calc_next(rv, qv, cv, ev, _bsr_v16i8);
 		mv = _maxu_v16i8(mv, ov);
-		// _printu_v16i8(ov);
-		// _printu_v16i8(mv);
+		// _print_v16u8(ov);
+		// _print_v16u8(mv);
 
 		/* alias registers for the next loop */
 		pv = ev;
@@ -3800,7 +3882,7 @@ int64_t tm_filter_extend(tm_filter_work_t *w, tm_idx_profile_t const *profile, u
 	/* extend */
 	int64_t const fw = tm_filter_extend_core(w, w->fw);
 	int64_t const rv = tm_filter_extend_core(w, w->rv);
-	// debug("fw(%ld), rv(%ld), score(%ld)", fw, rv, fw + rv);
+	debug("fw(%ld), rv(%ld), score(%ld)", fw, rv, fw + rv);
 	return(fw + rv >= profile->filter.min_score);
 }
 
@@ -4336,7 +4418,7 @@ dz_fill_fetch_t tm_extend_fetch_core(uint8_t const *p, ptrdiff_t inc)
 
 	return((dz_fill_fetch_t){
 		.is_term = x == '\0',
-		.rch     = y & 0x1e
+		.rch     = y & 0x1e					/* note: LSb is always cleared */
 	});
 }
 
