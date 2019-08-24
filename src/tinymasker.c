@@ -262,6 +262,9 @@ typedef struct {
 	uint32_t f, r;
 } tm_ref_kmer_pair_t;
 
+/* branch stack; max ambiguity = 4^5 */
+#define TM_REF_KMER_STACK_SIZE	( 4096 )
+
 typedef struct {
 	/* constants */
 	uint32_t amask, shift;
@@ -272,7 +275,7 @@ typedef struct {
 	/* kmer stack */
 	uint32_t size;
 	uint32_t branches;
-	tm_ref_kmer_pair_t kmer[4096];	/* branch stack; max ambiguity = 4^4 */
+	tm_ref_kmer_pair_t kmer[TM_REF_KMER_STACK_SIZE];
 } tm_ref_work_t;
 
 
@@ -426,7 +429,7 @@ tm_ref_kpos_t *tm_ref_reserve(tm_ref_kpos_v *buf, tm_ref_kpos_t *q)
 	// debug("cnt(%zu)", kv_cnt(*buf));
 
 	size_t const kcnt = kv_cnt(*buf);
-	tm_ref_kpos_t *p = kv_reserve(tm_ref_kpos_t, *buf, kcnt + 1024);
+	tm_ref_kpos_t *p = kv_reserve(tm_ref_kpos_t, *buf, kcnt + 32 * TM_REF_KMER_STACK_SIZE);
 	return(&p[kcnt]);
 }
 
