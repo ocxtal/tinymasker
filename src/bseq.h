@@ -113,7 +113,7 @@ typedef struct {
 static _force_inline
 void bseq_buf_init(bseq_file_t *fp, size_t batch_size)
 {
-	size_t malloc_size = _roundup(sizeof(uint8_t) * batch_size + 2 * BSEQ_MGN, ARCH_HUGEPAGE_SIZE);
+	size_t const malloc_size = _roundup(sizeof(uint8_t) * batch_size + 2 * BSEQ_MGN, ARCH_HUGEPAGE_SIZE);
 	uint8_t *ptr = aligned_malloc(malloc_size);
 	_memset_blk_u(ptr, 0, BSEQ_MGN);		/* clear head margin so that parsing will not depend on uninitialized values */
 
@@ -146,7 +146,7 @@ size_t bseq_fetch_block(bseq_file_t *fp)
 	/* update EOF */
 	fp->is_eof = MAX2(fp->is_eof, rbeof(&fp->rb));
 
-	// debug("bytes, state(%u), len(%lu), is_eof(%u)", fp->state, bytes, fp->is_eof);
+	// debug("bytes, state(%u), len(%lu), is_eof(%u), rb(%u, %zu, %zu)", fp->state, bytes, fp->is_eof, fp->rb.eof, fp->rb.head, fp->rb.len);
 	return(bytes);
 }
 
@@ -265,13 +265,13 @@ void bseq_fixup_name(bseq_work_t *w, bseq_file_t *fp)
 	v32i8_t const sv = _set_v32i8(' ');
 
 	/* strip head spaces */ {
-		uint64_t m = _match(sv, _loadu_v32i8(&w->q[p]));
+		uint64_t const m = _match(sv, _loadu_v32i8(&w->q[p]));
 		ZCNT_RESULT size_t l = _tzc_u32(~m);
 		size_t len = l; p += len; nlen -= len;
 	}
 
 	/* strip tail spaces */ {
-		uint64_t m = _match(sv, _loadu_v32i8(&w->q[t - 32]));
+		uint64_t const m = _match(sv, _loadu_v32i8(&w->q[t - 32]));
 		ZCNT_RESULT size_t l = _lzc_u32(~m);
 		size_t len = l; t -= len; nlen -= len;
 	}
@@ -279,8 +279,8 @@ void bseq_fixup_name(bseq_work_t *w, bseq_file_t *fp)
 	/* split at the first space */
 	size_t q = p;
 	while(q < t) {
-		uint64_t m = _match(sv, _loadu_v32i8(&w->q[q]));
-		size_t len = MIN2(32, t - q);
+		uint64_t const m = _match(sv, _loadu_v32i8(&w->q[q]));
+		size_t const len = MIN2(32, t - q);
 		q += len;
 		if(m) {
 			ZCNT_RESULT size_t u = _tzc_u32(m);
@@ -463,8 +463,10 @@ bseq_bin_t bseq_finalize_bin(bseq_file_t *fp, bseq_metam_v *seq, uint8m_v *bin)
 	kvm_fill_margin(uint8_t, *bin, 0);
 
 	/* add offsets to validate pointers */
-	ptrdiff_t b = (ptrdiff_t)kvm_ptr(*bin);
+	ptrdiff_t const b = (ptrdiff_t)kvm_ptr(*bin);
 	kvm_foreach(bseq_meta_t, *seq, { p->seq += b; });
+
+	// debug("state(%u), is_eof(%u), cnt(%zu)", fp->state, fp->is_eof, kvm_cnt(*seq));
 
 	return((bseq_bin_t){
 		.base = kvm_base_ptr(*bin),
