@@ -535,14 +535,14 @@ bseq_close_t bseq_close(bseq_file_t *fp)
 {
 	if(fp == NULL) { return((bseq_close_t){ .cnt = 0, .status = 0 }); }
 
-	size_t scnt = fp->scnt;
-	uint64_t status = bseq_is_broken(fp);
+	size_t const scnt = fp->scnt;
+	uint64_t const status = bseq_is_broken(fp);
 
 	rbclose_static(&fp->rb);
 	bseq_buf_destroy(fp);
 	free(fp);
 	return((bseq_close_t){
-		.cnt = scnt,
+		.cnt    = scnt,
 		.status = status
 	});
 }
