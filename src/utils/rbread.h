@@ -137,12 +137,16 @@ size_t rbread_bulk(rbread_t *rb, void *dst, size_t len)
 	uint8_t *p = dst;
 
 	/* flush remaining content in buffer */
-	size_t hlen = MIN2(rem, rb->len - rb->head);
+	size_t const hlen = MIN2(rem, rb->len - rb->head);
 	if(hlen > 0) { memcpy(&p[len - rem], &rb->buf[rb->head], hlen); }
 	rem -= hlen; rb->head += hlen;
 
+	/* EOF state fixup before continue to bulk loop */
+	if(rb->eof == 1 && rb->head == rb->len) { rb->eof = 2; }
+
+	/* if not EOF, try bulk read */
 	while(rb->eof < 2 && rem > rb->bulk_size / 8) {
-		struct rb_reader_result_s r = rb->read(rb, &p[len - rem], rem);
+		struct rb_reader_result_s const r = rb->read(rb, &p[len - rem], rem);
 		rem -= r.obtained;
 		if(rb->eof == 1 && r.remaining == 0) { rb->eof = 2; }
 	}
@@ -155,7 +159,7 @@ size_t rbread(rbread_t *rb, void *dst, size_t len)
 	size_t rem = len - rbread_bulk(rb, dst, len);
 	uint8_t *p = dst;
 	while(rb->eof < 2 && rem > 0) {
-		struct rb_reader_result_s r = rb->read(rb, rb->buf, rb->bulk_size);
+		struct rb_reader_result_s const r = rb->read(rb, rb->buf, rb->bulk_size);
 		rb->len = r.obtained;
 		rb->head = 0;
 		size_t tlen = MIN2(rem, rb->len);
