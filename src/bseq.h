@@ -592,7 +592,7 @@ void bseq_load_conv(uint8_t *q, uint8_t const *p)
 	if(((v16_masku_t){ .mask = _mask_v16i8(eqv) }).all != 0xffff) {
 
 		/* 0x00 and 0x0f are excluded */
-		for(size_t i = 0x01; i < 0x0f; i++) {
+		for(size_t i = 0x00; i < 0x0f; i++) {
 			uint8_t const ch = "NACMGRSVTWYHKDBN"[i];
 
 			/* overwrite */

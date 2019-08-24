@@ -2429,7 +2429,9 @@ uint64_t tm_idx_gen_core(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, char cons
 			[B] = _c(tB),
 			[D] = _c(tD),
 			[H] = _c(tH),
-			[V] = _c(tV)
+			[V] = _c(tV),
+
+			[N] = _c(tR)		/* FIXME */
 		}
 		#undef _c
 	};
@@ -3737,7 +3739,7 @@ v32i8_t tm_filter_load_rf(uint8_t const *p) {
 	v32i8_t const x = _loadu_v32i8(p);
 	v32i8_t const y = _swap_v32i8(x);
 
-	_print_v32i8x(y);
+	// _print_v32i8x(y);
 	return(y);
 }
 
@@ -3745,7 +3747,7 @@ static _force_inline
 v32i8_t tm_filter_load_rr(uint8_t const *p) {
 	v32i8_t const x = _loadu_v32i8(p - 32);
 
-	_print_v32i8x(x);
+	// _print_v32i8x(x);
 	return(x);
 }
 
@@ -3814,6 +3816,7 @@ void tm_filter_load_seq(tm_filter_work_t *w, uint8_t const *r, uint8_t const *q,
 	_store_v32i8(qfp, qf);
 	_store_v32i8(qrp, qr);
 
+	/*
 	debugblock({
 		v32i8_t const sf = _swap_v32i8(rf);
 		v32i8_t const sr = _swap_v32i8(rr);
@@ -3824,6 +3827,7 @@ void tm_filter_load_seq(tm_filter_work_t *w, uint8_t const *r, uint8_t const *q,
 		_print_v32i8(sr);
 		_print_v32i8(tr);
 	});
+	*/
 	return;
 }
 
@@ -3888,7 +3892,7 @@ int64_t tm_filter_extend(tm_filter_work_t *w, tm_idx_profile_t const *profile, u
 	/* extend */
 	int64_t const fw = tm_filter_extend_core(w, w->fw);
 	int64_t const rv = tm_filter_extend_core(w, w->rv);
-	debug("fw(%ld), rv(%ld), score(%ld)", fw, rv, fw + rv);
+	// debug("fw(%ld), rv(%ld), score(%ld)", fw, rv, fw + rv);
 	return(fw + rv >= profile->filter.min_score);
 }
 
@@ -4478,7 +4482,7 @@ dz_fill_fetch_t tm_extend_fetch_next(tm_extend_fetcher_t *self, int8_t const *sc
 	self->p += self->inc;
 	self->next = next;
 
-	debug("p(%p), inc(%ld), is_term(%u), c(%x, %c)", self->p, self->inc, next.is_term, curr.rch, "ACRSWKBDHVMWSYGT"[curr.rch>>1]);
+	debug("p(%p), inc(%ld), is_term(%u), c(%x, %x)", self->p, self->inc, next.is_term, curr.rch, next.rch);
 	_print_v16i8((v16i8_t){ self->mv });
 	return(curr);
 
