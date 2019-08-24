@@ -102,6 +102,7 @@ enum alphabet_query {
 	nG = 0x08,
 	nT = 0x0c
 };
+#define tm_qbase_to_ascii(x)	( "A   C   G   T   "[(x) & 0x0f] )
 
 enum alphabet_reference {
 	tA = 0x0c, tT = 0x03,
@@ -117,6 +118,7 @@ enum alphabet_reference {
 };
 #define tm_pack_ref_base(x)		( (x)<<1 )
 #define tm_unpack_ref_base(x)	( (x)>>1 )
+#define tm_rbase_to_ascii(x)	( "SWYTMGVHDBCKARWS"[(x) & 0x0f] )
 
 
 /* FASTA/Q parser */
@@ -270,7 +272,7 @@ typedef struct {
 	/* kmer stack */
 	uint32_t size;
 	uint32_t branches;
-	tm_ref_kmer_pair_t kmer[256];	/* branch stack; max ambiguity = 4^4 */
+	tm_ref_kmer_pair_t kmer[4096];	/* branch stack; max ambiguity = 4^4 */
 } tm_ref_work_t;
 
 
@@ -558,7 +560,7 @@ typedef struct {
 _static_assert(sizeof(tm_ref_bin_t) == 16);		/* smallest bin size == 16 */
 #endif
 
-#define TM_REF_ALIGN_SIZE		( sizeof(uint64_t) )
+#define TM_REF_ALIGN_SIZE		( 2 * sizeof(uint64_t) )
 #define TM_REF_BASE_OFS			( sizeof(tm_ref_sketch_t) )
 
 
@@ -749,7 +751,7 @@ uint64_t tm_ref_build_link(tm_ref_cnt_t const *p, size_t ksize, tm_ref_sketch_t 
 			tm_ref_prefix_t n = tm_ref_find_link(p, ((i<<2) + j) & mask, max_shift);
 			int32_t const next = (int32_t)(n.ofs - p[i].ofs) / (int32_t)TM_REF_ALIGN_SIZE;	/* overflows; keep sign bit */
 			if(_unlikely(next > INT16_MAX || next < INT16_MIN)) {
-				error("link overflow at k-mer(%zx) and next base(%c), try smaller k-mer size for this sequence or shorten the sequence.", i, "ACGT"[next]);
+				error("link overflow at k-mer(%zx) and next base(%c), try smaller k-mer size for this sequence or shorten the sequence.", i, "ACGT"[j]);
 				return(1);
 			}
 
