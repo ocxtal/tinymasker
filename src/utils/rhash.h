@@ -82,7 +82,8 @@ _static_assert(sizeof(rh_hdr_t) == 8);
 	} \
 	static _force_inline \
 	void rh_resize_##_sfx(rh_##_sfx##_t *h, size_t size) { \
-		h->max = size; h->a = realloc(h->a, sizeof(_bkt_t) * h->max); \
+		h->max = MAX2(size, RH_INIT_SIZE); \
+		h->a = realloc(h->a, sizeof(_bkt_t) * h->max); \
 	} \
 	static _force_inline \
 	void rh_dump_##_sfx(rh_##_sfx##_t const *h, void *fp, write_t wfp) { \
@@ -105,8 +106,8 @@ _static_assert(sizeof(rh_hdr_t) == 8);
 		/* create hash object */ \
 		*h = (rh_##_sfx##_t){ \
 			.mask = hdr.size - 1,						/* in-use table size */ \
-			.cnt = hdr.cnt, \
 			.max = hdr.size,							/* malloc'd table size */ \
+			.cnt = hdr.cnt, \
 			.ub = hdr.size * RH_THRESH, \
 			.a = malloc(sizeof(_bkt_t) * hdr.size) \
 		}; \
@@ -126,7 +127,9 @@ _static_assert(sizeof(rh_hdr_t) == 8);
 	void rh_clear_##_sfx(rh_##_sfx##_t *h) { \
 		if(h == 0) { return; } \
 		/* clear hash table; don't clear max since it holds the malloc'd table size */ \
-		h->mask = RH_INIT_SIZE - 1; h->cnt = 0; h->ub = RH_INIT_SIZE * RH_THRESH; \
+		h->mask = RH_INIT_SIZE - 1; \
+		h->cnt = 0; \
+		h->ub = RH_INIT_SIZE * RH_THRESH; \
 		rh_clear_arr_##_sfx(h->a, RH_INIT_SIZE); \
 		return; \
 	} \
