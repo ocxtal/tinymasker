@@ -1657,7 +1657,7 @@ void tm_idx_calc_filter_params(tm_idx_profile_t *profile)
 }
 
 static _force_inline
-uint64_t tm_idx_check_sanity(tm_idx_profile_t const *profile)
+uint64_t tm_idx_check_profile(tm_idx_profile_t const *profile)
 {
 	#define tm_idx_assert(_cond, ...) ({ if(!(_cond)) { error("" __VA_ARGS__); ecnt++; } })
 
@@ -1726,7 +1726,7 @@ uint64_t tm_idx_check_sanity(tm_idx_profile_t const *profile)
 static _force_inline
 uint64_t tm_idx_finalize_profile(tm_idx_profile_t *profile)
 {
-	if(tm_idx_check_sanity(profile)) {
+	if(tm_idx_check_profile(profile)) {
 		return(1);
 	}
 
@@ -2404,6 +2404,19 @@ void tm_idx_record(uint32_t tid, tm_idx_gen_t *self, tm_idx_batch_t *batch)
 }
 
 static _force_inline
+uint64_t tm_idx_check_seq(tm_idx_gen_t *mii)
+{
+	tm_idx_sketch_t const **arr = (tm_idx_sketch_t const **)kv_ptr(mii->col.bin);
+
+	/* make sure at least one sequence is valid */
+	size_t valid = 0;
+	for(size_t i = 0; i < kv_cnt(mii->col.bin); i++) {
+		valid += arr[i] != NULL;
+	}
+	return(valid == 0);
+}
+
+static _force_inline
 uint64_t tm_idx_gen_core(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, char const *fn, pt_t *pt)
 {
 	_unused(conf);
@@ -2463,8 +2476,17 @@ uint64_t tm_idx_gen_core(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, char cons
 	}
 
 	/* sanity check */
+	if(c.cnt != kv_cnt(mii->col.bin)) {
+		error("#sequences do not match (may be a bug).")
+		return(1);
+	}
+	if(tm_idx_check_seq(mii)) {
+		error("no valid sequence found in `%s'. sequence(s) might be too long.", fn);
+		return(1);
+	}
+
 	// debug("read(%zu, %zu)", c.cnt, kv_cnt(mii->col.bin));
-	return(c.cnt != kv_cnt(mii->col.bin));
+	return(0);
 }
 
 static _force_inline
