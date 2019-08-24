@@ -2554,7 +2554,7 @@ _tm_idx_gen_error:;
 
 
 /* index I/O */
-#define TM_IDX_MAGIC				( 0x34494d54 )
+#define TM_IDX_MAGIC				( 0x35494d54 )
 
 typedef struct {
 	uint64_t magic;
