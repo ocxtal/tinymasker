@@ -1528,7 +1528,8 @@ void tm_idx_override_default(tm_idx_profile_t *profile, tm_idx_conf_t const *con
 		profile->chain.window.sep.v = tm_idx_unwrap(conf->window);
 	}
 	if(!tm_idx_is_default(conf->min_scnt)) {
-		profile->chain.min_scnt = tm_idx_unwrap(conf->min_scnt);
+		uint32_t const min_scnt = tm_idx_unwrap(conf->min_scnt) - 1;
+		profile->chain.min_scnt = min_scnt;
 	}
 
 	/* filter */
@@ -1695,7 +1696,7 @@ uint64_t tm_idx_check_profile(tm_idx_profile_t const *profile)
 	}
 
 	/* seed count */ {
-		uint32_t const c = profile->chain.min_scnt;
+		uint32_t const c = profile->chain.min_scnt + 1;
 		tm_idx_assert(c >= 1 && c <= 1024, "minimum seed count (-c) must be >= 1 and <= 1024.");
 	}
 
@@ -3698,7 +3699,7 @@ size_t tm_chain_seed(tm_idx_profile_t const *profile, tm_seed_t *seed, size_t sc
 	uint64_t const chained = 0x80000000;				/* offset */
 	uint64_t const window  = profile->chain.window.all;	/* window sizes */
 
-	v4i32_t const inc = _seta_v4i32(0, 1, 0, 0);
+	v4i32_t const inc = _seta_v4i32(0, 1, 0, 0);		/* count #seeds */
 	v4i32_t const adj = _load_v4i32(&profile->chain.kadj[0]);	/* (-, min_scnt, k, k) */
 
 	/* src pointers */
@@ -3742,7 +3743,7 @@ size_t tm_chain_seed(tm_idx_profile_t const *profile, tm_seed_t *seed, size_t sc
 		*/
 
 		v2i32_t const epos = (v2i32_t){ .v1 = _mm_cvtsi64_si128(ruv) };
-		if((int32_t)_ext_v2i32(spos, 2) < 0) { continue; }		/* skip if short */
+		if((int32_t)_ext_v2i32(spos, 2) < 0) { continue; }		/* skip if too short */
 
 		/* save */
 		v4i32_t const c = tm_chain_compose((v2i32_t){ spos.v1 }, epos);
