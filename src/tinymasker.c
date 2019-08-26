@@ -980,6 +980,12 @@ typedef struct {
 #define tm_idx_is_default(x)			( (x) == 0 )
 
 
+/* simple match-mismatch score parameter */
+typedef struct {
+	uint32_t match, mismatch;
+} tm_idx_score_t;
+
+
 /* matcher object; k-mer length, score matrix, and score thresholds */
 typedef struct {
 	uint32_t size;
@@ -994,6 +1000,7 @@ typedef struct {
 			uint64_t all;
 		} window;
 
+		/* the following four must be in this order */
 		uint32_t kadj[2];
 		uint32_t min_scnt;
 		uint32_t squash_intv;
@@ -1434,6 +1441,16 @@ void tm_idx_fill_score(tm_idx_profile_t *profile, int64_t m, int64_t x)
 }
 
 static _force_inline
+tm_idx_score_t tm_idx_get_score(tm_idx_profile_t const *profile)
+{
+	/* we suppose the score matrix be simple match-mismatch model */
+	return((tm_idx_score_t){
+		.match    = (uint32_t) profile->extend.score_matrix[(nA>>2) * DZ_REF_MAT_SIZE + tA],
+		.mismatch = (uint32_t)-profile->extend.score_matrix[(nA>>2) * DZ_REF_MAT_SIZE + tG]
+	});
+}
+
+static _force_inline
 void tm_idx_fill_bonus(tm_idx_profile_t *profile, uint32_t bonus)
 {
 	debug("called");
@@ -1520,9 +1537,10 @@ void tm_idx_override_default(tm_idx_profile_t *profile, tm_idx_conf_t const *con
 	}
 
 	/* score matrix */
-	if(!tm_idx_is_default(conf->match) && !tm_idx_is_default(conf->mismatch)) {
-		int64_t const m = tm_idx_unwrap(conf->match);
-		int64_t const x = tm_idx_unwrap(conf->mismatch);
+	if(!tm_idx_is_default(conf->match) || !tm_idx_is_default(conf->mismatch)) {
+		tm_idx_score_t const s = tm_idx_get_score(profile);
+		int64_t const m = tm_idx_is_default(conf->match)    ? s.match    : tm_idx_unwrap(conf->match);
+		int64_t const x = tm_idx_is_default(conf->mismatch) ? s.mismatch : tm_idx_unwrap(conf->mismatch);
 		tm_idx_fill_score(profile, m, -x);		/* negate */
 	}
 
@@ -5646,10 +5664,10 @@ uint64_t tm_conf_init_static(tm_conf_t *conf, char const *const *argv, FILE *fp)
 			['b'] = { OPT_REQ,  _c(tm_conf_mismatch) },
 			['p'] = { OPT_REQ,  _c(tm_conf_gap_open) },
 			['q'] = { OPT_REQ,  _c(tm_conf_gap_extend) },
-			['g'] = { OPT_REQ,  _c(tm_conf_max_gap) },
-			['l'] = { OPT_REQ,  _c(tm_conf_anc_bonus) },
 			['m'] = { OPT_REQ,  _c(tm_conf_min_score) },
-			['R'] = { OPT_BOOL, _c(tm_conf_use_raw) }
+			['R'] = { OPT_BOOL, _c(tm_conf_use_raw) },
+			['g'] = { OPT_REQ,  _c(tm_conf_max_gap) },
+			['l'] = { OPT_REQ,  _c(tm_conf_anc_bonus) }
 		}
 		#undef _c
 	};
@@ -5708,8 +5726,18 @@ void tm_conf_print_help(tm_conf_t const *conf, FILE *lfp)
 {
 	if(conf->verbose == 0) { return; }
 
-	#define _msg_impl(_level, _fmt, ...) { logger_printf(lfp, _fmt "%s\n", __VA_ARGS__); }
-	#define _msg(_level, ...) { if((_level) <= conf->verbose + 1) { _msg_impl(_level, __VA_ARGS__, ""); } }
+	/* compose temporal profile for default params */
+	tm_idx_profile_t profile;
+	tm_idx_fill_default(&profile);
+	tm_idx_override_default(&profile, &conf->fallback);
+	tm_idx_calc_filter_params(&profile);
+
+	/* get match and mismatch */
+	tm_idx_score_t const s = tm_idx_get_score(&profile);
+
+	#define _level(_conf) ( (_conf)->verbose + 1 )
+	#define _msg_impl(_lv, _fmt, ...) { logger_printf(lfp, _fmt "%s\n", __VA_ARGS__); }
+	#define _msg(_lv, ...) { if((_lv) <= _level(conf)) { _msg_impl(_lv, __VA_ARGS__, ""); } }
 
 	_msg(2, "\n"
 			"  tinymasker - fast repeat masking tool\n"
@@ -5726,26 +5754,33 @@ void tm_conf_print_help(tm_conf_t const *conf, FILE *lfp)
 	_msg(2, "  -t INT       number of threads [%zu]", conf->nth);
 	_msg(2, "  -d FILE      dump index to FILE (index construction mode)");
 	_msg(2, "  -v [INT]     show version number or set verbose level (when number passed)");
-	_msg(3, "  -f           flip reference and query in output PAF");
+	_msg(3, "  -F           flip reference and query in output PAF");
 	_msg(2, "");
 	_msg(2, "Indexing options:");
 	_msg(2, "  -c FILE      load profile configurations []");
 	_msg(2, "");
 	_msg(2, "Indexing and mapping fallbacks:");
 	_msg(2, "  NOTE: ignored for prebuilt indices; only applicable when index is built");
-	_msg(2, "  -k INT       k-mer length [%zu]", conf->fallback.kmer);
-	_msg(2, "  -w INT       chaining window size [%zu]", conf->fallback.window);
-	_msg(3, "  -c INT       minimum seed count for chain [%u]", (uint32_t)conf->fallback.min_scnt);
-	_msg(3, "  -S INT       minimum q-side span for skipping filter [%u]", (uint32_t)conf->fallback.span_thresh);
-	_msg(2, "  -a INT       match award [%u]", (uint32_t)conf->fallback.match);
-	_msg(2, "  -b INT       mismatch penalty [%u]", (uint32_t)conf->fallback.mismatch);
-	_msg(2, "  -p INT       gap-open penalty [%u]", (uint32_t)conf->fallback.gap_open);
-	_msg(2, "  -q INT       gap-extension penalty [%u]", (uint32_t)conf->fallback.gap_extend);
-	_msg(2, "  -m INT       minimum score threshold [%d]", (int32_t)conf->fallback.min_score);
-	_msg(3, "  -g INT       max gap length allowed (X-drop threshold) [%u]", (uint32_t)conf->fallback.max_gap_len);
-	_msg(3, "  -l INT       full-length bonus per end [%u]", (uint32_t)conf->fallback.full_length_bonus);
+	_msg(2, "  -k INT       k-mer length [%u]", profile.kbits>>1);
+	_msg(2, "  -w INT       chaining window size [%u]", profile.chain.window.sep.u);
+	_msg(3, "  -c INT       minimum seed count for chain [%u]", profile.chain.min_scnt + 1);
+	_msg(3, "  -S INT       minimum q-side span for skipping filter [%u]", profile.filter.span_thresh);
+	_msg(2, "  -a INT       match award [%u]", s.match);
+	_msg(2, "  -b INT       mismatch penalty [%u]", s.mismatch);
+	_msg(2, "  -p INT       gap-open penalty [%u]", profile.extend.giv);
+	_msg(2, "  -q INT       gap-extension penalty [%u]", profile.extend.gev);
+	_msg(2, "  -m INT       minimum score threshold [%d]", profile.extend.min_score);
+	_msg(2, "  -R           use raw score instead of complexity adjusted score [%s]", profile.extend.use_raw ? "yes" : "no");
+	_msg(3, "  -g INT       max gap length allowed (X-drop threshold) [%u]", profile.extend.vlim);
+	_msg(3, "  -l INT       full-length bonus per end [%u]", profile.extend.bonus);
 	_msg(2, "");
 
+	if(_level(conf) <= 2) {
+		_msg(1, "Some optinos are hidden. Type `tinymasker -hh' to show all.");
+		_msg(1, "");
+	}
+
+	#undef _level
 	#undef _msg_impl
 	#undef _msg
 
