@@ -19,6 +19,8 @@
 #  define MAX_THREADS			( 256 )
 #endif
 
+#define TM_MIN_KMER				( 3 )
+#define TM_MAX_KMER				( 9 )
 #define TM_REF_ALPH_SIZE		( 16 )
 #define TM_QUERY_ALPH_SIZE		( 4 )
 
@@ -1687,7 +1689,7 @@ uint64_t tm_idx_check_profile(tm_idx_profile_t const *profile)
 
 	/* kmer */ {
 		uint32_t const k = profile->kbits>>1;
-		tm_idx_assert(k >= 3 && k <= 7, "k-mer size (-k) must be >= 3 and <= 7.");
+		tm_idx_assert(k >= TM_MIN_KMER && k <= TM_MAX_KMER, "k-mer size (-k) must be >= %u and <= %u.", (uint32_t)TM_MIN_KMER, (uint32_t)TM_MAX_KMER);
 	}
 
 	/* window size */ {
