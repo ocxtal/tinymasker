@@ -962,6 +962,8 @@ tm_ref_match_t tm_ref_get_arr(tm_ref_state_t s)
 
 /* index data structure */
 typedef struct {
+	uint64_t ignore_overflow;
+
 	/* fallback parameters */
 	size_t kmer, window;		/* k-mer length and chain window size */
 	size_t min_scnt;			/* minimum seed count for chain */
@@ -2428,16 +2430,29 @@ void tm_idx_record(uint32_t tid, tm_idx_gen_t *self, tm_idx_batch_t *batch)
 }
 
 static _force_inline
-uint64_t tm_idx_check_seq(tm_idx_gen_t *mii)
+uint64_t tm_idx_check_sanity(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, char const *fn)
 {
 	tm_idx_sketch_t const **arr = (tm_idx_sketch_t const **)kv_ptr(mii->col.bin);
 
 	/* make sure at least one sequence is valid */
+	size_t const total = kv_cnt(mii->col.bin);
 	size_t valid = 0;
-	for(size_t i = 0; i < kv_cnt(mii->col.bin); i++) {
+	for(size_t i = 0; i < total; i++) {
 		valid += arr[i] != NULL;
 	}
-	return(valid == 0);
+
+	/* if strict mode; make sure #valid == #seq */
+	if(conf->ignore_overflow == 0 && valid != total) {
+		error("pass -L to ignore removed sequences.");
+		return(1);
+	}
+
+	/* otherwise at least one valid sequence is enough */
+	if(valid == 0) {
+		error("no valid sequence found in `%s'. sequence(s) might be too long.", fn);
+		return(1);
+	}
+	return(0);
 }
 
 static _force_inline
@@ -2453,22 +2468,12 @@ uint64_t tm_idx_gen_core(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, char cons
 		/* irregular 4bit encoding for reference */
 		#define _c(x)		( tm_pack_ref_base(x) )		/* make different from '\0' */
 		.conv_table  = {
-			[A] = _c(tA),
-			[C] = _c(tC),
-			[G] = _c(tG),
-			[T] = _c(tT),
+			[A] = _c(tA), [C] = _c(tC), [G] = _c(tG), [T] = _c(tT),
 
-			[R] = _c(tR),
-			[Y] = _c(tY),
-			[S] = _c(tS),
-			[W] = _c(tW),
-			[K] = _c(tK),
-			[M] = _c(tM),
+			[R] = _c(tR), [Y] = _c(tY), [S] = _c(tS),
+			[K] = _c(tK), [M] = _c(tM), [W] = _c(tW),
 
-			[B] = _c(tB),
-			[D] = _c(tD),
-			[H] = _c(tH),
-			[V] = _c(tV),
+			[B] = _c(tB), [D] = _c(tD), [H] = _c(tH), [V] = _c(tV),
 
 			[N] = _c(tR)		/* FIXME */
 		}
@@ -2489,28 +2494,25 @@ uint64_t tm_idx_gen_core(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, char cons
 		(pt_worker_t)tm_idx_collect,
 		(pt_drain_t)tm_idx_record		/* no need for sorting */
 	);
+
+	/* done */
 	for(size_t i = 0; i < pt_nth(pt); i++) {
 		tm_ref_destroy_tbuf_static(&mii->ref[i]);
 	}
+	bseq_close_t const c = bseq_close(mii->col.fp);
 
-	/* check error */
-	bseq_close_t c = bseq_close(mii->col.fp);
+	/* sanity check */
+	uint64_t e = tm_idx_check_sanity(mii, conf, fn);
 	if(c.status != 0) {
 		warn("broken file format detected for `%s'.", fn);
 	}
-
-	/* sanity check */
 	if(c.cnt != kv_cnt(mii->col.bin)) {
 		error("#sequences do not match (may be a bug).")
-		return(1);
-	}
-	if(tm_idx_check_seq(mii)) {
-		error("no valid sequence found in `%s'. sequence(s) might be too long.", fn);
-		return(1);
+		e = 1;
 	}
 
 	// debug("read(%zu, %zu)", c.cnt, kv_cnt(mii->col.bin));
-	return(0);
+	return(e);
 }
 
 static _force_inline
@@ -5491,7 +5493,14 @@ static int tm_conf_profile(tm_conf_t *conf, char const *arg) {
 	return(0);
 }
 
-/* indexing */
+/* indexing behavior */
+static int tm_conf_ign_fail(tm_conf_t *conf, char const *arg) {
+	_unused(arg);
+	conf->fallback.ignore_overflow = 1;
+	return(0);
+}
+
+/* indexing params */
 static int tm_conf_kmer(tm_conf_t *conf, char const *arg) {
 	conf->fallback.kmer = tm_idx_wrap(mm_atoi(arg, 0));
 	return(0);
@@ -5647,16 +5656,19 @@ uint64_t tm_conf_init_static(tm_conf_t *conf, char const *const *argv, FILE *fp)
 		#define _c(_x)			( (opt_callback_t)(_x) )
 		.opt.t = {
 			['\0'] = { 0, NULL },
-			['d'] = { OPT_REQ,  _c(tm_conf_idxdump) },
 
-			['v'] = { OPT_OPT,  _c(tm_conf_verbose) },
 			['h'] = { OPT_BOOL, _c(tm_conf_help) },
+			['v'] = { OPT_OPT,  _c(tm_conf_verbose) },
 			['t'] = { OPT_REQ,  _c(tm_conf_threads) },
+
+			/* mapping and output */
 			['F'] = { OPT_BOOL, _c(tm_conf_flip) },
 
 			/* preset and configuration file */
+			['d'] = { OPT_REQ,  _c(tm_conf_idxdump) },
 			['x'] = { OPT_REQ,  _c(tm_conf_preset) },
 			['z'] = { OPT_REQ,  _c(tm_conf_profile) },
+			['L'] = { OPT_BOOL, _c(tm_conf_ign_fail) },
 
 			/* fallback parameters */
 			['k'] = { OPT_REQ,  _c(tm_conf_kmer) },
@@ -5752,15 +5764,17 @@ void tm_conf_print_help(tm_conf_t const *conf, FILE *lfp)
 			"    $ tinymasker -t4 index.tmi contigs.fa\n"
 			"");
 	_msg(2, "General options:");
-	_msg(2, "  -x STR       load preset params for a specific setting []");
-	_msg(3, "  -z STR       load TOML config file []");
 	_msg(2, "  -t INT       number of threads [%zu]", conf->nth);
-	_msg(2, "  -d FILE      dump index to FILE (index construction mode)");
 	_msg(2, "  -v [INT]     show version number or set verbose level (when number passed)");
-	_msg(3, "  -F           flip reference and query in output PAF");
 	_msg(2, "");
+	_msg(3, "Mapping and output options:");
+	_msg(3, "  -F           flip reference and query in output PAF");
+	_msg(3, "");
 	_msg(2, "Indexing options:");
-	_msg(2, "  -c FILE      load profile configurations []");
+	_msg(2, "  -d FILE      dump index to FILE (index construction mode)");
+	_msg(3, "  -x STR       load preset params for a specific setting []");
+	_msg(3, "  -z STR       custom profile configuration (in TOML format) []");
+	_msg(3, "  -L           ignore index construction failure (loose mode)");
 	_msg(2, "");
 	_msg(2, "Indexing and mapping fallbacks:");
 	_msg(2, "  NOTE: ignored for prebuilt indices; only applicable when index is built");
