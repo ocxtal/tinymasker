@@ -117,7 +117,7 @@ _rb_reader(xz, x, uint8_t, {
 static inline
 struct rb_reader_result_s rb_read_transparent(rbread_t *rb, void *dst, size_t len)
 {
-	size_t bytes = fread(dst, sizeof(char), len, rb->fp);
+	size_t const bytes = fread(dst, sizeof(char), len, rb->fp);
 	rb->eof = feof(rb->fp);
 	return((struct rb_reader_result_s){
 		.obtained = bytes,
@@ -141,8 +141,20 @@ size_t rbread_bulk(rbread_t *rb, void *dst, size_t len)
 	if(hlen > 0) { memcpy(&p[len - rem], &rb->buf[rb->head], hlen); }
 	rem -= hlen; rb->head += hlen;
 
-	/* EOF state fixup before continue to bulk loop */
-	if(rb->eof == 1 && rb->head == rb->len) { rb->eof = 2; }
+	/*
+	 * EOF state fixup before continue to bulk loop;
+	 * we only have input buffer in transparent mode so starvation of the buffer is the end of file.
+	 */
+	if(rb->ibuf == NULL && rb->head == rb->len) {
+		rb->eof = rb->eof ? 2 : 0;
+	}
+
+	/*
+	 * rb->eof == 1 indicates there is only small chunk remaining in the decoding buffer,
+	 * so try get everything in this case.
+	 * otherwise the stream might continue longer than the output buffer,
+	 * so check remaining buffer size first and postpone reading if it is smaller than bulk_size / 8.
+	 */
 
 	/* if not EOF, try bulk read */
 	while(rb->eof < 2 && rem > rb->bulk_size / 8) {
@@ -192,11 +204,11 @@ int rbopen_bulk_static(rbread_t *rb, char const *fn, size_t bulk_size)
 	if(rb->fp == NULL) { goto _rbopen_fail; }
 
 	/* calculate buffer size */
-	size_t buffer_size = _roundup(2 * rb->bulk_size, ARCH_HUGEPAGE_SIZE);
+	size_t const buffer_size = _roundup(2 * rb->bulk_size, ARCH_HUGEPAGE_SIZE);
 
 	/* read the first chunk */
 	uint8_t *buf = aligned_malloc(buffer_size);
-	size_t rlen = fread(buf, sizeof(char), rb->bulk_size, rb->fp);
+	size_t const rlen = fread(buf, sizeof(char), rb->bulk_size, rb->fp);
 	if(feof(rb->fp)) { rb->eof = 1; }
 
 	static struct { uint64_t magic, mask; } const x[4] = {
