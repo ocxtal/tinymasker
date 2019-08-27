@@ -3142,7 +3142,33 @@ typedef struct {
 	dz_alignment_t const *aln;
 } tm_aln_t;
 _static_assert(sizeof(tm_aln_t) == 64);
-typedef struct { tm_aln_t *a; size_t n, m; } tm_aln_v;
+
+
+/* alignment utils */
+typedef struct {
+	double identity;
+} tm_aln_stat_t;
+
+static _force_inline
+tm_aln_stat_t tm_aln_calc_stat(tm_aln_t const *aln, uint64_t flip)
+{
+	/* match / ref_length */
+	dz_alignment_t const *a = aln->aln;
+	uint32_t const span = flip ? aln->span.q : aln->span.r;
+
+
+	fprintf(stderr, "count(%u, %u, %u, %u), span(%u)\n", a->match_count, a->mismatch_count, a->ins_count, a->del_count, span);
+	return((tm_aln_stat_t){
+		.identity = (double)a->match_count / (double)span
+	});
+}
+
+
+/* alignment bin and interval tree */
+typedef struct {
+	tm_aln_t *a;
+	size_t n, m;
+} tm_aln_v;
 
 #define tm_aln_rbt_header(a)		( &(a)->h )
 #define tm_aln_rbt_cmp(a, b)		( (a)->pos.q <  (b)->pos.q )
@@ -3220,6 +3246,7 @@ typedef struct {
 	size_t unused[3];
 	tm_aln_t arr[];
 } tm_alnv_t;
+
 
 /* alignment dedup hash; we put alignment end position in this bin */
 typedef struct {
@@ -4580,10 +4607,10 @@ static _force_inline
 dz_trace_match_t tm_extend_get_match(int8_t const *score_matrix, dz_query_t const *query, size_t qidx, uint32_t ch)
 {
 	uint8_t const *packed = dz_query_packed_array(query);
-
+	int8_t const score = score_matrix[ch * DZ_QUERY_MAT_SIZE / 2 + packed[qidx]];
 	return((dz_trace_match_t){
-		.score = score_matrix[ch * DZ_QUERY_MAT_SIZE / 2 + packed[qidx]],
-		.match = packed[qidx] == ch
+		.score = score,
+		.match = score > DZ_SCORE_OFS
 	});
 }
 
@@ -4764,6 +4791,8 @@ dz_alignment_t const *tm_extend_second(tm_scan_t *self, tm_idx_profile_t const *
 		f
 	);
 	debug("reverse: spos(%u, %u) --- score(%d) --> epos(%u, %u), f(%p), aln(%p)", epos.q - aln->query_length, epos.r + (epos.dir ? aln->ref_length : -aln->ref_length), aln->score, epos.q, epos.r, f, aln);
+
+	fprintf(stderr, "count(%u, %u, %u, %u)\n", aln->match_count, aln->mismatch_count, aln->ins_count, aln->del_count);
 	return(aln);
 }
 
@@ -5146,6 +5175,7 @@ void tm_print_aln(tm_print_t *self, tm_idx_sketch_t const **si, bseq_meta_t cons
 	size_t const flip = self->flip & 0x01;
 	tm_print_seq_t const *l = &seq[flip];
 	tm_print_seq_t const *r = &seq[flip ^ 0x01];
+	tm_aln_stat_t const stat = tm_aln_calc_stat(aln, flip);
 
 	/*
 	 * in PAF
@@ -5158,13 +5188,14 @@ void tm_print_aln(tm_print_t *self, tm_idx_sketch_t const **si, bseq_meta_t cons
 		/* query */ "%.*s\t%zu\t%zu\t%zu\t"
 		/* dir   */ "%c\t"
 		/* ref   */ "%.*s\t%zu\t%zu\t%zu\t"
-		/* stats */ "*\t%u\t255\tAS:i:%u\tRS:i:%u\tCG:Z:",	/* and cigar */
+		/* stats */ "*\t%u\t255\tAS:i:%u\tXS:i:%u\tXI:f:%0.4f\tCG:Z:",	/* and cigar */
 		(int)l->name.len, l->name.ptr, l->seq.len, l->seq.spos, l->seq.epos,
 		aln->pos.dir ? '-' : '+',
 		(int)r->name.len, r->name.ptr, r->seq.len, r->seq.spos, r->seq.epos,
 		aln->span.r,
 		(uint32_t)aln->score.patched,		/* patched score */
-		(uint32_t)aln->score.raw			/* raw score (with bonus) */
+		(uint32_t)aln->score.raw,			/* raw score (with bonus) */
+		(double)stat.identity
 	);
 	tm_print_cigar_reverse(self, aln->path.ptr, aln->path.len);
 	printf("\n");
