@@ -1,9 +1,11 @@
 
 CC = gcc
+MAKE = make
 GIT = git
 RM = rm
-MAKE = make
+CP = cp
 CAT = cat
+MKDIR = mkdir
 
 
 # install directory
@@ -57,6 +59,9 @@ debug: $(SRCS_INTL)
 
 clean:
 	$(RM) -f $(TARGET) $(TARGET).g $(TARGET).d $(TARGET).s $(TARGET).t $(OBJS_INTL)
+
+install:
+	$(MKDIR) -p $(PREFIX)/bin && $(CP) $(TARGET) $(PREFIX)/bin
 
 dep: $(DEPS_INTL)
 	$(CAT) $^ > $(SRCDIR)/Makefile.dep
