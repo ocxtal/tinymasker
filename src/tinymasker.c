@@ -3203,7 +3203,7 @@ tm_aln_stat_t tm_aln_calc_stat(tm_aln_t const *aln, uint64_t flip)
 	uint32_t const span = flip ? aln->span.q : aln->span.r;
 
 
-	fprintf(stderr, "count(%u, %u, %u, %u), span(%u)\n", a->match_count, a->mismatch_count, a->ins_count, a->del_count, span);
+	// fprintf(stderr, "count(%u, %u, %u, %u), span(%u)\n", a->match_count, a->mismatch_count, a->ins_count, a->del_count, span);
 	return((tm_aln_stat_t){
 		.identity = (double)a->match_count / (double)span
 	});
@@ -4841,7 +4841,7 @@ dz_alignment_t const *tm_extend_second(tm_scan_t *self, tm_idx_profile_t const *
 	);
 	debug("reverse: spos(%u, %u) --- score(%d) --> epos(%u, %u), f(%p), aln(%p)", epos.q - aln->query_length, epos.r + (epos.dir ? aln->ref_length : -aln->ref_length), aln->score, epos.q, epos.r, f, aln);
 
-	fprintf(stderr, "count(%u, %u, %u, %u)\n", aln->match_count, aln->mismatch_count, aln->ins_count, aln->del_count);
+	// fprintf(stderr, "count(%u, %u, %u, %u)\n", aln->match_count, aln->mismatch_count, aln->ins_count, aln->del_count);
 	return(aln);
 }
 
