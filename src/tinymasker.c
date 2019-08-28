@@ -4503,7 +4503,7 @@ size_t tm_extend_finalize_pack(tm_aln_t *dst, tm_aln_t const *src)
 	tm_aln_t const *p = rbt_fetch_head_isct_aln(&it, src, &all);
 	tm_aln_t *q = dst;
 	while(p != NULL) {
-		debug("p(%p), pos(%u, %u), span(%u, %u)", p, p->pos.q, p->pos.r, p->span.q, p->span.r);
+		debug("idx(%zu), p(%p), pos(%u, %u), span(%u, %u)", q - dst, p, p->pos.q, p->pos.r, p->span.q, p->span.r);
 
 		*q++ = *p;
 		p = rbt_fetch_next_isct_aln(&it, src, &all);
@@ -4762,7 +4762,9 @@ tm_pos_t tm_calc_max_wrap(dz_query_t const *q, dz_state_t const *r, tm_pos_t rpo
 		.r = s.rpos,
 		.q = s.qpos
 	};
-	return(tm_add_pos(pos, span));	/* direction and bonus copied */
+
+	debug("abs(%d), bonus(%d)", r->max.score.abs, s.bonus);
+	return(tm_add_pos(pos, span));			/* direction copied */
 }
 
 #if 1
@@ -4792,7 +4794,21 @@ tm_pair_t tm_extend_load_rpos(tm_scan_t const *self, tm_idx_profile_t const *pf,
 #endif
 
 static _force_inline
-tm_pos_t tm_extend_first(tm_scan_t *self, tm_idx_profile_t const *pf, tm_idx_sketch_t const *sk, uint8_t const *query, size_t qlen, tm_pos_t rpos)
+uint64_t tm_extend_is_tail_maximal(tm_scan_t const *self, tm_idx_sketch_t const *sk, tm_pos_t epos)
+{
+	_unused(self);
+
+	uint32_t const rend = epos.dir ? 0 : tm_idx_ref_seq_len(sk);
+	return(epos.r == rend);
+}
+
+typedef struct {
+	tm_pos_t pos;
+	uint64_t fail;
+} tm_extend_first_t;
+
+static _force_inline
+tm_extend_first_t tm_extend_first(tm_scan_t *self, tm_idx_profile_t const *pf, tm_idx_sketch_t const *sk, uint8_t const *query, size_t qlen, tm_pos_t rpos)
 {
 	debug("forward: rdir(%u), rpos(%u, %u)", rpos.dir, rpos.q, rpos.r);
 
@@ -4810,7 +4826,10 @@ tm_pos_t tm_extend_first(tm_scan_t *self, tm_idx_profile_t const *pf, tm_idx_ske
 	tm_pos_t const epos = tm_calc_max_wrap(qr, r, rpos);
 
 	debug("forward: rpos(%u, %u) --- score(%d) --> epos(%u, %u)", rpos.q, rpos.r, r != NULL ? r->max.score.abs : 0, epos.q, epos.r);
-	return(epos);
+	return((tm_extend_first_t){
+		.pos  = epos,
+		.fail = r->max.score.abs < (tm_extend_is_tail_maximal(self, sk, epos) ? pf->extend.bonus : 0)
+	});
 }
 
 static _force_inline
@@ -4861,15 +4880,16 @@ tm_extend_res_t tm_extend_core(tm_scan_t *self, tm_idx_profile_t const *pf, tm_i
 	tm_pos_t const rpos = tm_extend_load_rpos(self, pf, c);
 
 	/* reference forward */
-	tm_pos_t const epos = tm_extend_first(self, pf, sk, query, qlen, rpos);
-	if(tm_extend_mark_pos(self, tm_idx_ref_rid(sk), epos)) {
+	tm_extend_first_t const e = tm_extend_first(self, pf, sk, query, qlen, rpos);
+	debug("fail(%lu)", e.fail);
+	if(e.fail || tm_extend_mark_pos(self, tm_idx_ref_rid(sk), e.pos)) {
 		return(failed);			/* it seems the tail position is already evaluated */
 	}
 
 	/* reference reverse */
-	dz_alignment_t const *aln = tm_extend_second(self, pf, sk, query, qlen, epos);	/* direction flipped internally */
+	dz_alignment_t const *aln = tm_extend_second(self, pf, sk, query, qlen, e.pos);	/* direction flipped internally */
 	return((tm_extend_res_t){
-		.epos = epos,
+		.epos = e.pos,
 		.aln  = aln
 	});
 }
@@ -4948,8 +4968,7 @@ tm_score_t tm_extend_patch_score(tm_scan_t const *self, tm_idx_profile_t const *
 	_unused(qlen);
 
 	/* add bonus if anchored at the head */
-	uint32_t const rend  = epos.dir ? 0 : tm_idx_ref_seq_len(sk);
-	uint32_t const bonus = epos.r == rend ? pf->extend.bonus : 0;
+	uint32_t const bonus = tm_extend_is_tail_maximal(self, sk, epos) ? pf->extend.bonus : 0;
 	int32_t const raw    = bonus + aln->score;
 	// fprintf(stderr, "dir(%u), (%u, %u), rend(%u), maximal(%u), bonus(%u)\n", epos.dir, epos.r, tm_aln_span(aln).r, rend, epos.r == rend, bonus);
 
@@ -5429,6 +5448,7 @@ void tm_mtscan_drain_core(tm_mtscan_t *self, tm_mtscan_batch_t *batch)
 		if(v == NULL) { continue; }
 
 		for(size_t j = 0; j < v->cnt; j++) {
+			debug("idx(%zu)", j);
 			tm_print_aln(self->printer, si, seq, &v->arr[j]);
 		}
 	}
