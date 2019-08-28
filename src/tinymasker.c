@@ -23,6 +23,8 @@
 #define TM_MAX_KMER				( 9 )
 #define TM_REF_ALPH_SIZE		( 16 )
 #define TM_QUERY_ALPH_SIZE		( 4 )
+#define TM_MAX_SKETCH_TRIAL		( 3 )
+#define TM_MAX_AMB_COLUMNS		( 6 )
 
 
 #ifndef UNITTEST
@@ -144,7 +146,7 @@ uint64_t tm_rch_is_amb(uint8_t base)
 static _force_inline
 char tm_rch_to_ascii(uint8_t base)
 {
-	return("SWYTMGVHDBCKARWS"[base & 0x0f]);
+	return("SWYTMGVHDBCKARWS"[tm_rch_unpack(base) & 0x0f]);
 }
 
 static _force_inline
@@ -203,7 +205,7 @@ uint64_t tm_qrch_is_match(uint8_t q, uint8_t r)
 		| _r(K) | _r(M) | _r(W) | _rx(W, tW ^ 0x0f)
 		| _r(B) | _r(D) | _r(H) | _r(V)
 	);
-	return(((qconv>>q) & (rconv>>(4 * r)) & 0x0f) != 0);
+	return(((qconv>>q) & (rconv>>(r<<1)) & 0x0f) != 0);
 }
 
 #if defined(UNITTEST) && (UNITTEST != 0)
@@ -223,7 +225,7 @@ uint64_t tm_qrch_is_match_naive(uint8_t q, uint8_t r)
 		[tK] = K, [tM] = M, [tW] = W, [tW ^ 0x0f] = W,
 		[tB] = B, [tD] = D, [tH] = H, [tV] = V
 	};
-	return((qconv[q>>2] & rconv[r]) != 0);
+	return((qconv[q>>2] & rconv[tm_rch_unpack(r)]) != 0);
 }
 
 unittest( .name = "base.match" ) {
@@ -231,7 +233,8 @@ unittest( .name = "base.match" ) {
 	for(size_t qidx = 0; qidx < 4; qidx++) {
 		uint8_t const q = qconv[qidx];
 
-		for(size_t r = 0; r < 16; r++) {
+		for(size_t ridx = 0; ridx < 16; ridx++) {
+			uint8_t const r = tm_rch_pack(ridx);
 			ut_assert(tm_qrch_is_match(q, r) == tm_qrch_is_match_naive(q, r), "q(%x), r(%x), match(%u, %u)", q, r, tm_qrch_is_match(q, r), tm_qrch_is_match_naive(q, r));
 		}
 	}
@@ -331,6 +334,7 @@ unittest( .name = "base.match" ) {
 /* index data structure; we expect each repeat sequence is shorter than 32kbp */
 typedef struct {
 	uint32_t kbits;
+	uint32_t max_amb_col;			/* maximum # of ambiguous columns */
 	struct {
 		size_t head, tail;
 	} margin;
@@ -381,7 +385,8 @@ typedef struct {
 } tm_ref_kmer_pair_t;
 
 /* branch stack; max ambiguity = 4^5 */
-#define TM_REF_KMER_STACK_SIZE	( 4096 )
+#define TM_REF_SHIFT_OFFSET		( 6 )
+#define TM_REF_KMER_STACK_SIZE	( 0x01ULL<<TM_MAX_AMB_COLUMNS )
 
 typedef struct {
 	/* constants */
@@ -391,8 +396,8 @@ typedef struct {
 	tm_ref_kpos_t *q;
 
 	/* kmer stack */
-	uint32_t size;
-	uint32_t branches;
+	uint32_t size, max_size;
+	uint32_t branches, unused;
 	tm_ref_kmer_pair_t kmer[TM_REF_KMER_STACK_SIZE];
 } tm_ref_work_t;
 
@@ -403,7 +408,7 @@ size_t tm_ref_dup_stack(tm_ref_work_t *w)
 	size_t const prev_size = w->size;
 
 	/* update size and branch pos */
-	w->size = w->size<<1;
+	w->size      = w->size<<1;
 	w->branches |= 0x01<<w->shift;
 
 	for(size_t i = 0; i < prev_size; i++) {
@@ -415,7 +420,7 @@ size_t tm_ref_dup_stack(tm_ref_work_t *w)
 static _force_inline
 uint64_t tm_ref_update_stack(tm_ref_work_t *w)
 {
-	uint64_t const shrink = (w->branches & 0x01) != 0;
+	uint64_t const shrink = (w->branches & (0x01<<TM_REF_SHIFT_OFFSET)) != 0;
 	w->branches = w->branches>>2;
 	return(shrink);
 }
@@ -434,7 +439,8 @@ void tm_ref_shrink_stack(tm_ref_work_t *w)
 static _force_inline
 void tm_ref_update_kmer(tm_ref_kmer_pair_t *kmer, size_t size, uint32_t amask, uint32_t shift, uint8_t base)
 {
-	uint32_t const f = base<<6, r = (base ^ 0x03)<<shift;
+	uint32_t const f = base<<TM_REF_SHIFT_OFFSET;
+	uint32_t const r = (base ^ 0x03)<<shift;
 	for(size_t i = 0; i < size; i++) {
 		kmer[i].f = ((kmer[i].f<<2) | f) & amask;
 		kmer[i].r = ((kmer[i].r>>2) | r) & amask;
@@ -479,8 +485,8 @@ void tm_ref_push_base(tm_ref_work_t *w, uint8_t base)
 	size_t const size = w->size;		/* save current size before duplicating stack */
 	uint8_t const b2 = tm_rch_to_2bit(base);
 
-	if(_unlikely(tm_rch_is_amb(base))) {
-		debug("ambiguous");
+	debug("base(%x, %c), ambiguous(%lu), size(%zu), max_size(%zu)", base, tm_rch_to_ascii(base), tm_rch_is_amb(base), w->size, w->max_size);
+	if(_unlikely(tm_rch_is_amb(base) & (w->size < w->max_size))) {
 		tm_ref_dup_stack(w);
 		tm_ref_update_kmer(&w->kmer[size], size, w->amask, w->shift, b2>>2);
 	}
@@ -504,18 +510,19 @@ tm_ref_kpos_t *tm_ref_reserve(tm_ref_kpos_v *buf, tm_ref_kpos_t *q)
 }
 
 static _force_inline
-size_t tm_ref_enumerate_kmer(size_t kbits, uint8_t const *seq, size_t slen, tm_ref_kpos_v *buf)
+size_t tm_ref_enumerate_kmer(size_t kbits, size_t max_amb_col, uint8_t const *seq, size_t slen, tm_ref_kpos_v *buf)
 {
 	tm_ref_work_t w = {
 		/* place kmers at 6..kbits + 6 */
-		.amask = ((0x01<<kbits) - 0x01)<<6,
-		.shift = kbits - 2 + 6,			/* k - 1 + offset */
+		.amask = ((0x01<<kbits) - 0x01)<<TM_REF_SHIFT_OFFSET,
+		.shift = kbits - 2 + TM_REF_SHIFT_OFFSET,			/* k - 1 + offset */
 
 		/* make room in dst array */
 		.q = tm_ref_reserve(buf, kv_ptr(*buf)),
 
 		/* clear stack; keeps all the combination of ambiguous bases */
-		.size = 1,
+		.size     = 1,
+		.max_size = 1ULL<<max_amb_col,
 		.branches = 0,
 		.kmer = { { 0 } }
 	};
@@ -526,13 +533,14 @@ size_t tm_ref_enumerate_kmer(size_t kbits, uint8_t const *seq, size_t slen, tm_r
 	v2i32_t pos = _seta_v2i32(k - TM_SEED_POS_OFS, TM_SEED_POS_OFS);
 
 	/* push bases at the head */
-	for(size_t i = 0; i < k - 1; i++) {
+	for(size_t i = 0; i < k; i++) {
 		tm_ref_push_base(&w, seq[i]);
+		tm_ref_update_stack(&w);
 		pos = _add_v2i32(pos, inc);
 	}
 
 	/* body */
-	for(size_t i = k - 1; i < slen; i++) {
+	for(size_t i = k; i < slen; i++) {
 		tm_ref_push_base(&w, seq[i]);			/* stack will be expanded if needed */
 
 		/* update offset; position of the next base to compose [,) range */
@@ -553,7 +561,7 @@ size_t tm_ref_enumerate_kmer(size_t kbits, uint8_t const *seq, size_t slen, tm_r
 	}
 
 	/* tail */
-	tm_ref_push_base(&w, '\0');
+	tm_ref_push_base(&w, tm_rch_pack(tA));
 
 	pos = _add_v2i32(pos, inc);
 	tm_ref_push_pos(&w, pos);
@@ -596,7 +604,7 @@ size_t tm_ref_collect_kmer(tm_ref_conf_t const *conf, uint8_t const *seq, size_t
 	kv_clear(*buf);
 
 	/* slice k-mers (with additional succeeding base) */
-	if(tm_ref_enumerate_kmer(conf->kbits + 2, seq, slen, buf) == 0) {
+	if(tm_ref_enumerate_kmer(conf->kbits + 2, conf->max_amb_col, seq, slen, buf) == 0) {
 		return(0);				/* abort if no kmer found */
 	}
 
@@ -824,24 +832,13 @@ uint64_t tm_ref_build_link(tm_ref_cnt_t const *p, size_t ksize, tm_ref_sketch_t 
 			tm_ref_prefix_t n = tm_ref_find_link(p, ((i<<2) + j) & mask, max_shift);
 			int32_t const next = (int32_t)(n.ofs - p[i].ofs) / (int32_t)TM_REF_ALIGN_SIZE;	/* overflows; keep sign bit */
 			if(_unlikely(next > INT16_MAX || next < INT16_MIN)) {
-				error("link overflow at k-mer(%zx) and next base(%c), try smaller k-mer size for this sequence or shorten the sequence.", i, "ACGT"[j]);
+				// error("link overflow at k-mer(%zx) and next base(%c), try smaller k-mer size for this sequence or shorten the sequence.", i, "ACGT"[j]);
 				return(1);
 			}
 
 			/* save link; preserve tail */
 			bin->link[j].plen = n.len;
 			bin->link[j].next = next;
-/*
-			debugblock({
-				uint32_t k = i<<2;
-				debug("(%r, %u) -- (%u) -> (%r, %u), len(%u), next(%d)",
-					tm_kmer_to_str, &k, p[i].ofs, j,
-					tm_kmer_to_str, &n.kmer, n.ofs,
-					bin->link[j].plen, bin->link[j].next
-				);
-				// debug("done, size(%u), head_margin(%u), kbits(%u), slen(%u)", sk->size, sk->head_margin, sk->kbits, sk->slen);
-			});
-*/
 		}
 	}
 	return(0);
@@ -994,13 +991,13 @@ tm_ref_next_t tm_ref_match_next(tm_ref_state_t s, uint64_t keep, uint8_t next)
 	uint64_t const unmatching = 0ULL - (prefix != 0);
 
 	/* calc squashable subbin of the previous node */
-	tm_ref_squash_t sq = tm_ref_load_squash(s.bin,
+	tm_ref_squash_t const sq = tm_ref_load_squash(s.bin,
 		unmatching - keep,		/* do not squash the previous if the current bin is unmatching; also when keep == 1 */
 		next
 	);
 
 	/* done */
-	tm_ref_next_t r = {
+	tm_ref_next_t const r = {
 		.state = {
 			.prefix     = prefix,
 			.unmatching = unmatching,
@@ -1474,7 +1471,7 @@ void tm_idx_score_foreach(tm_idx_profile_t *profile, void *opaque, tm_idx_score_
 static
 void tm_idx_fill_score_callback(int64_t *s, int8_t *p, size_t qidx, size_t ridx)
 {
-	uint64_t const matching = tm_qrch_is_match(tm_2bit_to_qch(qidx), ridx);
+	uint64_t const matching = tm_qrch_is_match(tm_2bit_to_qch(qidx), tm_rch_pack(ridx));
 	*p = s[1 - matching];
 	return;
 }
@@ -1632,7 +1629,7 @@ typedef struct {
 static
 void tm_idx_acc_filter_score(tm_idx_calc_acc_t *acc, int8_t *p, size_t qidx, size_t ridx)
 {
-	uint64_t const matching = tm_qrch_is_match(tm_2bit_to_qch(qidx), ridx);
+	uint64_t const matching = tm_qrch_is_match(tm_2bit_to_qch(qidx), tm_rch_pack(ridx));
 	tm_idx_calc_acc_t *ptr = &acc[1 - matching];
 
 	int64_t const s = *p;
@@ -2346,15 +2343,28 @@ tm_ref_sketch_t *tm_idx_build_sketch(tm_idx_gen_t *self, tm_ref_tbuf_t *ref, siz
 	/* retrieve profile */
 	tm_idx_profile_t const *profile = kv_ptr(self->score.profile)[pid];
 
-	/* pack args */
-	tm_ref_conf_t conf = {
-		.kbits = profile->kbits,
-		.margin = {
-			.head = sizeof(tm_idx_sketch_hdr_t),
-			.tail = margin + 32			/* add 32 for vectorized access */
-		}
-	};
-	return(tm_ref_sketch(ref, &conf, seq, slen));
+	/* if fail (due to too many k-mers), try again with reduced ambiguity */
+	for(size_t i = 0; i < TM_MAX_SKETCH_TRIAL; i++) {
+		/* pack args */
+		tm_ref_conf_t const conf = {
+			.kbits       = profile->kbits,
+			.max_amb_col = TM_MAX_AMB_COLUMNS>>i,
+			.margin = {
+				.head = sizeof(tm_idx_sketch_hdr_t),
+				.tail = margin + 32			/* add 32 for vectorized access */
+			}
+		};
+		tm_ref_sketch_t *sk = tm_ref_sketch(ref, &conf, seq, slen);
+		if(sk != NULL) { return(sk); }
+
+		warn("failed to pack link for `%.*s' with max ambiguity = %u. %s.",
+			(int)nlen, name, (uint32_t)(TM_MAX_AMB_COLUMNS>>i),
+			i == (TM_MAX_SKETCH_TRIAL - 1) ? "give up" : "try again"
+		);
+	}
+
+	/* failure */
+	return(NULL);
 }
 
 static _force_inline
@@ -4656,10 +4666,7 @@ dz_trace_match_t tm_extend_get_match(int8_t const *score_matrix, dz_query_t cons
 	int8_t const score = score_matrix[ch * DZ_QUERY_MAT_SIZE / 2 + packed[qidx]];
 	return((dz_trace_match_t){
 		.score = score,
-		.match = tm_qrch_is_match(
-			tm_2bit_to_qch(packed[qidx]),
-			tm_rch_unpack(ch)
-		)
+		.match = tm_qrch_is_match(tm_2bit_to_qch(packed[qidx]), ch)
 	});
 }
 
@@ -5969,7 +5976,7 @@ int main_index_intl(tm_conf_t *conf, pg_t *pg, pt_t *pt)
 static _force_inline
 int main_index(tm_conf_t *conf, pt_t *pt)
 {
-	/* add suffix if missing and if /dev/xxx */
+	/* add suffix if missing and if not /dev/xxx */
 	if(!mm_startswith(conf->idxdump, "/dev") && !mm_endswith(conf->idxdump, ".tmi")) {
 		message(conf->log, "index filename does not end with `.tmi' (added).");
 		conf->idxdump = mm_append((char *)conf->idxdump, ".tmi");
