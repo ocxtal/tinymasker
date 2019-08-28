@@ -104,7 +104,6 @@ enum alphabet_query {
 	nG = 0x08,
 	nT = 0x0c
 };
-#define tm_qbase_to_ascii(x)	( "A   C   G   T   "[(x) & 0x0f] )
 
 enum alphabet_reference {
 	tA = 0x0c, tT = 0x03,
@@ -118,9 +117,126 @@ enum alphabet_reference {
 	tB = 0x09, tV = 0x06,
 	tD = 0x08, tH = 0x07
 };
-#define tm_pack_ref_base(x)		( (x)<<1 )
-#define tm_unpack_ref_base(x)	( (x)>>1 )
-#define tm_rbase_to_ascii(x)	( "SWYTMGVHDBCKARWS"[(x) & 0x0f] )
+#define tm_rch_pack(x)			( (x)<<1 )
+#define tm_rch_unpack(x)		( (x)>>1 )
+
+
+/* encoding conversion */
+static _force_inline
+char tm_qch_to_ascii(uint8_t base)
+{
+	return("A   C   G   T   "[base & 0x0f]);
+}
+
+static _force_inline
+uint8_t tm_2bit_to_qch(uint8_t q2)
+{
+	return(q2<<2);
+}
+
+static _force_inline
+uint64_t tm_rch_is_amb(uint8_t base)
+{
+	uint64_t const magic = 0x1110101111010111;
+	return((magic>>(2 * base)) & 0x01);
+}
+
+static _force_inline
+char tm_rch_to_ascii(uint8_t base)
+{
+	return("SWYTMGVHDBCKARWS"[base & 0x0f]);
+}
+
+static _force_inline
+uint64_t tm_rch_to_2bit(uint8_t base)
+{
+	/* convert iupac nucleotide to pair of 2-bit encoded bases */
+	uint64_t const magic = 0x9c80e1e8d4243dc9;
+	return((magic>>(2 * base)) & 0x0f);
+}
+
+unittest( .name = "base.conv.magic" ) {
+	struct { uint8_t base, amb, enc; } const x[16] = {
+		{ A, 0, tm_rch_pack(tA) },
+		{ C, 0, tm_rch_pack(tC) },
+		{ G, 0, tm_rch_pack(tG) },
+		{ T, 0, tm_rch_pack(tT) },
+		{ R, 1, tm_rch_pack(tR) },
+		{ Y, 1, tm_rch_pack(tY) },
+		{ S, 1, tm_rch_pack(tS) },
+		{ S, 1, tm_rch_pack(tS ^ 0x0f) },
+		{ W, 1, tm_rch_pack(tW) },
+		{ W, 1, tm_rch_pack(tW ^ 0x0f) },
+		{ K, 1, tm_rch_pack(tK) },
+		{ M, 1, tm_rch_pack(tM) },
+		{ B, 1, tm_rch_pack(tB) },
+		{ D, 1, tm_rch_pack(tD) },
+		{ H, 1, tm_rch_pack(tH) },
+		{ V, 1, tm_rch_pack(tV) }
+	};
+	uint8_t const conv[4] = { A, C, G, T };
+
+	for(size_t i = 0; i < 16; i++) {
+		ut_assert(tm_rch_is_amb(x[i].enc) == x[i].amb);
+		ut_assert((conv[tm_rch_to_2bit(x[i].enc) & 0x03] & x[i].base) != 0);
+		ut_assert((conv[tm_rch_to_2bit(x[i].enc) & 0x03] & ~x[i].base) == 0);
+
+		if(x[i].amb) {
+			ut_assert((conv[tm_rch_to_2bit(x[i].enc)>>2] & x[i].base) != 0);
+			ut_assert((conv[tm_rch_to_2bit(x[i].enc)>>2] & ~x[i].base) == 0);
+		}
+	}
+}
+
+/* calc matching state between query and reference bases */
+static _force_inline
+uint64_t tm_qrch_is_match(uint8_t q, uint8_t r)
+{
+	/* query in 2bit and reference in 4bit; faster? */
+	#define _q(x)			( (x)<<(n##x) )
+	#define _rx(x, y)		( ((uint64_t)(x))<<(4 * (y)) )
+	#define _r(x)			( _rx((x), (t##x)) )
+	uint64_t const qconv = _q(A) | _q(C) | _q(G) | _q(T);
+	uint64_t const rconv = (
+		  _r(A) | _r(C) | _r(G) | _r(T)
+		| _r(R) | _r(Y) | _r(S) | _rx(S, tS ^ 0x0f)
+		| _r(K) | _r(M) | _r(W) | _rx(W, tW ^ 0x0f)
+		| _r(B) | _r(D) | _r(H) | _r(V)
+	);
+	return(((qconv>>q) & (rconv>>(4 * r)) & 0x0f) != 0);
+}
+
+#if defined(UNITTEST) && (UNITTEST != 0)
+static _force_inline
+uint64_t tm_qrch_is_match_naive(uint8_t q, uint8_t r)
+{
+	/* standard impl */
+	static uint8_t const qconv[TM_QUERY_ALPH_SIZE] = {
+		[nA>>2] = A,
+		[nC>>2] = C,
+		[nG>>2] = G,
+		[nT>>2] = T
+	};
+	static uint8_t const rconv[TM_REF_ALPH_SIZE] = {
+		[tA] = A, [tC] = C, [tG] = G, [tT] = T,
+		[tR] = R, [tY] = Y, [tS] = S, [tS ^ 0x0f] = S,
+		[tK] = K, [tM] = M, [tW] = W, [tW ^ 0x0f] = W,
+		[tB] = B, [tD] = D, [tH] = H, [tV] = V
+	};
+	return((qconv[q>>2] & rconv[r]) != 0);
+}
+
+unittest( .name = "base.match" ) {
+	uint8_t const qconv[4] = { nA, nC, nG, nT };
+	for(size_t qidx = 0; qidx < 4; qidx++) {
+		uint8_t const q = qconv[qidx];
+
+		for(size_t r = 0; r < 16; r++) {
+			ut_assert(tm_qrch_is_match(q, r) == tm_qrch_is_match_naive(q, r), "q(%x), r(%x), match(%u, %u)", q, r, tm_qrch_is_match(q, r), tm_qrch_is_match_naive(q, r));
+		}
+	}
+}
+#endif
 
 
 /* FASTA/Q parser */
@@ -282,54 +398,6 @@ typedef struct {
 
 
 static _force_inline
-uint64_t tm_ref_is_ambiguous(uint8_t base)
-{
-	uint64_t const magic = 0x1110101111010111;
-	return((magic>>(2 * base)) & 0x01);
-}
-
-static _force_inline
-uint64_t tm_ref_base_to_2bit(uint8_t base)
-{
-	/* convert iupac nucleotide to pair of 2-bit encoded bases */
-	uint64_t const magic = 0x9c80e1e8d4243dc9;
-	return((magic>>(2 * base)) & 0x0f);
-}
-
-unittest( .name = "ref.conv.magic" ) {
-	struct { uint8_t base, amb, enc; } const x[16] = {
-		{ A, 0, tm_pack_ref_base(tA) },
-		{ C, 0, tm_pack_ref_base(tC) },
-		{ G, 0, tm_pack_ref_base(tG) },
-		{ T, 0, tm_pack_ref_base(tT) },
-		{ R, 1, tm_pack_ref_base(tR) },
-		{ Y, 1, tm_pack_ref_base(tY) },
-		{ S, 1, tm_pack_ref_base(tS) },
-		{ S, 1, tm_pack_ref_base(tS ^ 0x0f) },
-		{ W, 1, tm_pack_ref_base(tW) },
-		{ W, 1, tm_pack_ref_base(tW ^ 0x0f) },
-		{ K, 1, tm_pack_ref_base(tK) },
-		{ M, 1, tm_pack_ref_base(tM) },
-		{ B, 1, tm_pack_ref_base(tB) },
-		{ D, 1, tm_pack_ref_base(tD) },
-		{ H, 1, tm_pack_ref_base(tH) },
-		{ V, 1, tm_pack_ref_base(tV) }
-	};
-	uint8_t const conv[4] = { A, C, G, T };
-
-	for(size_t i = 0; i < 16; i++) {
-		ut_assert(tm_ref_is_ambiguous(x[i].enc) == x[i].amb);
-		ut_assert((conv[tm_ref_base_to_2bit(x[i].enc) & 0x03] & x[i].base) != 0);
-		ut_assert((conv[tm_ref_base_to_2bit(x[i].enc) & 0x03] & ~x[i].base) == 0);
-
-		if(x[i].amb) {
-			ut_assert((conv[tm_ref_base_to_2bit(x[i].enc)>>2] & x[i].base) != 0);
-			ut_assert((conv[tm_ref_base_to_2bit(x[i].enc)>>2] & ~x[i].base) == 0);
-		}
-	}
-}
-
-static _force_inline
 size_t tm_ref_dup_stack(tm_ref_work_t *w)
 {
 	size_t const prev_size = w->size;
@@ -409,9 +477,9 @@ static _force_inline
 void tm_ref_push_base(tm_ref_work_t *w, uint8_t base)
 {
 	size_t const size = w->size;		/* save current size before duplicating stack */
-	uint8_t const b2 = tm_ref_base_to_2bit(base);
+	uint8_t const b2 = tm_rch_to_2bit(base);
 
-	if(_unlikely(tm_ref_is_ambiguous(base))) {
+	if(_unlikely(tm_rch_is_amb(base))) {
 		debug("ambiguous");
 		tm_ref_dup_stack(w);
 		tm_ref_update_kmer(&w->kmer[size], size, w->amask, w->shift, b2>>2);
@@ -1389,28 +1457,6 @@ void tm_idx_fill_stat(tm_idx_profile_t *profile, int8_t const *score_matrix)
 }
 
 
-/* calc matching state between query and reference bases */
-static _force_inline
-uint64_t tm_idx_is_match(size_t qidx, size_t ridx)
-{
-	/* query in 2bit and reference in 4bit */
-	static uint8_t const qconv[TM_QUERY_ALPH_SIZE] = {
-		[nA>>2] = A,
-		[nC>>2] = C,
-		[nG>>2] = G,
-		[nT>>2] = T
-	};
-	static uint8_t const rconv[TM_REF_ALPH_SIZE] = {
-		[tA] = A, [tC] = C, [tG] = G, [tT] = T,
-		[tR] = R, [tY] = Y, [tS] = S, [tS ^ 0x0f] = S,
-		[tK] = K, [tM] = M, [tW] = W, [tW ^ 0x0f] = W,
-		[tB] = B, [tD] = D, [tH] = H, [tV] = V
-	};
-
-	return((qconv[qidx] & rconv[ridx]) != 0);
-}
-
-
 typedef void (*tm_idx_score_foreach_t)(void *opaque, int8_t *p, size_t qidx, size_t ridx);
 
 static _force_inline
@@ -1428,7 +1474,7 @@ void tm_idx_score_foreach(tm_idx_profile_t *profile, void *opaque, tm_idx_score_
 static
 void tm_idx_fill_score_callback(int64_t *s, int8_t *p, size_t qidx, size_t ridx)
 {
-	uint64_t const matching = tm_idx_is_match(qidx, ridx);
+	uint64_t const matching = tm_qrch_is_match(tm_2bit_to_qch(qidx), ridx);
 	*p = s[1 - matching];
 	return;
 }
@@ -1586,7 +1632,7 @@ typedef struct {
 static
 void tm_idx_acc_filter_score(tm_idx_calc_acc_t *acc, int8_t *p, size_t qidx, size_t ridx)
 {
-	uint64_t const matching = tm_idx_is_match(qidx, ridx);
+	uint64_t const matching = tm_qrch_is_match(tm_2bit_to_qch(qidx), ridx);
 	tm_idx_calc_acc_t *ptr = &acc[1 - matching];
 
 	int64_t const s = *p;
@@ -2466,7 +2512,7 @@ uint64_t tm_idx_gen_core(tm_idx_gen_t *mii, tm_idx_conf_t const *conf, char cons
 		.head_margin = sizeof(tm_idx_batch_t),
 
 		/* irregular 4bit encoding for reference */
-		#define _c(x)		( tm_pack_ref_base(x) )		/* make different from '\0' */
+		#define _c(x)		( tm_rch_pack(x) )		/* make different from '\0' */
 		.conv_table  = {
 			[A] = _c(tA), [C] = _c(tC), [G] = _c(tG), [T] = _c(tT),
 
@@ -4610,7 +4656,10 @@ dz_trace_match_t tm_extend_get_match(int8_t const *score_matrix, dz_query_t cons
 	int8_t const score = score_matrix[ch * DZ_QUERY_MAT_SIZE / 2 + packed[qidx]];
 	return((dz_trace_match_t){
 		.score = score,
-		.match = score > DZ_SCORE_OFS
+		.match = tm_qrch_is_match(
+			tm_2bit_to_qch(packed[qidx]),
+			tm_rch_unpack(ch)
+		)
 	});
 }
 
