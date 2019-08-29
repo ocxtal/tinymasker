@@ -4503,7 +4503,7 @@ size_t tm_extend_finalize_pack(tm_aln_t *dst, tm_aln_t const *src)
 	tm_aln_t const *p = rbt_fetch_head_isct_aln(&it, src, &all);
 	tm_aln_t *q = dst;
 	while(p != NULL) {
-		debug("p(%p), pos(%u, %u), span(%u, %u)", p, p->pos.q, p->pos.r, p->span.q, p->span.r);
+		debug("idx(%zu), p(%p), pos(%u, %u), span(%u, %u)", q - dst, p, p->pos.q, p->pos.r, p->span.q, p->span.r);
 
 		*q++ = *p;
 		p = rbt_fetch_next_isct_aln(&it, src, &all);
@@ -5429,6 +5429,7 @@ void tm_mtscan_drain_core(tm_mtscan_t *self, tm_mtscan_batch_t *batch)
 		if(v == NULL) { continue; }
 
 		for(size_t j = 0; j < v->cnt; j++) {
+			debug("idx(%zu)", j);
 			tm_print_aln(self->printer, si, seq, &v->arr[j]);
 		}
 	}
