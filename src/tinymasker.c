@@ -4333,9 +4333,9 @@ uint64_t tm_extend_is_covered(tm_scan_t *self, tm_chain_t const *c)
 
 	/* init iterator */
 	rbt_iter_t it;
-	rbt_init_iter_isct_aln(&it, v, &caln);
+	rbt_init_iter_isct_aln(&it);
 
-	tm_aln_t const *p = rbt_fetch_head_isct_aln(&it, v, &caln);
+	tm_aln_t const *p = rbt_fetch_isct_aln(&it, v, &caln);
 	while(p != NULL) {
 		debug("p(%p), weight(%u), (%u) --- %u --> (%u)", p, p->attr.max_weight, p->pos.q, p->span.q, p->pos.q + p->span.q);
 
@@ -4349,7 +4349,7 @@ uint64_t tm_extend_is_covered(tm_scan_t *self, tm_chain_t const *c)
 			return(1);		/* still too shorter than overlapping alignment */
 		}
 
-		p = rbt_fetch_next_isct_aln(&it, v, &caln);
+		p = rbt_fetch_isct_aln(&it, v, &caln);
 	}
 	return(0);				/* possiblilty remains for better alignment */
 }
@@ -4400,27 +4400,28 @@ tm_extend_replace_t tm_extend_slice_bin(tm_scan_t *self, tm_aln_t const *new)
 	if(v == NULL) { return(notfound); }
 
 	/* position is compared at once on GP register */
-	uint64_t const x = _loadu_u64(&new->pos);
+	uint64_t const x = _loadu_u64(&new->pos);	/* uncanonized spos so that it points the tail end of the second extension */
 
 	/* init iterator */
 	rbt_iter_t it;
-	rbt_init_iter_match_aln(&it, v, new);
+	rbt_init_iter_match_aln(&it);
 
-	tm_aln_t const *p = rbt_fetch_head_match_aln(&it, v, new);
-	while(p != NULL) {
+	while(1) {
+		tm_aln_t const *p = rbt_fetch_match_aln(&it, v, new);
+		if(p == NULL) { break; }
+
 		/* compare end pos, return iterator if matched */
 		uint64_t const y = _loadu_u64(&p->pos);
-		if(x == y && p->pos.dir == new->pos.dir) {		/* compare both */
 
+		// xfprintf(stderr, "compare aln, bid(%zu), eq(%lu), %r, %r\n", p - v, x == y, tm_aln_to_str, p, tm_aln_to_str, new);
+		if(x == y) {		/* direction contained */
 			/* alignment end position collides; take better one */
-			debug("duplication found, patch bin");
+			// xfprintf(stderr, "duplication found, patch bin, bid(%zu), replace(%lu), %r, %r\n", p - v, tm_extend_compare_aln(p, new) < 0, tm_aln_to_str, p, tm_aln_to_str, new);
 			return((tm_extend_replace_t){
 				.collided = 1,
 				.replaced = tm_extend_patch_bin(self, v, &it, (tm_aln_t *)p, new)
 			});
 		}
-
-		p = rbt_fetch_next_match_aln(&it, v, new);
 	}
 
 	/* not found; we need to allocate new bin for the alignment */
@@ -4430,7 +4431,7 @@ tm_extend_replace_t tm_extend_slice_bin(tm_scan_t *self, tm_aln_t const *new)
 static _force_inline
 void tm_extend_push_bin(tm_scan_t *self, tm_aln_t const *aln)
 {
-	debug("allocate new bin, i(%zu)", kv_cnt(self->extend.arr));
+	debug("allocate new bin, bid(%zu)", kv_cnt(self->extend.arr));
 
 	/* copy */
 	tm_aln_t *p = kv_pushp(tm_aln_t, self->extend.arr);
@@ -4438,6 +4439,7 @@ void tm_extend_push_bin(tm_scan_t *self, tm_aln_t const *aln)
 
 	/* update tree */
 	rbt_insert_aln(kv_ptr(self->extend.arr), kv_cnt(self->extend.arr) - 1);
+	// rbt_print_aln(kv_ptr(self->extend.arr), kv_cnt(self->extend.arr), tm_aln_to_str);
 
 	/* test for patch query */
 	debugblock({
@@ -4446,15 +4448,15 @@ void tm_extend_push_bin(tm_scan_t *self, tm_aln_t const *aln)
 		uint64_t const x = _loadu_u64(&aln->pos);
 
 		rbt_iter_t it;
-		rbt_init_iter_match_aln(&it, v, aln);
+		rbt_init_iter_match_aln(&it);
 
-		tm_aln_t const *q = rbt_fetch_head_match_aln(&it, v, aln);
-		while(q != NULL) {
+		while(1) {
+			tm_aln_t const *q = rbt_fetch_match_aln(&it, v, aln);
+			if(q == NULL) { break; }
+
 			/* compare end pos, return iterator if matched */
 			uint64_t const y = _loadu_u64(&q->pos);
 			if(x == y && q->pos.dir == aln->pos.dir) { debug("found"); break; }
-
-			q = rbt_fetch_next_match_aln(&it, v, aln);
 		}
 		rbt_patch_match_aln(&it, v);
 
@@ -4533,15 +4535,15 @@ size_t tm_extend_finalize_pack(tm_aln_t *dst, tm_aln_t const *src)
 	};
 
 	rbt_iter_t it;
-	rbt_init_iter_isct_aln(&it, src, &all);
+	rbt_init_iter_isct_aln(&it);
 
-	tm_aln_t const *p = rbt_fetch_head_isct_aln(&it, src, &all);
 	tm_aln_t *q = dst;
-	while(p != NULL) {
-		debug("idx(%zu), p(%p), pos(%u, %u), span(%u, %u)", q - dst, p, p->pos.q, p->pos.r, p->span.q, p->span.r);
+	while(1) {
+		tm_aln_t const *p = rbt_fetch_isct_aln(&it, src, &all);
+		if(p == NULL) { break; }
 
+		debug("bid(%zu), %r", q - dst, tm_aln_to_str, p);
 		*q++ = *p;
-		p = rbt_fetch_next_isct_aln(&it, src, &all);
 	}
 	size_t const saved = q - dst;
 	return(saved);
@@ -4560,6 +4562,14 @@ tm_alnv_t *tm_extend_finalize(tm_scan_t *self)
 		+ sizeof(tm_aln_t) * cnt	/* payload */
 	);
 	debug("src(%p), cnt(%zu), dst(%p)", src, cnt, dst);
+
+	debugblock({
+		rbt_print_aln(src, cnt, tm_aln_to_str);
+		for(size_t i = 1; i < kv_cnt(self->extend.arr); i++) {
+			tm_aln_t const *p = &src[i];
+			debug("bid(%zu), %r", i, tm_aln_to_str, p);
+		}
+	});
 
 	/* pack; cnt returned */
 	dst->cnt = tm_extend_finalize_pack(dst->arr, src);
@@ -4640,8 +4650,8 @@ dz_fill_fetch_t tm_extend_fetch_next(tm_extend_fetcher_t *self, int8_t const *sc
 	self->p += self->inc;
 	self->next = next;
 
-	debug("p(%p), inc(%ld), is_term(%u), c(%x, %x)", self->p, self->inc, next.is_term, curr.rch, next.rch);
-	_print_v16i8((v16i8_t){ self->mv });
+	// debug("p(%p), inc(%ld), is_term(%u), c(%x, %x)", self->p, self->inc, next.is_term, curr.rch, next.rch);
+	// _print_v16i8((v16i8_t){ self->mv });
 	return(curr);
 
 	#if 0

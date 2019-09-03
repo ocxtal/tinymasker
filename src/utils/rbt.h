@@ -60,16 +60,20 @@ void rbt_iter_init_static(rbt_iter_t *w)
 	w->ibuf[0] = 0;
 	return;
 }
+
 static _force_inline
-uint64_t rbt_iter_remove_left_parents(rbt_iter_t *w)
+uint64_t rbt_iter_ascend_left(rbt_iter_t *w)
 {
+	/* return true if reached "parent of root" */
+	if((w->dv & (w->dv + 1)) == 0) { return(0); }
+
 	/* remove the tail contiguous Rs */
-	uint64_t const rcnt = _tzc_u64(~w->dv);
+	ZCNT_RESULT uint64_t const rcnt = _tzc_u64(~w->dv);
 	debug("remove left parent, rcnt(%lu), dv(%lx -> %lx), b(%p)", rcnt, w->dv, w->dv>>rcnt, w->b - rcnt);
 
 	w->dv >>= rcnt;
 	w->b   -= rcnt;
-	return(w->dv == 0);			/* return true if reached "parent of root" */
+	return(1);
 }
 
 
@@ -87,8 +91,9 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
 
 /*
  * We assume the nodes of tree is packed in a single vector which is addressable by non-negative index i on `arr'.
- * The nodes are located by uint32_t *ptr and index multiple of 4, which forces the the sizeof(node) be multiple of 16 (== 4 * sizeof(uint32_t)).
+ * The nodes are located by uint32_t *ptr and index multiple of 4, which forces the the sizeof(node_t) be multiple of 16 (== 4 * sizeof(uint32_t)).
  * The first node of the array (arr[0]) is reserved for parent node of root, which cannot be used for storing any data.
+ * It must keep the minimum value so that the binary tree condition holds anywhere in the tree, otherwise either insert or iterator will be broken.
  * The "parent of root" node is initialized by calling rbt_init_static function.
  *
  * _bucket_t:              container type, must contain rbt_header_t.
@@ -99,7 +104,7 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
 #define RBT_INIT_IVT(_sfx, _bucket_t, _hdr, _cmp, _update) \
 	typedef uint64_t (*rbt_callback_##_sfx##_t)(_bucket_t *node, _bucket_t *parent); \
 	static _force_inline \
-	uint64_t rbt_print_intl_##_sfx(FILE *fp, uint32_t *depth, uint8_t *check, uint32_t const *p, uint32_t raw_idx, uint32_t tab) { \
+	uint64_t rbt_print_intl_##_sfx(FILE *fp, char *(*formatter)(_bucket_t const *p), uint32_t *depth, uint8_t *check, uint32_t const *p, uint32_t raw_idx, uint32_t tab) { \
 		static char const *spaces = "                                                                                                "; \
 		if(_rbt_idx(raw_idx) == 0) { \
 			if(tab > depth[0]) { depth[0] = tab; } \
@@ -113,17 +118,27 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
 		if(_rbt_is_red(raw_idx) && (_rbt_is_red(left) || _rbt_is_red(right))) { \
 			err |= 0x80; check[raw_idx>>2] |= 0x80; \
 		} \
-		err |= rbt_print_intl_##_sfx(fp, depth, check, p, right, tab + 1); \
-		fprintf(fp, "%.*s(%u, %c)\n", (int)(2 * tab), spaces, _rbt_idx(raw_idx), (raw_idx & 0x01) ? 'B' : 'R'); \
-		err |= rbt_print_intl_##_sfx(fp, depth, check, p, left, tab + 1); \
+		/* print right child */ \
+		err |= rbt_print_intl_##_sfx(fp, formatter, depth, check, p, right, tab + 1); \
+		/* print self */ { \
+			char *s = formatter != NULL ? formatter(_rbt_ptr(_bucket_t, p, _rbt_idx(raw_idx))): NULL; \
+			fprintf(fp, "%.*s(%u, %c)%s%s\n", \
+				(int)(2 * tab), spaces, \
+				_rbt_idx(raw_idx) / RBT_SCALING_FACTOR, (raw_idx & 0x01) ? 'B' : 'R', \
+				s == NULL ? "" : ": ", s == NULL ? "" : s \
+			); \
+			free(s); \
+		} \
+		/* print left child */ \
+		err |= rbt_print_intl_##_sfx(fp, formatter, depth, check, p, left, tab + 1); \
 		return(err); \
 	} \
 	static _force_inline \
-	void rbt_print_##_sfx(_bucket_t const *arr, size_t len) { \
+	void rbt_print_##_sfx(_bucket_t const *arr, size_t len, char *(*formatter)(_bucket_t const *p)) { \
 		uint8_t *check = calloc(1, len + 1); \
 		uint32_t depth[2] = { 0, UINT32_MAX }; \
 		uint32_t const *p = (uint32_t const *)arr; \
-		uint64_t const err = rbt_print_intl_##_sfx(stderr, depth, check, p, _hdr(_rbt_ptr(_bucket_t, p, 0))->children[1], 0); \
+		uint64_t const err = rbt_print_intl_##_sfx(stderr, formatter, depth, check, p, _hdr(_rbt_ptr(_bucket_t, p, 0))->children[1], 0); \
 		printf("depth(%u, %u)\n", depth[0], depth[1]); \
 		if(err) { \
 			fprintf(stderr, "broken\n"); \
@@ -132,7 +147,8 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
 				fprintf(stderr, "(%lu, %u, (%u, %c), (%u, %c)), count(%u)\n", i * RBT_SCALING_FACTOR, _loadu_u32(&p[(i * RBT_SCALING_FACTOR) + 2]), \
 					p[i * RBT_SCALING_FACTOR] & 0xfffc, (p[i * RBT_SCALING_FACTOR] & 0x01) ? 'B' : 'R', \
 					p[(i * RBT_SCALING_FACTOR) + 1] & 0xfffc, (p[(i * RBT_SCALING_FACTOR) + 1] & 0x01) ? 'B' : 'R', \
-					check[i]); \
+					check[i] \
+				); \
 			} \
 		} \
 		free(check); \
@@ -144,14 +160,19 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
 		_storeu_u64(_hdr(_rbt_ptr(_bucket_t, p, 0)), RBT_BMASK);			/* leaves; both black */ \
 		return; \
 	} \
-	/* find path to a node that is appropriate for the leaf to be inserted */ \
+	/* \
+	 * find path to a node that is appropriate for the leaf to be inserted \
+	 */ \
 	static _force_inline \
-	void rbt_find_leaf_intl_##_sfx(rbt_iter_t *w, uint32_t const *p, uint32_t raw_root_idx, _bucket_t const *leaf) { \
+	void rbt_find_leaf_intl_##_sfx(rbt_iter_t *w, uint32_t const *p, _bucket_t const *leaf) { \
+		uint32_t const raw_root_idx = w->b[-1]; \
+		_bucket_t const *root = _rbt_ptr(_bucket_t, p, raw_root_idx); \
 		debug("root(%u, %u)", _rbt_idx(raw_root_idx), raw_root_idx & 0x01); \
 		/* add 5-bit offset */ \
+		w->dv  |= 0x01ULL; \
 		w->dv <<= 5; \
 		/* dig tree from root; "parent of root" is at [0] and root is right node of the node */ \
-		for(uint32_t raw_idx = raw_root_idx; ((int64_t)w->dv) > 0 && _rbt_idx(raw_idx) != 0;) { \
+		for(uint32_t raw_idx = _hdr(root)->children[1]; ((int64_t)w->dv) > 0 && _rbt_idx(raw_idx) != 0;) { \
 			_bucket_t const *node = _rbt_ptr(_bucket_t, p, _rbt_idx(raw_idx));		/* extract pointer for the current node */ \
 			uint64_t const c = _loadu_u64(_hdr(node));						/* load (right, left) index pair */ \
 			uint64_t const shift = _cmp(node, leaf) ? 0x20 : 0;				/* node->val < leaf->val ? RIGHT : LEFT */ \
@@ -190,13 +211,18 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
 		/* clear iterator */ \
 		rbt_iter_init_static(w); \
 		/* find leaf location */ \
-		uint32_t const raw_root_idx = _hdr(_rbt_ptr(_bucket_t, p, 0))->children[1]; \
-		rbt_find_leaf_intl_##_sfx(w, p, raw_root_idx, anchor); \
+		rbt_find_leaf_intl_##_sfx(w, p, anchor); \
 		/* remove the tail contiguous Rs; returns true if no node is found */ \
-		if(rbt_iter_remove_left_parents(w)) { return(NULL); } \
+		if(rbt_iter_ascend_left(w)) { \
+			/* found */ \
+			return(_rbt_ptr(_bucket_t, p, _rbt_idx(w->b[-1]))); \
+		} \
 		/* here b[0]->val < anchor->val and b[-1]->val >= anchor->val */ \
-		return(_rbt_ptr(_bucket_t, p, _rbt_idx(w->b[-1]))); \
+		return(NULL); \
 	} \
+	/* \
+	 * initialize header of the node to be inserted, then determine a location to be inserted \
+	 */ \
 	static _force_inline \
 	void rbt_insert_load_node_##_sfx(rbt_iter_t *w, uint32_t *p, uint32_t node_idx) { \
 		/* save leaf */ \
@@ -207,13 +233,15 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
 		/* clear iterator */ \
 		rbt_iter_init_static(w); \
 		/* find parent; dv[0] for B->C direction */ \
-		uint32_t const raw_root_idx = _hdr(_rbt_ptr(_bucket_t, p, 0))->children[1]; \
-		rbt_find_leaf_intl_##_sfx(w, p, raw_root_idx, nptr); \
+		rbt_find_leaf_intl_##_sfx(w, p, nptr); \
 		/* parent of leaf found; save leaf index at the tail */ \
 		*w->b = raw_cidx;							/* inserted node is red in the first place; complete state afterward */ \
 		debug("b(%p, %zu), ibuf(%p)", w->b, w->b - w->ibuf, w->ibuf); \
 		return; \
 	} \
+	/* \
+	 * ascend the tree while the red-black condition is not met \
+	 */ \
 	static _force_inline \
 	uint64_t rbt_insert_recolor_##_sfx(rbt_iter_t *w, uint32_t *p) { \
 		uint32_t cidx = _rbt_idx(w->b[0]);			/* current node (leaf) index */ \
@@ -243,6 +271,10 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
 		} \
 		return(ghdr); \
 	} \
+	/* \
+	 * subtree rotation; load three nodes of interest onto xmm registers and flip them with pshufbs. \
+	 * flipping patterns are encoded in shuffle_mask and gather_mask tables. \
+	 */ \
 	static _force_inline \
 	rbt_rebalance_t rbt_insert_rebalance_core_##_sfx(rbt_iter_t *w, uint32_t aidx, rbt_header_t *ap, rbt_header_t *bp, rbt_header_t *cp) { \
 		/* \
@@ -261,7 +293,9 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
 			_rbt_mask(rbAi, rbAr, rbCr, rbBr, rbAl, rbCl, rbBl),	/* RL: left-rotate -> right-rotate */ \
 			_rbt_mask(rbCl, rbCr, rbAi, rbBr, rbAl, rbBl, rbAr)		/* RR: right-rotate */ \
 		}; \
-		static uint8_t const gather_mask[16] = { 0, 1, 4, 5, 8, 9, 12, 13, 2, 3, 6, 7, 10, 11, 14, 15 }; \
+		static uint8_t const gather_mask[16] __attribute__(( aligned(16) )) = { \
+			0, 1, 4, 5, 8, 9, 12, 13, 2, 3, 6, 7, 10, 11, 14, 15 \
+		}; \
 		/* compute shuffle masks */ \
 		uint64_t const pattern    = (w->dv<<4) & 0x30; \
 		uint64_t const is_cis     = ~(3 * pattern) & 0x20;		/* ~(pattern[4] ^ pattern[5]); true when LL or RR */ \
@@ -284,12 +318,15 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
 		_storeu_u64(cp, _mm_cvtsi128_si64(bc)); \
 		_storeu_u64(bp, _mm_extract_epi64(bc, 1)); \
 		_storeu_u64(ap, _mm_cvtsi128_si64(an)); \
-		/* mark the grandparent black */ \
+		/* return grandparent node index; the grandparent is always black */ \
 		return((rbt_rebalance_t){ \
 			.aidx = _rbt_black(_mm_extract_epi32(an, 2)), \
 			.cis  = is_cis \
 		}); \
 	} \
+	/* \
+	 * save link: grandparent -> parent \
+	 */ \
 	static _force_inline \
 	void rbt_insert_patch_link_##_sfx(rbt_iter_t *w, uint32_t *p) { \
 		/* fixup parent->node link; parent of grandparent may be root */ \
@@ -298,6 +335,10 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
 		*xbin = *w->b;		/* update parent of grandparent; mark black */ \
 		return; \
 	} \
+	/* \
+	 * rebalance nodes when recolor is done; the core algorithm is above; \
+	 * we determine if rebalance is necessary or not. dispatch appropriate function if needed. \
+	 */ \
 	static _force_inline \
 	uint64_t rbt_insert_rebalance_##_sfx(rbt_iter_t *w, uint32_t *p, uint64_t ghdr) { \
 		/* flip uncle color for test */ \
@@ -314,6 +355,7 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
 			return(1); \
 		} \
 		/* continue to tree rebalancing; first compose pointers */ \
+		debug("rebalance, (%u, %u, %u)", _rbt_idx(w->b[-2]), _rbt_idx(w->b[-1]), _rbt_idx(w->b[0])); \
 		_bucket_t *a = _rbt_ptr(_bucket_t, p, _rbt_idx(w->b[-2]));		/* grandparent */ \
 		_bucket_t *b = _rbt_ptr(_bucket_t, p, _rbt_idx(w->b[-1]));		/* parent */ \
 		_bucket_t *c = _rbt_ptr(_bucket_t, p, _rbt_idx(w->b[0]));		/* inserted node */ \
@@ -331,6 +373,9 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
 		if(r.cis == 0) { return(cont); }	/* we don't need to update C node when LL or RR */ \
 		return(rbt_insert_update_core_##_sfx(p, c)); \
 	} \
+	/* \
+	 * patch metadata after inserting a node. mainly for interval tree. not intended to be exposed as API. \
+	 */ \
 	static _force_inline \
 	void rbt_insert_update_##_sfx(rbt_iter_t *w, uint32_t *p) { \
 		/* move upward until hit root */ \
@@ -341,6 +386,9 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
 		w->b++; \
 		return; \
 	} \
+	/* \
+	 * patch the first (god) node. \
+	 */ \
 	static _force_inline \
 	void rbt_insert_finalize_##_sfx(rbt_iter_t *w, uint32_t *p) { \
 		_unused(w); \
@@ -349,13 +397,15 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
 		rbt_header_t *rhdr = _hdr(_rbt_ptr(_bucket_t, p, 0));	/* "parent of root" header pointer */ \
 		rhdr->children[1] = _rbt_black(rhdr->children[1]);		/* dv[0] for B->C direction */ \
 	} \
-	/*  insert functions: new node is located by node_idx, which is always an element of arr */ \
+	/* \
+	 * insert functions: new node is located by node_idx, which is always an element of arr \
+	 */ \
 	static _force_inline \
 	void rbt_insert_##_sfx(_bucket_t *arr, uint32_t node_idx) { \
 		uint32_t *p = (uint32_t *)arr; \
 		/* load node */ \
 		rbt_iter_t w; \
-		rbt_insert_load_node_##_sfx(&w, p, node_idx);	/* iterator is complete state afterward */ \
+		rbt_insert_load_node_##_sfx(&w, p, node_idx);			/* iterator is complete state afterward */ \
 		/* recolor */ \
 		uint64_t const ghdr = rbt_insert_recolor_##_sfx(&w, p); \
 		/* rebalance */ \
@@ -381,34 +431,49 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
  *     rbt_find_next(&it, arr, &v);
  * }
  *
+ * three comparison macros, _cmp_head, _cmp_tail, and _cmp_iter, are required to instanciate iterator,
+ * where the three are supposed to determine the following conditions:
+ *   _cmp_head(node, range):
+ *      supposed to return false when the node values (or ranges) of its subtree are
+ *      too small to meet the iteration condition.
+ *   _cmp_tail(node, range):
+ *      supposed to return true when the node value (or range) is
+ *      not too large that it meets the condition for now.
+ *   _cmp_iter(node, range):
+ *      supposed to return true when the node value (or range) meets the condition,
+ *      applied for nodes passed the _cmp_tail test to filter the result.
+ *
+ * combinations of 
+ *
+ *
  * range iterator on normal tree:
  *   _cmp_head(p1, p2)			( (p1)->val >= (p2)->val )
  *   _cmp_tail(p1, p2)			( (p1)->val <  (p2)->val )
  *   _cmp_iter(p1, p2)			( 1 )
- *   where head_anchor and tail_anchor containing lb and ub (for [lb, ub) range) respectively.
+ *   where anchor containing lb and ub (for [lb, ub) range) respectively.
  *
  * key search query:
  *   _cmp_head(p1, p2)			( (p1)->val >= (p2)->val )
  *   _cmp_tail(p1, p2)			( (p1)->val <= (p2)->val )
  *   _cmp_iter(p1, p2)			( 1 )
- *   where both head_anchor and tail_anchor having the key.
+ *   where anchor having the key searched.
  *
  * range iterator on interval tree:
  *   max_rval is defined maximum right boundary of all the children of the node:
  *     _update(parent, child)	{ if(child->max_rval > parent->max_rval) { parent->max_rval = child->max_rval; } }
  *
- *   contained range query (p1 contained in p2):
+ *   contained range query (a set of nodes which are contained in the query range):
  *     _cmp_head(p1, p2)		( (p1)->val             >= (p2)->val )
  *     _cmp_tail(p1, p2)		( (p1)->val             <  (p2)->val + (p2)->len )
  *     _cmp_iter(p1, p2)		( (p1)->val + (p1)->len <  (p2)->val + (p2)->len )
- *     where head_anchor and tail_anchor are the same; containing lb and ub (for [lb, ub) range).
+ *     where anchor is containing lb and ub (for [lb, ub) range).
  *
- *   containing range query (p2 contained in p1):
+ *   containing range query (a set of nodes each of which contains the query range):
  *     _cmp_head(p1, p2)		( (p1)->max_rval        >= (p2)->val + (p2)->len )
  *     _cmp_tail(p1, p2)		( (p1)->val             <= (p2)->val )
  *     _cmp_iter(p1, p2)		( (p1)->val + (p1)->len >= (p2)->val + (p2)->len )
  *
- *   intersection query (p1 overlaps with p2):
+ *   intersection query (a set of nodes each of which intersects with the query range):
  *     _cmp_head(p1, p2)		( (p1)->max_rval        > (p2)->val )
  *     _cmp_tail(p1, p2)		( (p1)->val             < (p2)->val + (p2)->len )
  *     _cmp_iter(p1, p2)		( (p1)->val + (p1)->len > (p2)->val )
@@ -417,72 +482,71 @@ enum rbt_shuffle_e { rbCl = 0, rbCr, rbBl, rbBr, rbAl, rbAr, rbAi, rbR, rbB };
  * the iterator is kept complete state after rbt_fetch_head
  */
 #define RBT_INIT_ITER_PATCH(_sfx, _bucket_t, _hdr, _cmp_head, _cmp_tail, _cmp_iter, _update) \
+	/* \
+	 * locate the leftmost node where _cmp_head (leftside condition for a subtree) becomes true. \
+	 * return true if at least one node is available in the current subtree. \
+	 */ \
 	static _force_inline \
-	uint64_t rbt_fetch_head_intl_##_sfx(rbt_iter_t *w, uint32_t const *p, uint32_t raw_root_idx, _bucket_t const *head_anchor) { \
-		debug("root(%u, %u)", _rbt_idx(raw_root_idx), raw_root_idx & 0x01); \
-		/* go left while the condition holds */ \
-		for(uint32_t raw_idx = raw_root_idx; ((int64_t)w->dv) > 0 && _rbt_idx(raw_idx) != 0;) { \
-			_bucket_t const *node = _rbt_ptr(_bucket_t, p, _rbt_idx(raw_idx)); \
-			if(!_cmp_head(node, head_anchor)) { debug("break"); break; } \
+	void rbt_iter_find_leaf_intl_##_sfx(rbt_iter_t *w, uint32_t const *p, _bucket_t const *anchor) { \
+		uint32_t const raw_root_idx = w->b[-1]; \
+		_bucket_t const *root = _rbt_ptr(_bucket_t, p, _rbt_idx(raw_root_idx)); \
+		debug("root(%u) -> right(%u)", raw_root_idx, _hdr(root)->children[1]); \
+		/* add 5-bit offset */ \
+		w->dv  |= 0x01ULL; \
+		w->dv <<= 5; \
+		/* dig tree from root; "parent of root" is at [0] and root is right node of the node */ \
+		for(uint32_t raw_idx = _hdr(root)->children[1]; ((int64_t)w->dv) > 0 && _rbt_idx(raw_idx) != 0;) { \
+			_bucket_t const *node = _rbt_ptr(_bucket_t, p, _rbt_idx(raw_idx));		/* extract pointer for the current node */ \
+			uint64_t const c = _loadu_u64(_hdr(node));						/* load (right, left) index pair */ \
+			uint64_t const shift = _cmp_head(node, anchor) ? 0 : 0x20;		/* node->val < anchor->val ? LEFT : RIGHT */ \
+			debug("node at raw_idx(%u), left(%lu, %lu), right(%lu, %lu), go %s", \
+				_rbt_idx(raw_idx), \
+				_rbt_idx(c), c & 0x01, \
+				_rbt_idx((c>>32)), (c>>32) & 0x01, shift ? "right" : "left"); \
 			/* go down the tree by one */ \
-			debug("go left, idx(%u, %u)", _rbt_idx(raw_idx), raw_idx & 0x01); \
-			*w->b++ = raw_idx;					/* save current node index */ \
-			w->dv <<= 1;						/* move root flag */ \
-			raw_idx = _hdr(node)->children[0];	/* extract left child index */ \
+			*w->b++ = raw_idx;			/* save current node index; still incomplete state */ \
+			w->dv   = (w->dv<<1) + shift;/* save direction */ \
+			raw_idx = c>>shift;			/* extract next node index */ \
 		} \
-		debug("done, dv(%lx)", w->dv); \
-		return((w->dv & 0x01ULL) == 0);			/* true if we were able to move left no more than once */ \
+		w->dv >>= 5;					/* remove 5-bit offset (see above) */ \
+		return; \
 	} \
 	static _force_inline \
-	uint64_t rbt_fetch_next_intl_##_sfx(rbt_iter_t *w, uint32_t const *p, _bucket_t const *tail_anchor) { \
-		/* find right; (w->dv & 0x02, w->b[-1]) points current node */ \
+	uint64_t rbt_fetch_intl_##_sfx(rbt_iter_t *w, uint32_t const *p, _bucket_t const *anchor) { \
 		while(1) { \
-			/* try right children */ \
-			uint32_t const raw_idx = _hdr(_rbt_ptr(_bucket_t, p, _rbt_idx(w->b[-1])))->children[1]; \
-			w->dv |= 0x01ULL;					/* mark next move is right (tentatvely) */ \
-			if(!rbt_fetch_head_intl_##_sfx(w, p, raw_idx, tail_anchor)) { \
-				/* right child not found */ \
-				debug("right child not found"); \
-				if(rbt_iter_remove_left_parents(w)) { return(1); }		/* reached tail; not found */ \
+			rbt_iter_find_leaf_intl_##_sfx(w, p, anchor); \
+			if(!rbt_iter_ascend_left(w)) { \
+				debug("no children found, term."); \
+				return(0); \
 			} \
-			_bucket_t const *node = _rbt_ptr(_bucket_t, p, _rbt_idx(w->b[-1])); \
-			if(!_cmp_tail(node, tail_anchor)) { debug("node(%u) is out of tail", _rbt_idx(w->b[-1])); return(1); }	/* reached tail; not found */ \
-			if(_cmp_iter(node, tail_anchor)) { debug("found, node(%u)", _rbt_idx(w->b[-1])); break; }		/* found */ \
-			/* node does not satisfy the condition; poll the next */ \
-			debug("poll next node(%u)", _rbt_idx(w->b[-1])); \
+			uint32_t const raw_idx = _rbt_idx(w->b[-1]); \
+			_bucket_t const *node  = _rbt_ptr(_bucket_t, p, raw_idx); \
+			if(!_cmp_tail(node, anchor)) { \
+				debug("node(%u) out of tail.", raw_idx); \
+				return(0); \
+			} \
+			if(_cmp_iter(node, anchor)) { \
+				debug("found node(%u)", raw_idx); \
+				return(1); \
+			} \
 		} \
-		return(0); \
+	} \
+	/* \
+	 * locate the first node where _cmp_head becomes true. \
+	 */ \
+	static _force_inline \
+	void rbt_init_iter_##_sfx(rbt_iter_t *w) { \
+		rbt_iter_init_static(w);	/* initialize working buffer */ \
+		return; \
 	} \
 	static _force_inline \
-	uint64_t rbt_init_iter_##_sfx(rbt_iter_t *w, _bucket_t const *arr, _bucket_t const *head_anchor) { \
+	_bucket_t const *rbt_fetch_##_sfx(rbt_iter_t *w, _bucket_t const *arr, _bucket_t const *anchor) { \
 		uint32_t const *p = (uint32_t const *)arr; \
-		/* initialize working buffer */ \
-		rbt_iter_init_static(w); \
-		/* left children */ \
-		uint32_t const raw_root_idx = _hdr(_rbt_ptr(_bucket_t, p, 0))->children[1]; \
-		return(rbt_fetch_head_intl_##_sfx(w, p, raw_root_idx, head_anchor)); \
-	} \
-	static _force_inline \
-	_bucket_t const *rbt_fetch_head_##_sfx(rbt_iter_t *w, _bucket_t const *arr, _bucket_t const *tail_anchor) { \
-		uint32_t const *p = (uint32_t const *)arr; \
-		if(w->b <= &w->ibuf[1]) { return(NULL); }		/* is initial state; not found */ \
-		/* find first node that satisfy the condition */ \
-		_bucket_t const *node = _rbt_ptr(_bucket_t, p, _rbt_idx(w->b[-1])); \
-		if(!_cmp_tail(node, tail_anchor)) { debug("head node(%u) is out of tail", _rbt_idx(w->b[-1])); return(NULL); }	/* first node is out of tail; not found */ \
-		if(!_cmp_iter(node, tail_anchor)) { \
-			/* first node is inappropriate; find next */ \
-			debug("not found; go next"); \
-			if(rbt_fetch_next_intl_##_sfx(w, p, tail_anchor)) { return(NULL); } \
+		if(rbt_fetch_intl_##_sfx(w, p, anchor)) { \
+			/* found */ \
+			return(_rbt_ptr(_bucket_t, p, _rbt_idx(w->b[-1]))); \
 		} \
-		/* found */ \
-		debug("found, node(%u)", _rbt_idx(w->b[-1])); \
-		return(_rbt_ptr(_bucket_t, p, _rbt_idx(w->b[-1]))); \
-	} \
-	static _force_inline \
-	_bucket_t const *rbt_fetch_next_##_sfx(rbt_iter_t *w, _bucket_t const *arr, _bucket_t const *tail_anchor) { \
-		uint32_t const *p = (uint32_t const *)arr; \
-		if(rbt_fetch_next_intl_##_sfx(w, p, tail_anchor)) { return(NULL); } \
-		return(_rbt_ptr(_bucket_t, p, _rbt_idx(w->b[-1]))); \
+		return(NULL); \
 	} \
 	/* \
 	 * callback for patching metadata; for interval tree \
