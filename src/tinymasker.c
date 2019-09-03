@@ -2970,6 +2970,12 @@ typedef struct {
 } tm_pos_t;
 
 static _force_inline
+char *tm_pos_to_str(tm_pos_t const *p)
+{
+	return(xbprintf("dir(%u), pos(%u, %u), unused(%u)", p->dir, p->r, p->q, p->unused));
+}
+
+static _force_inline
 tm_pair_t tm_pos_to_pair(tm_pos_t pos)
 {
 	/* drop dir and unused */
@@ -3205,6 +3211,12 @@ typedef struct {
 	dz_alignment_t const *aln;
 } tm_aln_t;
 _static_assert(sizeof(tm_aln_t) == 64);
+
+static
+char *tm_aln_to_str(tm_aln_t const *p)
+{
+	return(xbprintf("p(%p), score(%d, %d), dir(%u), pos(%u, %u), span(%u, %u)", p, p->score.raw, p->score.patched, p->pos.dir, p->pos.q, p->pos.r, p->span.q, p->span.r));
+}
 
 
 /* alignment utils */
@@ -4094,6 +4106,9 @@ size_t tm_filter_save_chain(uint32_t rid, tm_chain_t *q, tm_chain_raw_t const *p
 
 	q->attr.sep.rid    = rid;		/* overwrite */
 	q->attr.sep.weight = weight;	/* negated and offsetted by 32; the larger for the longer chain */
+
+	/* copy span */
+	q->span.q = p->span.q;
 	// debug("q(%p), %r, rid(%u), weight(%u)", q, tm_chain_to_str, q, rid, weight);
 	return(1);
 }
@@ -4363,8 +4378,9 @@ uint64_t tm_extend_patch_bin(tm_scan_t const *self, tm_aln_t *v, rbt_iter_t *it,
 		return(0);		/* not replaced (discarded) */
 	}
 
-	/* new one is larger; overwrite everything */
-	memcpy(old, new, sizeof(tm_aln_t));
+	/* new one is larger; overwrite content except for the header */
+	old->qmax = new->pos.q + new->span.q;				/* initialize qmax */
+	memcpy(&old->attr, &new->attr, sizeof(tm_aln_t) - offsetof(tm_aln_t, attr));
 
 	/* and update interval tree */
 	rbt_patch_match_aln(it, v);
@@ -4479,12 +4495,14 @@ tm_aln_t tm_extend_compose_aln(tm_scan_t const *self, tm_chain_t const *chain, t
 	/* calc pos and span */
 	tm_pair_t const span = tm_aln_span(aln);
 	tm_pos_t const spos = tm_sub_pos(epos, span);		/* convert to head position */
-	tm_pos_t const pos  = tm_canon_pos(spos, span);		/* spos.r < epos.r whichever direction is */
+	// tm_pos_t const pos  = tm_canon_pos(spos, span);		/* spos.r < epos.r whichever direction is */
+
+	// xfprintf(stderr, "compose, chain(%p), %r, aln(%p), %r\n", chain, tm_chain_to_str, chain, aln, tm_pos_to_str, &spos);
 
 	tm_aln_t const a = {
 		/* coordinates and scores */
 		.qmax = epos.q,		/* spos.q + span.q, */
-		.pos  = pos,
+		.pos  = spos,
 		.span = span,
 		.score = score,
 
@@ -5208,6 +5226,9 @@ void tm_print_cigar_reverse(tm_print_t *self, uint8_t const *path, size_t len)
 static _force_inline
 tm_print_seq_t tm_print_compose_query(bseq_meta_t const *query, tm_aln_t const *aln)
 {
+	tm_pos_t const pos = tm_canon_pos(aln->pos, aln->span);
+	tm_pair_t const span = aln->span;
+
 	tm_print_seq_t const q = {
 		.name = {
 			.len = bseq_name_len(query),
@@ -5215,8 +5236,8 @@ tm_print_seq_t tm_print_compose_query(bseq_meta_t const *query, tm_aln_t const *
 		},
 		.seq = {
 			.len = bseq_seq_len(query),
-			.spos = aln->pos.q,
-			.epos = aln->pos.q + aln->span.q - 1
+			.spos = pos.q,
+			.epos = pos.q + span.q - 1
 		}
 	};
 	return(q);
@@ -5225,6 +5246,9 @@ tm_print_seq_t tm_print_compose_query(bseq_meta_t const *query, tm_aln_t const *
 static _force_inline
 tm_print_seq_t tm_print_compose_ref(tm_idx_sketch_t const *ref, tm_aln_t const *aln)
 {
+	tm_pos_t const pos = tm_canon_pos(aln->pos, aln->span);
+	tm_pair_t const span = aln->span;
+
 	tm_print_seq_t const r = {
 		.name = {
 			.len = tm_idx_ref_name_len(ref),
@@ -5232,8 +5256,8 @@ tm_print_seq_t tm_print_compose_ref(tm_idx_sketch_t const *ref, tm_aln_t const *
 		},
 		.seq = {
 			.len = tm_idx_ref_seq_len(ref),
-			.spos = aln->pos.r,
-			.epos = aln->pos.r + aln->span.r - 1,
+			.spos = pos.r,
+			.epos = pos.r + span.r - 1,
 		}
 	};
 	return(r);
