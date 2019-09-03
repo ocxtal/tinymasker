@@ -485,7 +485,7 @@ void tm_ref_push_base(tm_ref_work_t *w, uint8_t base)
 	size_t const size = w->size;		/* save current size before duplicating stack */
 	uint8_t const b2 = tm_rch_to_2bit(base);
 
-	debug("base(%x, %c), ambiguous(%lu), size(%zu), max_size(%zu)", base, tm_rch_to_ascii(base), tm_rch_is_amb(base), w->size, w->max_size);
+	// debug("base(%x, %c), ambiguous(%lu), size(%zu), max_size(%zu)", base, tm_rch_to_ascii(base), tm_rch_is_amb(base), w->size, w->max_size);
 	if(_unlikely(tm_rch_is_amb(base) & (w->size < w->max_size))) {
 		tm_ref_dup_stack(w);
 		tm_ref_update_kmer(&w->kmer[size], size, w->amask, w->shift, b2>>2);
@@ -1703,9 +1703,16 @@ void tm_idx_calc_filter_ivec(tm_idx_profile_t *profile)
 static _force_inline
 void tm_idx_calc_filter_thresh(tm_idx_profile_t *profile)
 {
-	/* just save */
-	int32_t const min_score = profile->extend.min_score / 4;
+	tm_idx_stat_t const stat = tm_idx_calc_stat(profile->extend.score_matrix);
+	double const min_identity = stat.identity * 0.85;
+	int32_t const x = (int8_t)profile->filter.score_matrix[0];
+	int32_t const m = (int8_t)profile->filter.score_matrix[1];
+
+	double const min_per_pair = (double)m * min_identity + (double)x * (1.0 - min_identity);
+	int32_t const min_score = (int32_t)(16.0 * min_per_pair);
+
 	profile->filter.min_score = MAX2(0, min_score);
+	// fprintf(stderr, "id(%f), m(%d), x(%d), min_per_pair(%f), min_score(%d)\n", min_identity, m, x, min_per_pair, min_score);
 
 	/* overwrite span_thresh if the value is the default one */
 	if(profile->filter.span_thresh == UINT32_MAX) {
@@ -1887,12 +1894,12 @@ tm_idx_profile_t *tm_idx_default_profile(tm_idx_conf_t const *conf)
 	tm_idx_fill_default(profile);
 	tm_idx_override_default(profile, conf);
 
-	/* derive filtering parameters from extension parameters */
-	tm_idx_calc_filter_params(profile);
-
 	/* always refill bonus */
 	tm_idx_fill_bonus(profile, profile->extend.bonus);
 	tm_idx_fill_stat(profile, profile->extend.score_matrix);
+
+	/* derive filtering parameters from extension parameters */
+	tm_idx_calc_filter_params(profile);
 
 	/* instanciate dz */
 	if(tm_idx_finalize_profile(profile)) {
@@ -2217,9 +2224,9 @@ tm_idx_profile_t *tm_idx_parse_table(tm_idx_profile_t const *template, char cons
 	}
 
 	/* always recalc filtering scores and refill bonus */
-	tm_idx_calc_filter_params(profile);
 	tm_idx_fill_bonus(profile, profile->extend.bonus);
 	tm_idx_fill_stat(profile, profile->extend.score_matrix);
+	tm_idx_calc_filter_params(profile);
 
 	/* instanciate dz */
 	if(tm_idx_finalize_profile(profile)) {
