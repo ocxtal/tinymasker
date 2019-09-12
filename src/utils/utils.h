@@ -4,6 +4,10 @@
  * @brief collection of utils
  */
 
+#ifndef _UTILS_H_INCLUDED
+#define _UTILS_H_INCLUDED
+
+
 /* include global header *before* we include individual dependencies */
 #include "common.h"
 
@@ -37,6 +41,9 @@
 /* I/O */
 #include "pstream.h"
 #include "rbread.h"
+
+
+#endif	/* _UTILS_H_INCLUDED */
 
 /**
  * end of utils.h

@@ -63,9 +63,14 @@
 /**
  * static assertion macros
  */
-#define _sa_cat_intl(x, y)		x##y
-#define _sa_cat(x, y)			_sa_cat_intl(x, y)
-#define _static_assert(expr)	typedef char _sa_cat(_st, __LINE__)[(expr) ? 1 : -1]
+#define _sa_cat_intl(x, y, z) 	x##_##y##_##z
+#define _sa_cat(x, y, z)		_sa_cat_intl(x, y, z)
+#define _static_assert(expr)	typedef char _sa_cat(_st, __LINE__, __COUNTER__)[(expr) ? 1 : -1]
+
+/* check offset equality of elements in two structs */
+#define _static_assert_offset(st1, mb1, st2, mb2, ofs) \
+	_static_assert(offsetof(st1, mb1) == offsetof(st2, mb2) + ofs)
+
 
 /* misc vector types */
 typedef union { uint64_t u64[1]; uint32_t u32[2]; } v2u32_t;

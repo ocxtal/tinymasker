@@ -38,9 +38,9 @@
 /**
  * static assertion macros
  */
-#define _sa_cat_intl(x, y)		x##y
-#define _sa_cat(x, y)			_sa_cat_intl(x, y)
-#define _static_assert(expr)	typedef char _sa_cat(_st, __LINE__)[(expr) ? 1 : -1]
+// #define _sa_cat_intl(x, y)		x##y
+// #define _sa_cat(x, y)			_sa_cat_intl(x, y)
+// #define _static_assert(expr)	typedef char _sa_cat(_st, __LINE__)[(expr) ? 1 : -1]
 
 /**
  * color outputs

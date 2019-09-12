@@ -3,6 +3,9 @@
 // #define DEBUG
 // #define DZ_PRINT_VECTOR
 
+#ifndef _DZ_H_INCLUDED
+#define _DZ_H_INCLUDED
+
 /* print_vector for debugging */
 #ifdef DZ_PRINT_VECTOR
 #define print_vector(v) { \
@@ -975,7 +978,7 @@ dz_trace_match_t dz_trace_get_match_realigner(int8_t const *score_matrix, dz_que
  */
 #define dz_pp_cat_intl(x, y)		x##y
 #define dz_pp_cat(x, y)				dz_pp_cat_intl(x, y)
-#define dz_static_assert(expr)		typedef char dz_pp_cat(_st_, __LINE__)[(expr) ? 1 : -1]
+#define dz_static_assert(expr)		typedef char dz_pp_cat(_dz_st_, __LINE__)[(expr) ? 1 : -1]
 #define dz_trap()					{ *((volatile uint8_t *)NULL); }
 
 
@@ -5396,6 +5399,7 @@ unittest( "long.graph" ) {
 #ifdef __cplusplus
 };	/* extern "C" { */
 #endif
+#endif	/* _DZ_H_INCLUDED */
 
 /**
  * end of dozeu.h
