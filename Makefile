@@ -29,7 +29,7 @@ SFLAGS  = $(GFLAGS) -fsanitize=address # -fsanitize=memory -fsanitize=leak
 
 
 # intermediate
-SRCS = dbg.c index.c align.c aligner.c toml.c re.c main.c
+SRCS = dbg.c index.c align.c aligner.c toml.c re.c tinymasker.c
 
 SRCS_INTL = $(addprefix $(SRCDIR)/, $(SRCS))
 OBJS_INTL = $(SRCS_INTL:c=o)
