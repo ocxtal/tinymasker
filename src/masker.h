@@ -1,16 +1,16 @@
 
 /**
- * @file aligner.h
+ * @file masker.h
  *
  * @author Hajime Suzuki
  * @license MIT
  */
 
-#ifndef _ALIGNER_H_INCLUDED
-#define _ALIGNER_H_INCLUDED
+#ifndef _MASKER_H_INCLUDED
+#define _MASKER_H_INCLUDED
 
 #ifndef _ALIGN_H_INCLUDED
-#  error "#include \"aligner.h\" must be before #include \"aligner.h\""
+#  error "#include \"align.h\" must be before #include \"masker.h\""
 #endif
 
 
@@ -36,8 +36,8 @@ void tm_mtscan_destroy(tm_mtscan_t *self);
 int tm_mtscan_file(tm_mtscan_t *self, char const *fn);
 
 
-#endif		/* _ALIGNER_H_INCLUDED */
+#endif		/* _MASKER_H_INCLUDED */
 
 /**
- * end of aligner.h
+ * end of masker.h
  */

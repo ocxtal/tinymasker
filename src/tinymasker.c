@@ -23,7 +23,7 @@ unittest_config( .name = "main" );
 #include "dbg.h"		/* de Bruijn hash */
 #include "index.h"		/* index wrapper */
 #include "align.h"
-#include "aligner.h"
+#include "masker.h"
 
 
 /* return codes */

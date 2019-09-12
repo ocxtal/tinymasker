@@ -1,6 +1,6 @@
 
 /**
- * @file aligner.c
+ * @file masker.c
  * @brief (fasta, fasta) -> paf API and multithreading
  *
  * @author Hajime Suzuki
@@ -16,7 +16,7 @@
 
 #include "utils/utils.h"		/* include all */
 #include "tinymasker.h"
-unittest_config( .name = "aligner" );
+unittest_config( .name = "masker" );
 
 
 #include "dozeu.h"
@@ -27,7 +27,7 @@ unittest_config( .name = "aligner" );
 
 
 /* forward declarations */
-#include "aligner.h"
+#include "masker.h"
 
 
 /* printer */
@@ -459,5 +459,5 @@ int tm_mtscan_file(tm_mtscan_t *self, char const *fn)
 
 
 /**
- * end of aligner.c
+ * end of masker.c
  */
