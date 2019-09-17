@@ -88,7 +88,7 @@ static _force_inline
 size_t mm_strlen(char const *p)
 {
 	if(p == NULL) { return(0); }
-	return(strlen(p));
+	return(strlen(p));		/* use pcmpeq? */
 }
 
 static _force_inline

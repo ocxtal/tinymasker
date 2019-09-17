@@ -50,6 +50,7 @@ _static_assert(sizeof(bseq_meta_t) == 32);
 /* memory management */
 
 #define BSEQ_MGN					( 64 )			/* buffer margin length */
+_static_assert((BSEQ_MGN % 32) == 0);
 
 typedef struct {
 	void *base;
@@ -848,27 +849,136 @@ unittest( .name = "bseq.fastq.skip" ) {
 /* printer */
 typedef struct {
 	struct {
-		uint8_t *ptr;
+		uint8_t *p, *t;		/* margined */
 		size_t size;
 	} buf;
+
+	/* print qual / small conv table */
+	uint32_t qual, fast;
+
+	/* conversion table for entire ASCII space */
+	uint8_t mask[16];
+	uint8_t conv[256];
 } bseq_dump_t;
 
 static _force_inline
-size_t bseq_dump_core_fast(uint8_t const *conv, uint8_t const *seq, size_t slen)
+void bseq_dump_init_buf(bseq_dump_t *self, size_t batch_size)
+{
+	size_t const size = batch_size;
+	size_t const margined_size = size + 3 * BSEQ_MGN;
+
+	/* allocate (or die) */
+	void *base = aligned_malloc(margined_size);
+	uint8_t *p = _add_offset(base, BSEQ_MGN);
+
+	/* save all */
+	self->buf.p = p;
+	self->buf.t = p + size;
+	self->buf.size = size;
+	return;
+}
+
+static _force_inline
+void bseq_dump_destroy_buf(bseq_dump_t *self)
+{
+	uint8_t *p = self->buf.t - self->buf.size;
+	void *base = _sub_offset(p, BSEQ_MGN);
+	free(base);
+	return;
+}
+
+static _force_inline
+uint8_t *bseq_dump_allocate_buf(bseq_dump_t *self, size_t len)
+{
+	if(_unlikely(self->buf.p + len > self->buf.t + BSEQ_MGN)) {
+		uint8_t *p = self->buf.t - self->buf.size;
+		uint8_t const len = MIN2(self->buf.p - p, self->buf.size);
+
+		/* until everything is dumped */
+		size_t const sum = 0;
+		while((sum += fwrite(p + sum, 1, len - sum, stdout)) < len) {}
+
+		/* copy remaining (if there is) and reset pointer */
+		_memcpy_blk_uu(p, p + len, BSEQ_MGN);
+		self->buf.p = p;
+	}
+
+	/* allocate buffer */
+	uint8_t *q = self->buf.p;
+	self->buf.p += len;
+	return(q);
+}
+
+static _force_inline
+size_t bseq_dump_putsn(bseq_dump_t *self, char const *str, size_t len)
+{
+	uint8_t const *p = (uint8_t const *)str, *t = p + len;
+	while(p < t) {
+		/* allcoate buffer */
+		size_t const l = MIN2(t - p, 64);
+		uint8_t *q = bseq_dump_allocate_buf(self, l);
+
+		/* copy */
+		v32i8_t const v1 = _loadu_v32i8(p);
+		v32i8_t	const v2 = _loadu_v32i8(p + 32);
+		_storeu_v32i8(q,      v1);
+		_storeu_v32i8(q + 32, v2);
+
+		/* forward pointer */
+		p += 64;
+	}
+	return(len);
+}
+
+static _force_inline
+size_t bseq_dump_puts(bseq_dump_t *self, char const *str)
+{
+	size_t const len = mm_strlen(str);
+	return(bseq_dump_putsn(self, str, len));
+}
+
+static _force_inline
+size_t bseq_dump_core_fast(bseq_dump_t *self, uint8_t const *seq, size_t slen)
+{
+	v32i8_t const conv = _loadu_v32i8(self->conv);
+	uint8_t const *p = (uint8_t const *)str, *t = p + len;
+
+	while(p < t) {
+		/* allcoate buffer */
+		size_t const l = MIN2(t - p, 64);
+		uint8_t *q = bseq_dump_allocate_buf(self, l);
+
+		/* convert and save */
+		v32i8_t const v1 = _loadu_v32i8(p);
+		v32i8_t const v2 = _loadu_v32i8(p + 32);
+		v32i8_t const w1 = _shuf_v32i8(conv, v1);
+		v32i8_t const w2 = _shuf_v32i8(conv, v2);
+		_storeu_v32i8(q,      w1);
+		_storeu_v32i8(q + 32, w2);
+
+		/* forward pointer */
+		p += 64;
+	}
+	return(slen);
+}
+
+static _force_inline
+size_t bseq_dump_core_slow(bseq_dump_t *self, uint8_t const *seq, size_t slen)
 {
 	return(slen);
 }
 
 static _force_inline
-size_t bseq_dump_core_slow(uint8_t const *conv, uint8_t const *seq, size_t slen)
+size_t bseq_dump_header(bseq_dump_t *self, bseq_meta_t const *meta)
 {
-	return(slen);
+	return(len);
 }
 
 static _force_inline
-size_t bseq_dump_seq(uint8_t const *conv, uint64_t fast, bseq_meta_t const *meta, uint64_t qual)
+size_t bseq_dump_seq(bseq_dump_t *self, uint8_t const *conv, uint64_t fast, bseq_meta_t const *meta, uint64_t qual)
 {
 	size_t acc = 0;
+
 	/* header */
 	acc += printf("%c%.*s%.*s%.*s\n%.*s\n",
 		qual ? '@' : '>',
@@ -914,7 +1024,7 @@ uint64_t bseq_dump_is_fast(uint8_t const *table)
 }
 
 static _force_inline
-size_t bseq_dump(bseq_conf_t const *conf, bseq_batch_t const *batch)
+size_t bseq_dump(bseq_dump_t *self, bseq_batch_t const *batch)
 {
 	/* init conversion table */
 	uint8_t conv[256] __attribute__(( aligned(16) ));

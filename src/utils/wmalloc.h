@@ -139,7 +139,7 @@ void wm_madvice(wm_aligned_malloc_hint_t hint, void *ptr, char const *fn)
 			int ret = posix_madvise(ptr, hint.adjusted_size, MADV_HUGEPAGE);
 
 			if(_unlikely(ret != 0)) {
-				fprintf(stderr, "madvise failed for ptr(%p), size(%zu, %zx), ret(%d), in %s\n", ptr, hint.adjusted_size, hint.adjusted_size, ret, fn);
+				debug("madvise failed for ptr(%p), size(%zu, %zx), ret(%d), in %s", ptr, hint.adjusted_size, hint.adjusted_size, ret, fn);
 			}
 		}
 	#else
