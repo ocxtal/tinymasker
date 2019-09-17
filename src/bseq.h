@@ -615,9 +615,9 @@ bseq_file_t *bseq_open(bseq_conf_t const *conf, char const *fn)	/* file path; "-
 	/* create instance */
 	bseq_file_t *fp = (bseq_file_t *)calloc(1, sizeof(bseq_file_t));
 	*fp = (bseq_file_t){
-		.keep_qual = conf->keep_qual,
+		.keep_qual    = conf->keep_qual,
 		.keep_comment = conf->keep_comment,
-		.head_margin = _roundup(conf->head_margin, sizeof(bseq_batch_t))
+		.head_margin  = _roundup(conf->head_margin, sizeof(bseq_batch_t))
 	};
 
 	/* exclude trivial failure */
@@ -663,7 +663,7 @@ _bseq_open_fail:;
 	return(NULL);
 }
 
-#if 0
+
 unittest( .name = "bseq.fasta" ) {
 	char const *filename = "./minialign.unittest.bseq.tmp";
 	char const *content =
@@ -843,7 +843,99 @@ unittest( .name = "bseq.fastq.skip" ) {
 	ut_assert(scnt == 4);
 	remove(filename);
 }
-#endif
+
+
+/* printer */
+typedef struct {
+	struct {
+		uint8_t *ptr;
+		size_t size;
+	} buf;
+} bseq_dump_t;
+
+static _force_inline
+size_t bseq_dump_core_fast(uint8_t const *conv, uint8_t const *seq, size_t slen)
+{
+	return(slen);
+}
+
+static _force_inline
+size_t bseq_dump_core_slow(uint8_t const *conv, uint8_t const *seq, size_t slen)
+{
+	return(slen);
+}
+
+static _force_inline
+size_t bseq_dump_seq(uint8_t const *conv, uint64_t fast, bseq_meta_t const *meta, uint64_t qual)
+{
+	size_t acc = 0;
+	/* header */
+	acc += printf("%c%.*s%.*s%.*s\n%.*s\n",
+		qual ? '@' : '>',
+		(int)bseq_name_len(meta), bseq_name(meta),
+		(int)(bseq_comment_len(meta) != 0), " ",
+		(int)bseq_comment_len(meta), bseq_comment(meta)
+	);
+
+	/* body */
+	acc += (fast ? bseq_dump_core_fast : bseq_dump_core_slow)(
+		conv,
+		bseq_seq(meta),
+		bseq_seq_len(meta)
+	);
+	if(qual == 0) { return(acc); }
+
+	/* qual */
+	printf("\n\n");
+	return(acc);
+}
+
+static _force_inline
+void bseq_dump_load_conv(uint8_t *conv, uint8_t const *table)
+{
+	for(size_t i = 0x00; i < 0x0f; i++) {
+		conv[table[i]] = "NACMGRSVTWYHKDBN"[i];
+	}
+	return;
+}
+
+static _force_inline
+uint64_t bseq_dump_is_fast(uint8_t const *table)
+{
+	v16i8_t const tv = _loadu_v16i8(table);
+	v16i8_t const fv = _set_v16i8(0x0f);
+
+	/* if there is a cell larger than 0x0f it becomes 0xff */
+	v16i8_t const gv = _gt_v16i8(tv, fv);
+
+	/* if there is at least one cell larger than 0x0f mask becomes nonzero */
+	uint64_t const gm = ((v16_masku_t){ .mask = _mask_v16i8(gv) }).all;
+	return(gm == 0);
+}
+
+static _force_inline
+size_t bseq_dump(bseq_conf_t const *conf, bseq_batch_t const *batch)
+{
+	/* init conversion table */
+	uint8_t conv[256] __attribute__(( aligned(16) ));
+	bseq_dump_load_conv(conv, conf->conv_table);
+
+	/* load seq array */
+	bseq_meta_t const *seq = bseq_meta_ptr(batch);
+	size_t const scnt = bseq_meta_cnt(batch);
+
+	/* configurations */
+	uint64_t const is_fast = bseq_dump_is_fast(conf->conv_table);
+	uint64_t const is_qual_set = bseq_is_qual_set(seq);
+
+	/* dump all */
+	size_t bytes = 0;
+	for(size_t i = 0; i < scnt; i++) {
+		bytes += bseq_dump_seq(conv, is_fast, &meta[i], is_qual_set);
+	}
+	return(bytes);
+}
+
 
 /**
  * end of bseq.h

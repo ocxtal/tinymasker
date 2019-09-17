@@ -36,7 +36,7 @@ OBJS_INTL = $(SRCS_INTL:c=o)
 DEPS_INTL = $(SRCS_INTL:c=dep)
 
 # default version string is parsed from git tags, otherwise extracted from the source
-VERSION = $(shell $(GIT) describe --tags 2>/dev/null || grep "define TM_VERSION" $(SRCDIR)/tinymasker.c | grep -o '".*"' | sed 's/"//g')
+VERSION = $(shell $(GIT) describe --tags 2>/dev/null || grep "define TM_VERSION" $(SRCDIR)/tinymasker.h | grep -o '".*"' | sed 's/"//g')
 COMMIT  = $(shell $(GIT) describe --always --dirty)
 
 

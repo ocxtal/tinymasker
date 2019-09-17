@@ -11,7 +11,6 @@
 /* include global header *before* we include individual dependencies */
 #include "common.h"
 #include "log.h"
-
 #include "mmstring.h"
 
 
@@ -27,43 +26,12 @@ typedef struct { char *p; size_t size, used; } opt_mem_t;
  */
 typedef int (*opt_log_t)(opt_t const *o, char level, char const *func, char const *fmt, ...);
 struct opt_s {
-	mm_strbin_t bin;
+	mm_bin_t bin;
 	ptr_v parg;								/* positional arguments */
 	size_t ecnt;							/* error counter */
 	void *log;								/* output file pointer */
 	opt_parser_t t[256];					/* parser functions */
 };
-
-/**
- * @macro oassert, olog
- */
-#define oassert(_cond, ...)		{ if(!(_cond)) { error("" __VA_ARGS__); } }
-
-/**
- * @macro split_foreach
- * @brief split string into tokens and pass each to _body.
- * p, len, and i are reserved for pointer, length, and #parsed.
- * break / continue can be used in the _body to terminate / skip the current element.
- */
-#define split_foreach(_ptr, _len, _delims, _body) ({ \
-	char const *_q = (_ptr), *_t = &(_ptr)[(_len) == 0 ? UINT32_MAX : (_len)]; \
-	size_t i = 0; \
-	v16i8_t _dv = _loadu_v16i8(_delims); \
-	uint16_t _m, _mask = 0x02<<_tzc_u64(((v16i8_masku_t){		/* reserve space for '\0' */ \
-		.mask = _mask_v16i8(_eq_v16i8(_set_v16i8('\0'), _dv)) \
-	}).all); \
-	_dv = _bsl_v16i8(_dv, 1); _mask--;						/* push '\0' at the head of the vector */ \
-	do { \
-		char const *_p = _q; \
-		/* test char one by one until dilimiter found */ \
-		while(((_m = ((v16i8_masku_t){ .mask = _mask_v16i8(_eq_v16i8(_set_v16i8(*_q), _dv)) }).all) & _mask) == 0) { _q++; } \
-		/* delimiter found, pass to _body */ \
-		char const *p = _p; \
-		uint64_t l = _q++ - _p; \
-		if(l > 0) { _body; i++; } \
-	} while((_m & 0x01) == 0 && _q < _t); \
-	i; \
-})
 
 #define opt_inittime(_o)			( (_o)->inittime )
 #define opt_pargv(_o)				( (_o)->parg )
@@ -81,7 +49,7 @@ void opt_init_static(opt_t *opt, void *fp)
 	opt->log = fp;
 
 	/* make sure kv_ptr(opt->mem) is always available */
-	mm_strbin_init_static(&opt->bin);
+	mm_bin_init_static(&opt->bin);
 	kv_reserve(void *, opt->parg, 16);
 	return;
 }
@@ -89,7 +57,7 @@ static _force_inline
 void opt_destroy_static(opt_t *opt)
 {
 	/* positional arguments */
-	mm_strbin_destroy_static(&opt->bin);
+	mm_bin_destroy_static(&opt->bin);
 	kv_destroy(opt->parg);
 	return;
 }
@@ -165,7 +133,7 @@ static void opt_parse_line(opt_t *o, void *opaque, char const *arg)
 {
 	kvec_t(char) str = { 0 };
 	kvec_t(char const *) ptr = { 0 };
-	split_foreach(arg, 0, " \t\r\n", {
+	mm_split_foreach(arg, 0, " \t\r\n", {
 		kv_push(char const *, ptr, (char const *)kv_size(str));
 		kv_pushm(char, str, p, l);
 		kv_push(char, str, '\0');

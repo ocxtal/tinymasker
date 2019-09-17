@@ -13,6 +13,43 @@
 
 #include <math.h>
 
+
+/**
+ * @macro mm_split_foreach
+ * @brief split string into tokens and pass each to _body.
+ * p, len, and i are reserved for pointer, length, and #parsed.
+ * break / continue can be used in the _body to terminate / skip the current element.
+ */
+#define mm_split_foreach(_ptr, _len, _delims, _body) ({ \
+	char const *_q = (_ptr), *_t = &(_ptr)[(_len) == 0 ? UINT32_MAX : (_len)]; \
+	size_t i = 0; \
+	v16i8_t _dv = _loadu_v16i8(_delims); \
+	/* reserve space for '\0' */ \
+	uint16_t _m, _mask = 0x02<<_tzc_u64(((v16i8_masku_t){ \
+		.mask = _mask_v16i8(_eq_v16i8(_set_v16i8('\0'), _dv)) \
+	}).all); \
+	/* push '\0' at the head of the vector */ \
+	_dv = _bsl_v16i8(_dv, 1); \
+	_mask--; \
+	do { \
+		char const *_p = _q; \
+		/* test char one by one until dilimiter found */ \
+		while(((_m = ((v16i8_masku_t){ .mask = _mask_v16i8(_eq_v16i8(_set_v16i8(*_q), _dv)) }).all) & _mask) == 0) { _q++; } \
+		/* delimiter found, pass to _body */ \
+		char const *p = _p; \
+		uint64_t l = _q++ - _p; \
+		if(l > 0) { _body; i++; } \
+	} while((_m & 0x01) == 0 && _q < _t); \
+	i; \
+})
+
+/* used inside _body */
+#define mm_split_break(_ptr, _len) ({ \
+	_ptr = _q; \
+	_len = (size_t)(_t - _q); \
+})
+
+
 static _force_inline
 char *mm_strndup(char const *p, size_t l)
 {
@@ -99,7 +136,7 @@ char *mm_append(char *p, char const *suf)
 static _force_inline
 int64_t mm_atoi(char const *arg, size_t len)
 {
-	if(arg == NULL) { return(0); }
+	if(arg == NULL) { return(INT64_MIN); }
 	if(len == 0) { len = strlen(arg); }
 
 	/* FIXME: use pcmp** instruction for better performance? */
@@ -114,7 +151,7 @@ int64_t mm_atoi(char const *arg, size_t len)
 static _force_inline
 double mm_atof(char const *arg, size_t len)
 {
-	if(arg == NULL) { return(0); }
+	if(arg == NULL) { return(NAN); }
 	if(len == 0) { len = strlen(arg); }
 	static char const allowed[16] __attribute__(( aligned(16) )) = {
 		'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-', '+', '.', ',', 'e', 'E'
@@ -135,39 +172,39 @@ double mm_atof(char const *arg, size_t len)
 typedef struct {
 	size_t size, used;
 	char *ptr;
-} mm_strbin_blk_t;
+} mm_bin_blk_t;
 typedef struct {
-	kvec_t(mm_strbin_blk_t) blk;
-} mm_strbin_t;
+	kvec_t(mm_bin_blk_t) blk;
+} mm_bin_t;
 
 static _force_inline
-void mm_strbin_init_static(mm_strbin_t *bin)
+void mm_bin_init_static(mm_bin_t *bin)
 {
 	kv_clear(bin->blk);
 	return;
 }
 
 static _force_inline
-void mm_strbin_destroy_static(mm_strbin_t *bin)
+void mm_bin_destroy_static(mm_bin_t *bin)
 {
 	/* memory arena */
-	kv_foreach(mm_strbin_blk_t, bin->blk, { free(p->ptr); });
+	kv_foreach(mm_bin_blk_t, bin->blk, { free(p->ptr); });
 	kv_destroy(bin->blk);
 	return;
 }
 
 static _force_inline
-mm_strbin_blk_t *mm_strbin_allocate(mm_strbin_t *bin, size_t len)
+mm_bin_blk_t *mm_bin_allocate(mm_bin_t *bin, size_t len)
 {
-	size_t msize = kv_size(bin->blk);
-	mm_strbin_blk_t const *tail = kv_tail(bin->blk);
+	size_t const msize = kv_size(bin->blk);
+	mm_bin_blk_t const *tail = kv_tail(bin->blk);
 
 	if(msize == 0 || tail->size - tail->used < len + 1) {
 		size_t const min_blk_size = 4 * 1024;
 		size_t blk_size = MAX2(len + 1, min_blk_size);
 
 		char *ptr = malloc(sizeof(char) * blk_size);
-		kv_push(mm_strbin_blk_t, bin->blk, ((mm_strbin_blk_t){
+		kv_push(mm_bin_blk_t, bin->blk, ((mm_bin_blk_t){
 			.ptr  = ptr,
 			.size = blk_size,
 			.used = 0
@@ -177,13 +214,27 @@ mm_strbin_blk_t *mm_strbin_allocate(mm_strbin_t *bin, size_t len)
 }
 
 static _force_inline
-char const *mm_bin_strdup(mm_strbin_t *bin, char const *str, size_t len)
+void *mm_bin_malloc(mm_bin_t *bin, size_t size)
+{
+	/* add margin to make the pointer aligned */
+	size = _roundup(size, 16);
+	mm_bin_blk_t *blk = mm_bin_allocate(bin, size);
+
+	/* unaligned */
+	uintptr_t const raw  = &blk->ptr[blk->used];
+	uintptr_t const base = _roundup(raw, 16);
+	blk->used += size + 1;
+	return((void *)base);
+}
+
+static _force_inline
+char const *mm_bin_strdup(mm_bin_t *bin, char const *str, size_t len)
 {
 	/* calc len if needed */
 	if(len == 0) { len = strlen(str); }
 
 	/* allocate memory bin */
-	mm_strbin_blk_t *blk = mm_strbin_allocate(bin, len);
+	mm_bin_blk_t *blk = mm_bin_allocate(bin, len);
 
 	/* slice space from bin */
 	char *base = &blk->ptr[blk->used];
@@ -196,7 +247,7 @@ char const *mm_bin_strdup(mm_strbin_t *bin, char const *str, size_t len)
 }
 
 static _force_inline
-char const *mm_bin_join(mm_strbin_t *bin, char const *const *p, char c)
+char const *mm_bin_join(mm_bin_t *bin, char const *const *p, char c)
 {
 	char *str = mm_join(p, c);
 	char const *dup = mm_bin_strdup(bin, str, 0);
@@ -205,7 +256,7 @@ char const *mm_bin_join(mm_strbin_t *bin, char const *const *p, char c)
 }
 
 static _force_inline
-char const *mm_bin_append(mm_strbin_t *bin, char const *p, char const *q)
+char const *mm_bin_append(mm_bin_t *bin, char const *p, char const *q)
 {
 	char const *b[3] = { p, q, NULL };
 	char *str = mm_join(b, '\0');

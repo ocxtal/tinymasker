@@ -132,6 +132,36 @@ typedef struct {
 _static_assert(sizeof(tm_aln_t) == 64);
 
 
+/* we won't export dz_alignment_t because it's allocated in thread-local buffer, which is flushed when the batch is finished */
+typedef struct {
+	/* sequence by name */
+	struct {
+		char const *r;
+		char const *q;
+	} name;
+
+	/* lengths; for paf compatibility */
+	tm_pair_t len;
+
+	/* positions */
+	tm_pos_t spos;
+	tm_pair_t epos;
+
+	/* scores */
+	tm_score_t score;
+
+	/* alignment path */
+	struct {
+		uint8_t const *ptr;
+		size_t len;
+	} path;
+
+	/* anything else? */
+	uint64_t _pad;
+} tm_aln_t;
+_static_assert(sizeof(tm_aln_t) == 64);
+
+
 /* array of alignment; allocated in trace stack */
 typedef struct {
 	size_t cnt;

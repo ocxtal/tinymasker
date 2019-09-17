@@ -369,8 +369,12 @@ void tm_conf_print_help(tm_conf_t const *conf, FILE *lfp)
 	_msg(2, "Usage:\n"
 			"  index construction:\n"
 			"    $ tinymasker -t4 -d index.tmi repeats.fa\n"
-			"  mask:\n"
-			"    $ tinymasker -t4 index.tmi contigs.fa\n"
+			"\n"
+			"  mask and patch:\n"
+			"    $ tinymasker -t4 index.tmi reads.fa > mask.paf\n"
+			"    $ tinymasker -t4 -f mask.paf reads.fa > patched_reads.fa\n"
+			"   -- or --\n"
+			"    $ tinymasker -t4 -f repeats.fa reads.fa > patched_reads.fa\n"
 			"");
 	_msg(2, "General options:");
 	_msg(2, "  -t INT       number of threads [%zu]", conf->nth);
@@ -384,6 +388,11 @@ void tm_conf_print_help(tm_conf_t const *conf, FILE *lfp)
 	_msg(3, "  -x STR       load preset params for a specific setting []");
 	_msg(3, "  -z STR       custom profile configuration (in TOML format) []");
 	_msg(3, "  -L           ignore index construction failure (loose mode)");
+	_msg(2, "");
+	_msg(2, "Patching options:");
+	_msg(2, "  -f FILE      load alignments for patching; PAF, FASTA, or tmi index");
+	_msg(3, "  -G INT       connect gaps less than this length []");
+	_msg(3, "  -M INT       margin around masked regions []");
 	_msg(2, "");
 	_msg(2, "Indexing and mapping fallbacks:");
 	_msg(2, "  NOTE: ignored for prebuilt indices; only applicable when index is built");

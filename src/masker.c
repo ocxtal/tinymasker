@@ -176,8 +176,6 @@ tm_print_seq_t tm_print_compose_ref(tm_idx_sketch_t const *ref, tm_aln_t const *
 static _force_inline
 void tm_print_aln(tm_print_t *self, tm_idx_sketch_t const **si, bseq_meta_t const *query, tm_aln_t const *aln)
 {
-	_unused(self);
-
 	/* load reference sequence object */
 	tm_idx_sketch_t const *ref = si[aln->attr.rid];
 
