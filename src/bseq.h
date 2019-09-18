@@ -36,7 +36,7 @@ _static_assert(sizeof(bseq_meta_t) == 32);
 #define bseq_seq_len(_x)			( (size_t)(_x)->slen )
 
 #define bseq_is_qual_set(_x)		( bseq_qual(_x)[0] == '\0' )
-#define bseq_qual(_x)				( (uint8_t *)&(_x)->seq[(_x)->slen] )
+#define bseq_qual(_x)				( (uint8_t *)&(_x)->seq[(_x)->slen + 2] )
 #define bseq_qual_len(_x)			( bseq_is_qual_set(_x) ? 0 : (size_t)(_x)->slen )
 
 #define bseq_name(_x)				( (char const *)&(_x)->seq[-((size_t)(_x)->hlen)] )
@@ -148,7 +148,7 @@ size_t bseq_fetch_block(bseq_file_t *fp)
 	/* update EOF */
 	fp->is_eof = MAX2(fp->is_eof, rbeof(&fp->rb));
 
-	// debug("bytes, state(%u), len(%lu), is_eof(%u), rb(%u, %zu, %zu)", fp->state, bytes, fp->is_eof, fp->rb.eof, fp->rb.head, fp->rb.len);
+	debug("bytes, state(%u), len(%zu), is_eof(%u), rb(%u, %zu, %zu)", fp->state, bytes, fp->is_eof, fp->rb.eof, fp->rb.head, fp->rb.tail);
 	return(bytes);
 }
 
@@ -187,7 +187,7 @@ void bseq_init_work(bseq_work_t *w, bseq_file_t *fp, bseq_metam_v const *seq, ui
 static _force_inline
 uint64_t bseq_finish_work(bseq_work_t *w, bseq_file_t *fp, uint8m_v *bin)
 {
-	// debug("return, p(%p), t(%p)", w->p, w->t);
+	debug("return, p(%p), t(%p)", w->p, w->t);
 	fp->p = w->p;
 
 	/* write back pointers to the output memory block */
@@ -361,16 +361,18 @@ uint64_t bseq_read_fasta(bseq_file_t *fp, bseq_metam_v *seq, uint8m_v *bin)
 	}
 
 	/* error if buffer is empty */
-	if(fp->p >= fp->t) { return(1); }
+	if(fp->p >= fp->t) {
+		return(1);
+	}
 
 	/* keep them on registers */
 	bseq_work_t w __attribute__(( aligned(64) ));
 	bseq_init_work(&w, fp, seq, bin);
 
-	// debug("enter, state(%u), p(%p), t(%p), eof(%u)", fp->state, w.p, w.t, fp->is_eof);
+	debug("enter, state(%u), p(%p), t(%p), eof(%u)", fp->state, w.p, w.t, fp->is_eof);
 	switch(fp->state) {							/* dispatcher for the first iteration */
 		default:								/* idle or broken */
-		if(*w.p++ != fp->delim[0]) { return(0); }	/* '>' */
+		if(*w.p++ != fp->delim[0]) { break; }	/* '>' */
 		w.s = kvm_pushp(bseq_meta_t, *seq);
 		_state(BSEQ_STATE_HEADER | BSEQ_STATE_SEQ, ({ 0; }),	/* sequence name */
 			{ fp->acc += bseq_readline(&w, bseq_idv); },
@@ -401,7 +403,7 @@ uint64_t bseq_read_fasta(bseq_file_t *fp, bseq_metam_v *seq, uint8m_v *bin)
 		// debug("done");
 	}
 _refill:;
-	// debug("break, state(%u), eof(%u)", fp->state, fp->is_eof);
+	debug("break, state(%u), eof(%u), p(%p), t(%p)", fp->state, fp->is_eof, fp->p, fp->t);
 	if(fp->is_eof == 1 && (fp->state & BSEQ_STATE_BODY)) {
 		if(fp->state & BSEQ_STATE_SEQ) { bseq_fixup_seq(&w, fp); }
 		fp->state = 0;					/* reset state so that it is not regarded as an error */
@@ -424,9 +426,9 @@ uint64_t bseq_append(bseq_file_t *fp, bseq_metam_v *seq, uint8m_v *bin)
 			
 			/* reserve room for the next parsing unit */
 			kvm_reserve(uint8_t, *bin, kvm_cnt(*bin) + 2 * fp->batch_size);
-			// debug("continue, state(%u), is_eof(%u), seq(%p, %lu), bin(%p, %lu)", fp->state, fp->is_eof, kvm_ptr(*seq), kvm_cnt(*seq), kvm_ptr(*bin), kvm_cnt(*bin));
+			debug("continue, state(%u), is_eof(%u), seq(%p, %lu), bin(%p, %lu)", fp->state, fp->is_eof, kvm_ptr(*seq), kvm_cnt(*seq), kvm_ptr(*bin), kvm_cnt(*bin));
 		}
-		// debug("finished seq, state(%u), is_eof(%u), seq(%p, %lu), bin(%p, %lu)", fp->state, fp->is_eof, kvm_ptr(*seq), kvm_cnt(*seq), kvm_ptr(*bin), kvm_cnt(*bin));
+		debug("finished seq, state(%u), is_eof(%u), seq(%p, %lu), bin(%p, %lu)", fp->state, fp->is_eof, kvm_ptr(*seq), kvm_cnt(*seq), kvm_ptr(*bin), kvm_cnt(*bin));
 
 		if(_unlikely(fp->is_eof == 2)) { break; }	/* reached end of file */
 		if(_likely(fp->state == 0)) { continue; }
@@ -775,7 +777,13 @@ unittest( .name = "bseq.fastq" ) {
 		.batch_size   = BSEQ_BATCH_SIZE,
 		.head_margin  = 64,
 		.keep_qual    = 1,
-		.keep_comment = 1
+		.keep_comment = 1,
+		.conv_table = {
+			[A] = 0x00,
+			[C] = 0x01,
+			[G] = 0x02,
+			[T] = 0x03
+		}
 	};
 	bseq_file_t *b = bseq_open(&conf, filename);
 	ut_assert(b != NULL);
@@ -815,11 +823,11 @@ unittest( .name = "bseq.fastq" ) {
 
 	ut_assert(bseq_name_len(&c[3]) == 5, "nlen(%zu)", bseq_name_len(&c[3]));
 	ut_assert(bseq_seq_len(&c[3]) == 4, "slen(%zu)", bseq_seq_len(&c[3]));
-	ut_assert(bseq_comment_len(&c[3]) == 15, "clen(%zu)", bseq_comment_len(&c[3]));
+	ut_assert(bseq_comment_len(&c[3]) == 16, "clen(%zu)", bseq_comment_len(&c[3]));
 	ut_assert(strcmp(bseq_name(&c[3]), "test3") == 0, "name(%s)", bseq_name(&c[3]));
 	ut_assert(strcmp((char const *)bseq_seq(&c[3]), "\x0\x1\x2\x3") == 0, "seq(%s)", bseq_seq(&c[3]));
 	ut_assert(strcmp((char const *)bseq_qual(&c[3]), "@123") == 0, "qual(%s)", bseq_qual(&c[3]));
-	ut_assert(strcmp((char const *)bseq_comment(&c[3]), "comment comment") == 0, "tag(%s)", bseq_comment(&c[3]));
+	ut_assert(strcmp((char const *)bseq_comment(&c[3]), " comment comment") == 0, "tag(%s)", bseq_comment(&c[3]));
 
 	bseq_close_t const e = bseq_close(b);
 	ut_assert(e.cnt == 4);
@@ -844,7 +852,13 @@ unittest( .name = "bseq.fastq.skip" ) {
 		.batch_size   = BSEQ_BATCH_SIZE,
 		.head_margin  = 64,
 		.keep_qual    = 0,
-		.keep_comment = 0
+		.keep_comment = 0,
+		.conv_table = {
+			[A] = 0x00,
+			[C] = 0x01,
+			[G] = 0x02,
+			[T] = 0x03
+		}
 	};
 	bseq_file_t *b = bseq_open(&conf, filename);
 	ut_assert(b != NULL);
