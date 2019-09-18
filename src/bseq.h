@@ -331,7 +331,7 @@ void bseq_fixup_seq(bseq_work_t *w, bseq_file_t *fp)
 	w->s->seq   = (uint8_t *)w->n - fp->acc;
 	w->s->slen  = fp->acc;
 	w->s->u.ptr = NULL;
-	debug("seq(%p), slen(%lu)", w->s->seq, w->s->slen);
+	debug("done, nlen(%u), hlen(%u), slen(%u), seq(%p)", w->s->nlen, w->s->hlen, w->s->slen, w->s->seq);
 	return;
 }
 
@@ -411,7 +411,6 @@ uint64_t bseq_read_fasta(bseq_file_t *fp, bseq_metam_v *seq, uint8m_v *bin)
 			w.q[++w.n] = 0;		/* for qual body */
 		}
 		fp->state = 0;
-		// debug("done");
 	}
 _refill:;
 	debug("break, state(%u), eof(%u), p(%p), t(%p), n(%zu)", fp->state, fp->is_eof, fp->p, fp->t, w.n);
@@ -904,79 +903,115 @@ bseq_unittest_seq_t bseq_unittest_rand_seq(size_t len)
 	});
 }
 
+static _force_inline
+void bseq_unittest_padding(FILE *fp, size_t min, size_t max, char c)
+{
+	size_t const x = (rand() % (max - min)) + min;
+	for(size_t i = 0; i < x; i++) {
+		fprintf(fp, "%c", c);
+	}
+	return;
+}
+
+static _force_inline
+void bseq_unittest_dump_seq(char const *filename, bseq_unittest_seq_t const *s, size_t cnt)
+{
+	FILE *fp = fopen(filename, "w");
+	for(size_t i = 0; i < cnt; i++) {
+		fprintf(fp, ">");
+		bseq_unittest_padding(fp, 0, 31, ' ');
+		fprintf(fp, "%06zu comment:COMMENT comment:COMMENT;a;b;c;d-e;xyz-pqr@195+360>3", i);
+		bseq_unittest_padding(fp, 0, 31, ' ');
+		bseq_unittest_padding(fp, 1, 4, '\n');
+
+		size_t rem = s[i].len;
+		while(rem > 0) {
+			size_t const x = (rand() % 80) + 1, frac = MIN2(rem, x);
+
+			fprintf(fp, "%.*s", (int)frac, &s[i].seq[s[i].len - rem]);
+			bseq_unittest_padding(fp, 1, 4, '\n');
+
+			rem -= frac;
+		}
+	}
+	fclose(fp);
+	return;
+}
+
 unittest( .name = "bseq.fasta.large" ) {
 	char const *filename = "./bseq.unittest.tmp";
 
 	size_t const cnt = 2048, len = 1024;
 	bseq_unittest_seq_t *arr = malloc(sizeof(bseq_unittest_seq_t) * cnt);
-
-	FILE *fp = fopen(filename, "w");
-	ut_assert(fp != NULL);
-
 	for(size_t i = 0; i < cnt; i++) {
 		arr[i] = bseq_unittest_rand_seq(len + (rand() % len));
-		fprintf(fp, "> %06zu comment comes here  \n%s\n", i, arr[i].seq);
 	}
-	fclose(fp);
+	bseq_unittest_dump_seq(filename, arr, cnt);
 
-	for(size_t i = 0; i < 4; i++) {
-		kvec_t(bseq_batch_t *) batch;
-		kvec_t(bseq_meta_t) meta;
+	size_t const batches[] = {
+		128, 256, 801, 1000, 1024, 12345, 1ULL * 1024 * 1024, 10000000, 12345678, 16ULL * 1024 * 1024, 0
+	};
 
-		kv_init(batch);
-		kv_init(meta);
+	for(size_t b = 0; batches[b] != 0; b++) {
+		for(size_t i = 0; i < 4; i++) {
+			kvec_t(bseq_batch_t *) batch;
+			kvec_t(bseq_meta_t) meta;
 
-		bseq_conf_t const conf = {
-			.batch_size   = 1024,
-			.head_margin  = 64,
-			.keep_qual    = (i & 0x01) != 0,
-			.keep_comment = (i & 0x02) != 0,
-			.conv_table = {
-				[A] = 'A',
-				[C] = 'C',
-				[G] = 'G',
-				[T] = 'T'
+			kv_init(batch);
+			kv_init(meta);
+
+			bseq_conf_t const conf = {
+				.batch_size   = batches[b],
+				.head_margin  = 64,
+				.keep_qual    = (i & 0x01) != 0,
+				.keep_comment = (i & 0x02) != 0,
+				.conv_table = {
+					[A] = 'A',
+					[C] = 'C',
+					[G] = 'G',
+					[T] = 'T'
+				}
+			};
+			bseq_file_t *b = bseq_open(&conf, filename);
+			bseq_batch_t *s = NULL;
+			while((s = bseq_read(b)) != NULL) {
+				kv_push(bseq_batch_t, batch, s);
+
+				bseq_meta_t *m = bseq_meta_ptr(s);
+				for(size_t j = 0; j < bseq_meta_cnt(s); j++) {
+					kv_push(bseq_meta_t, meta, m[j]);
+				}
 			}
-		};
-		bseq_file_t *b = bseq_open(&conf, filename);
-		bseq_batch_t *s = NULL;
-		while((s = bseq_read(b)) != NULL) {
-			kv_push(bseq_batch_t, batch, s);
 
-			bseq_meta_t *m = bseq_meta_ptr(s);
-			for(size_t j = 0; j < bseq_meta_cnt(s); j++) {
-				kv_push(bseq_meta_t, meta, m[j]);
+			bseq_close_t const e = bseq_close(b);
+			ut_assert(e.cnt == cnt, "cnt(%zu, %zu)", e.cnt, cnt);
+			ut_assert(e.status == 0);
+
+			ut_assert(kv_cnt(meta) == cnt, "cnt(%zu, %zu)", kv_cnt(meta), cnt);
+			for(size_t j = 0; j < kv_cnt(meta); j++) {
+				char buf[256] = { 0 };
+				sprintf(buf, "%06zu", j);
+
+				bseq_meta_t const *c = &kv_ptr(meta)[j];
+				ut_assert(bseq_name_len(c) == 6, "nlen(%zu)", bseq_name_len(c));
+				ut_assert(bseq_seq_len(c)  == arr[j].len, "slen(%zu, %zu), seq(\n%s\n%s\n)", bseq_seq_len(c), arr[j].len, bseq_seq(c), arr[j].seq);
+				ut_assert(bseq_qual_len(c) == 0, "qlen(%zu)", bseq_qual_len(c));
+				ut_assert(bseq_is_qual_set(c) == 0, "is_qual(%u)", bseq_is_qual_set(c));
+				ut_assert(bseq_comment_len(c) == ((i & 0x02) != 0 ? 59 : 0), "clen(%zu)", bseq_comment_len(c));
+				ut_assert(strcmp(bseq_name(c), buf) == 0, "name(%s)", bseq_name(c));
+				ut_assert(strcmp((char const *)bseq_seq(c), arr[j].seq) == 0, "seq(%s)", bseq_seq(c));
+				ut_assert(strcmp((char const *)bseq_qual(c), "") == 0, "qual(%s)", bseq_qual(c));
+				ut_assert(strcmp((char const *)bseq_comment(c), (i & 0x02) != 0 ? "comment:COMMENT comment:COMMENT;a;b;c;d-e;xyz-pqr@195+360>3" : "") == 0, "tag(%s)", bseq_comment(c));
 			}
+
+			for(size_t j = 0; j < kv_cnt(batch); j++) {
+				bseq_bin_free(kv_ptr(batch)[j]);
+			}
+			kv_destroy(batch);
+			kv_destroy(meta);
 		}
-
-		bseq_close_t const e = bseq_close(b);
-		ut_assert(e.cnt == cnt, "cnt(%zu, %zu)", e.cnt, cnt);
-		ut_assert(e.status == 0);
-
-		ut_assert(kv_cnt(meta) == cnt, "cnt(%zu, %zu)", kv_cnt(meta), cnt);
-		for(size_t j = 0; j < kv_cnt(meta); j++) {
-			char buf[256] = { 0 };
-			sprintf(buf, "%06zu", j);
-
-			bseq_meta_t const *c = &kv_ptr(meta)[j];
-			ut_assert(bseq_name_len(c) == 6, "nlen(%zu)", bseq_name_len(c));
-			ut_assert(bseq_seq_len(c)  == arr[j].len, "slen(%zu, %zu), seq(\n%s\n%s\n)", bseq_seq_len(c), arr[j].len, bseq_seq(c), arr[j].seq);
-			ut_assert(bseq_qual_len(c) == 0, "qlen(%zu)", bseq_qual_len(c));
-			ut_assert(bseq_is_qual_set(c) == 0, "is_qual(%u)", bseq_is_qual_set(c));
-			ut_assert(bseq_comment_len(c) == ((i & 0x02) != 0 ? 18 : 0), "clen(%zu)", bseq_comment_len(c));
-			ut_assert(strcmp(bseq_name(c), buf) == 0, "name(%s)", bseq_name(c));
-			ut_assert(strcmp((char const *)bseq_seq(c), arr[j].seq) == 0, "seq(%s)", bseq_seq(c));
-			ut_assert(strcmp((char const *)bseq_qual(c), "") == 0, "qual(%s)", bseq_qual(c));
-			ut_assert(strcmp((char const *)bseq_comment(c), (i & 0x02) != 0 ? "comment comes here" : "") == 0, "tag(%s)", bseq_comment(c));
-		}
-
-		for(size_t j = 0; j < kv_cnt(batch); j++) {
-			bseq_bin_free(kv_ptr(batch)[j]);
-		}
-		kv_destroy(batch);
-		kv_destroy(meta);
 	}
-	remove(filename);
+	// remove(filename);
 }
 
 

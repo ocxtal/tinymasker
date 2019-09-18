@@ -44,6 +44,9 @@
 #endif
 
 
+#define rbdebug(_x, ...)		;
+
+
 /**
  * @struct rbread_s
  * @brief context (gzFile)
@@ -95,18 +98,20 @@ typedef struct rbread_s {
 	static inline rb_reader_res_t rb_read_##_sfx(rbread_t *rb, void *dst, size_t len) \
 	{ \
 		/* eof == 0 indicates input stream remains */ \
-		if(rb->s._ctx.avail_in < sizeof(uint64_t) && rb->eof == 0) { \
+		if(rb->s._ctx.avail_in == 0 && rb->eof == 0) { \
 			/* copy to the head then fill */ \
-			uint64_t const _remaining = _loadu_u64(rb->s._ctx.next_in); \
-			_storeu_u64(rb->ibuf, _remaining); \
-			rb->s._ctx.next_in = (_type_t *)&rb->ibuf[rb->s._ctx.avail_in]; \
+			/* uint64_t const _fragment = _loadu_u64(rb->s._ctx.next_in); _storeu_u64(rb->ibuf, _fragment); */ \
+			rb->s._ctx.next_in   = (_type_t *)&rb->ibuf[rb->s._ctx.avail_in]; \
 			rb->s._ctx.avail_in += fread((void *)rb->s._ctx.next_in, sizeof(char), rb->bulk_size, rb->fp); \
 			/* input stream starved, mark eof */ \
 			if(feof(rb->fp)) { rb->eof = 1; } \
+			rbdebug("refill, avail_in(%d), eof(%u, %u)", rb->s._ctx.avail_in, feof(rb->fp), rb->eof); \
 		} \
 		rb->s._ctx.next_out  = (_type_t *)dst; \
 		rb->s._ctx.avail_out = len; \
+		rbdebug("len(%zu), remaining(%zu)", len, (size_t)rb->s._ctx.avail_in); \
 		_body; \
+		rbdebug("len(%zu), obtained(%zu), remaining(%zu)", len, (size_t)(len - rb->s._ctx.avail_out), (size_t)rb->s._ctx.avail_in); \
 		return((rb_reader_res_t){ \
 			.obtained  = len - rb->s._ctx.avail_out, \
 			.remaining = rb->s._ctx.avail_in \
@@ -117,8 +122,9 @@ typedef struct rbread_s {
 _rb_reader(gzip, z, uint8_t, {
 	switch(inflate(&rb->s.z, Z_NO_FLUSH)) {
 		default:
-		case Z_STREAM_END: inflateReset(&rb->s.z);
-		if(rb->eof == 1) { rb->eof = 2; }
+		rbdebug("unhandled error");
+		case Z_STREAM_END: rbdebug("reset stream"); inflateReset(&rb->s.z);
+		if(rb->eof == 1) { rbdebug("input buffer starved"); rb->eof = 2; }
 		case Z_OK: break;
 	}
 });
@@ -129,7 +135,7 @@ _rb_reader(bz2, b, char, {
 	switch(BZ2_bzDecompress(&rb->s.b)) {
 		default:
 		case BZ_STREAM_END:
-		if(rb->eof == 1) { rb->eof = 2; }
+		if(rb->eof == 1) { rbdebug("input buffer starved"); rb->eof = 2; }
 		case BZ_OK: break;
 	}
 });
@@ -140,7 +146,7 @@ _rb_reader(xz, x, uint8_t, {
 	switch(lzma_code(&rb->s.x, rb->eof == 1 ? LZMA_FINISH : LZMA_RUN)) {
 		default:
 		case LZMA_STREAM_END:
-		if(rb->eof == 1) { rb->eof = 2; }
+		if(rb->eof == 1) { rbdebug("input buffer starved"); rb->eof = 2; }
 		case LZMA_OK: break;
 	}
 });
@@ -169,18 +175,21 @@ size_t rbread_bulk(rbread_t *rb, void *dst, size_t len)
 	if(rb->eof > 2) { return(0); }	/* if output buffer starved */
 	size_t rem = len;
 	uint8_t *p = dst;
+	rbdebug("len(%zu), rem(%zu), head(%zu), tail(%zu), eof(%u)", len, rem, rb->head, rb->tail, rb->eof);
 
 	/* flush remaining content in buffer */
 	size_t const hlen = MIN2(rem, rb->tail - rb->head);
 	if(hlen > 0) { memcpy(&p[len - rem], &rb->buf[rb->head], hlen); }
 	rem      -= hlen;
 	rb->head += hlen;
+	rbdebug("len(%zu), rem(%zu), head(%zu), tail(%zu), eof(%u)", len, rem, rb->head, rb->tail, rb->eof);
 
 	/*
 	 * EOF state fixup before continue to bulk loop;
 	 * we only have input buffer in transparent mode so starvation of the buffer is the end of file.
 	 */
 	if(rb->head == rb->tail) {
+		rbdebug("output buffer starved");
 		rb->eof += rb->eof == 2;
 	}
 
@@ -196,8 +205,10 @@ size_t rbread_bulk(rbread_t *rb, void *dst, size_t len)
 	while(rb->eof < 3 && rem > rb->bulk_size / 8) {
 		rb_reader_res_t const r = rb->read(rb, &p[len - rem], rem);
 		rem -= r.obtained;
-		if(rb->eof == 2 && r.remaining == 0) { rb->eof = 3; }
+		if(rb->eof == 2 && r.remaining == 0) { rbdebug("output buffer starved"); rb->eof = 3; }
+		rbdebug("len(%zu), rem(%zu), head(%zu), tail(%zu), eof(%u)", len, rem, rb->head, rb->tail, rb->eof);
 	}
+	rbdebug("len(%zu), rem(%zu), head(%zu), tail(%zu), eof(%u)", len, rem, rb->head, rb->tail, rb->eof);
 	return(len - rem);
 }
 static inline
@@ -207,6 +218,8 @@ size_t rbread(rbread_t *rb, void *dst, size_t len)
 	if(rb->eof > 2) { return(0); }
 
 	size_t rem = len - rbread_bulk(rb, dst, len);
+	rbdebug("len(%zu), rem(%zu), head(%zu), tail(%zu), eof(%u)", len, rem, rb->head, rb->tail, rb->eof);
+
 	uint8_t *p = dst;
 	while(rb->eof < 3 && rem > 0) {
 		rb_reader_res_t const r = rb->read(rb, rb->buf, rb->bulk_size);
@@ -217,8 +230,10 @@ size_t rbread(rbread_t *rb, void *dst, size_t len)
 
 		rem      -= tlen;
 		rb->head += tlen;
-		if(rb->eof == 2 && rb->head == rb->tail) { rb->eof = 3; }
+		if(rb->eof == 2 && rb->head == rb->tail) { rbdebug("output buffer starved"); rb->eof = 3; }
+		rbdebug("len(%zu), rem(%zu), head(%zu), tail(%zu), eof(%u)", len, rem, rb->head, rb->tail, rb->eof);
 	}
+	rbdebug("len(%zu), rem(%zu), head(%zu), tail(%zu), eof(%u)", len, rem, rb->head, rb->tail, rb->eof);
 	return(len - rem);
 }
 
