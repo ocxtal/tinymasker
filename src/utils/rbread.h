@@ -237,7 +237,12 @@ typedef struct {
 static inline
 rb_readline_t rbreadline_intl(rbread_t *rb)
 {
-	if(rb->eof > 2) { return(NULL); }
+	if(rb->eof > 2) {
+		return((rb_readline_t){
+			.ptr = NULL,
+			.len = 0
+		});
+	}
 
 	/* load context variables */
 	size_t head = rb->head;
@@ -246,19 +251,19 @@ rb_readline_t rbreadline_intl(rbread_t *rb)
 
 		/* not found */
 		if(rb->head != 0) {
-			memcpy(rb->buf, rb->buf[rb->head], rb->tail - rb->head);
+			memcpy(rb->buf, &rb->buf[rb->head], rb->tail - rb->head);
 			rb->tail -= rb->head;
 			rb->head  = 0;
 		}
 
 		/* expand array if need */
-		if(rb->buf_size - tail < rb->bulk_size) {
+		if(rb->buf_size - rb->tail < rb->bulk_size) {
 			rb->buf_size *= 2;
 			rb->buf = realloc(rb->buf, rb->buf_size);		/* aligned to ARCH_HUGEPAGE_SIZE */
 		}
 
 		/* read more */
-		rb_reader_res_t const r = rb->read(rb, &rb->buf[tail], rb->bulk_size);
+		rb_reader_res_t const r = rb->read(rb, &rb->buf[rb->tail], rb->bulk_size);
 		rb->tail += r.obtained;
 	}
 
@@ -275,7 +280,7 @@ rb_readline_t rbreadline_intl(rbread_t *rb)
 }
 
 static inline
-rb_readline_t rbreadline_intl(rbread_t *rb)
+uint8_t const *rbreadline(rbread_t *rb)
 {
 	rb_readline_t const r = rbreadline_intl(rb);
 	return(r.ptr);
@@ -301,9 +306,11 @@ int rbopen_bulk_static(rbread_t *rb, char const *fn, size_t bulk_size)
 	if(rb->fp == NULL) { goto _rbopen_fail; }
 
 	/* calculate buffer size */
-	size_t const buffer_size = _roundup(2 * rb->bulk_size, ARCH_HUGEPAGE_SIZE);
+	size_t const buffer_size = _roundup(2 * bulk_size, ARCH_HUGEPAGE_SIZE);
 	rb->buf_size  = buffer_size;
 	rb->bulk_size = bulk_size;
+
+	debug("size(%zu, %zu)", rb->buf_size, rb->bulk_size);
 
 	/* read the first chunk */
 	uint8_t *buf = aligned_malloc(buffer_size);

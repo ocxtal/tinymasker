@@ -239,7 +239,7 @@ void *mm_bin_malloc(mm_bin_t *bin, size_t size)
 	mm_bin_blk_t *blk = mm_bin_allocate(bin, size);
 
 	/* unaligned */
-	uintptr_t const raw  = &blk->ptr[blk->used];
+	uintptr_t const raw  = (uintptr_t)&blk->ptr[blk->used];
 	uintptr_t const base = _roundup(raw, 16);
 	blk->used += size + 1;
 	return((void *)base);
