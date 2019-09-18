@@ -35,9 +35,9 @@ _static_assert(sizeof(bseq_meta_t) == 32);
 #define bseq_seq(_x)				( (uint8_t *)(_x)->seq )
 #define bseq_seq_len(_x)			( (size_t)(_x)->slen )
 
-#define bseq_is_qual_set(_x)		( bseq_qual(_x)[0] == '\0' )
+#define bseq_is_qual_set(_x)		( bseq_qual(_x)[0] != '\0' )
 #define bseq_qual(_x)				( (uint8_t *)&(_x)->seq[(_x)->slen + 2] )
-#define bseq_qual_len(_x)			( bseq_is_qual_set(_x) ? 0 : (size_t)(_x)->slen )
+#define bseq_qual_len(_x)			( bseq_is_qual_set(_x) ? (size_t)(_x)->slen : 0 )
 
 #define bseq_name(_x)				( (char const *)&(_x)->seq[-((size_t)(_x)->hlen)] )
 #define bseq_name_len(_x)			( (size_t)(_x)->nlen )
@@ -251,7 +251,7 @@ size_t bseq_readline(
 	/* remove '\r' for '\r\n' */
 	size_t const back  = w->p[-1] == '\r';
 	size_t const bytes = (w->p - b) - back;
-	w->n -= back;
+	w->n -= (vector != bseq_skipv) & back;
 
 	/* forward pointer (skip an obvious delimiter at the end) */
 	w->p++;
@@ -346,13 +346,13 @@ static _force_inline
 uint64_t bseq_read_fasta(bseq_file_t *fp, bseq_metam_v *seq, uint8m_v *bin)
 {
 	#define _state(_n, _cond, _body, _post) { \
-		/* debug("forward state(%u)", _n); */ \
+		debug("forward state(%u), n(%zu)", _n, w.n); \
 		fp->state = _n; \
 		fp->acc = 0; \
 		case _n: /* debug("enter state(%u)", _n); */ \
 		while(1) { \
 			_body; \
-			uint64_t flag = (_cond); \
+			uint64_t const flag = (_cond); \
 			if(w.p >= w.t) { goto _refill; } \
 			if(!flag) { break; } \
 		} \
@@ -398,12 +398,17 @@ uint64_t bseq_read_fasta(bseq_file_t *fp, bseq_metam_v *seq, uint8m_v *bin)
 					{ fp->acc += bseq_readline(&w, bseq_skipv); }, {}
 				);
 			}
+			// w.q[++w.n] = 0;		/* for qual name */
+		} else {
+			/* we need two spaces for dummy qual string */
+			w.q[++w.n] = 0;		/* for qual name */
+			w.q[++w.n] = 0;		/* for qual body */
 		}
 		fp->state = 0;
 		// debug("done");
 	}
 _refill:;
-	debug("break, state(%u), eof(%u), p(%p), t(%p)", fp->state, fp->is_eof, fp->p, fp->t);
+	debug("break, state(%u), eof(%u), p(%p), t(%p), n(%zu)", fp->state, fp->is_eof, fp->p, fp->t, w.n);
 	if(fp->is_eof == 1 && (fp->state & BSEQ_STATE_BODY)) {
 		if(fp->state & BSEQ_STATE_SEQ) { bseq_fixup_seq(&w, fp); }
 		fp->state = 0;					/* reset state so that it is not regarded as an error */
@@ -422,7 +427,10 @@ uint64_t bseq_append(bseq_file_t *fp, bseq_metam_v *seq, uint8m_v *bin)
 	debugblock({ if(fp->is_eof > 1) { trap(); } });
 	while(bin->n < fp->batch_size) {				/* fetch-and-parse loop */
 		while(bseq_read_fasta(fp, seq, bin)) {		/* buffer starved and sequence block continues */
-			if(bseq_fetch_block(fp) == 0) { break; }/* fetch next */
+			if(bseq_fetch_block(fp) == 0) {			/* fetch next */
+				fp->is_eof = 2;
+				break;
+			}
 			
 			/* reserve room for the next parsing unit */
 			kvm_reserve(uint8_t, *bin, kvm_cnt(*bin) + 2 * fp->batch_size);
@@ -719,38 +727,48 @@ unittest( .name = "bseq.fasta" ) {
 		ut_assert(s->bin.size > 0, "size(%lu)", s->bin.size);
 
 		bseq_meta_t const *c = bseq_meta_ptr(s);
+		ut_assert(bseq_name_len(c) == 5, "nlen(%zu), hlen(%zu), name(%s)", bseq_name_len(c), c[0].hlen, bseq_name(c));
+		ut_assert(bseq_seq_len(c) == 4, "slen(%zu)", bseq_seq_len(c));
+		ut_assert(bseq_qual_len(c) == 0, "qlen(%zu)", bseq_qual_len(c));
+		ut_assert(bseq_is_qual_set(c) == 0, "is_qual(%u)", bseq_is_qual_set(c));
+		ut_assert(bseq_comment_len(c) == 0, "clen(%zu)", bseq_comment_len(c));
+		ut_assert(strcmp(bseq_name(c), "test0") == 0, "name(%s)", bseq_name(c));
+		ut_assert(strcmp((char const *)bseq_seq(c), "\x0\x0\x0\x0") == 0, "seq(%s)", bseq_seq(c));
+		ut_assert(strcmp((char const *)bseq_qual(c), "") == 0, "qual(%s)", bseq_qual(c));
+		ut_assert(strcmp((char const *)bseq_comment(c), "") == 0, "tag(%s)", bseq_comment(c));
 
-		ut_assert(bseq_name_len(&c[0]) == 5, "nlen(%zu), hlen(%zu), name(%s)", bseq_name_len(&c[0]), c[0].hlen, bseq_name(&c[0]));
-		ut_assert(bseq_seq_len(&c[0]) == 4, "slen(%zu)", bseq_seq_len(&c[0]));
-		ut_assert(bseq_comment_len(&c[0]) == 0, "clen(%zu)", bseq_comment_len(&c[0]));
-		ut_assert(strcmp(bseq_name(&c[0]), "test0") == 0, "name(%s)", bseq_name(&c[0]));
-		ut_assert(strcmp((char const *)bseq_seq(&c[0]), "\x0\x0\x0\x0") == 0, "seq(%s)", bseq_seq(&c[0]));
-		ut_assert(strcmp((char const *)bseq_qual(&c[0]), "") == 0, "qual(%s)", bseq_qual(&c[0]));
-		ut_assert(strcmp((char const *)bseq_comment(&c[0]), "") == 0, "tag(%s)", bseq_comment(&c[0]));
+		c++;
+		ut_assert(bseq_name_len(c) == 5, "nlen(%zu)", bseq_name_len(c));
+		ut_assert(bseq_seq_len(c) == 8, "slen(%zu)", bseq_seq_len(c));
+		ut_assert(bseq_qual_len(c) == 0, "qlen(%zu)", bseq_qual_len(c));
+		ut_assert(bseq_is_qual_set(c) == 0, "is_qual(%u)", bseq_is_qual_set(c));
+		ut_assert(bseq_comment_len(c) == 0, "clen(%zu)", bseq_comment_len(c));
+		ut_assert(strcmp(bseq_name(c), "test1") == 0, "name(%s)", bseq_name(c));
+		ut_assert(strcmp((char const *)bseq_seq(c), "\x0\x3\x0\x3\x1\x2\x1\x2") == 0, "seq(%s)", bseq_seq(c));
+		ut_assert(strcmp((char const *)bseq_qual(c), "") == 0, "qual(%s)", bseq_qual(c));
+		ut_assert(strcmp((char const *)bseq_comment(c), "") == 0, "tag(%s)", bseq_comment(c));
 
-		ut_assert(bseq_name_len(&c[1]) == 5, "nlen(%zu)", bseq_name_len(&c[1]));
-		ut_assert(bseq_seq_len(&c[1]) == 8, "slen(%zu)", bseq_seq_len(&c[1]));
-		ut_assert(bseq_comment_len(&c[1]) == 0, "clen(%zu)", bseq_comment_len(&c[1]));
-		ut_assert(strcmp(bseq_name(&c[1]), "test1") == 0, "name(%s)", bseq_name(&c[1]));
-		ut_assert(strcmp((char const *)bseq_seq(&c[1]), "\x0\x3\x0\x3\x1\x2\x1\x2") == 0, "seq(%s)", bseq_seq(&c[1]));
-		ut_assert(strcmp((char const *)bseq_qual(&c[1]), "") == 0, "qual(%s)", bseq_qual(&c[1]));
-		ut_assert(strcmp((char const *)bseq_comment(&c[1]), "") == 0, "tag(%s)", bseq_comment(&c[1]));
+		c++;
+		ut_assert(bseq_name_len(c) == 5, "nlen(%zu)", bseq_name_len(c));
+		ut_assert(bseq_seq_len(c) == 4, "slen(%zu)", bseq_seq_len(c));
+		ut_assert(bseq_qual_len(c) == 0, "qlen(%zu)", bseq_qual_len(c));
+		ut_assert(bseq_is_qual_set(c) == 0, "is_qual(%u)", bseq_is_qual_set(c));
+		ut_assert(bseq_comment_len(c) == 0, "clen(%zu)", bseq_comment_len(c));
+		ut_assert(strcmp(bseq_name(c), "test2") == 0, "name(%s)", bseq_name(c));
+		ut_assert(strcmp((char const *)bseq_seq(c), "\x0\x0\x0\x0") == 0, "seq(%s)", bseq_seq(c));
+		ut_assert(strcmp((char const *)bseq_qual(c), "") == 0, "qual(%s)", bseq_qual(c));
+		ut_assert(strcmp((char const *)bseq_comment(c), "") == 0, "tag(%s)", bseq_comment(c));
 
-		ut_assert(bseq_name_len(&c[2]) == 5, "nlen(%zu)", bseq_name_len(&c[2]));
-		ut_assert(bseq_seq_len(&c[2]) == 4, "slen(%zu)", bseq_seq_len(&c[2]));
-		ut_assert(bseq_comment_len(&c[2]) == 0, "clen(%zu)", bseq_comment_len(&c[2]));
-		ut_assert(strcmp(bseq_name(&c[2]), "test2") == 0, "name(%s)", bseq_name(&c[2]));
-		ut_assert(strcmp((char const *)bseq_seq(&c[2]), "\x0\x0\x0\x0") == 0, "seq(%s)", bseq_seq(&c[2]));
-		ut_assert(strcmp((char const *)bseq_qual(&c[2]), "") == 0, "qual(%s)", bseq_qual(&c[2]));
-		ut_assert(strcmp((char const *)bseq_comment(&c[2]), "") == 0, "tag(%s)", bseq_comment(&c[2]));
-
-		ut_assert(bseq_name_len(&c[3]) == 5, "nlen(%zu)", bseq_name_len(&c[3]));
-		ut_assert(bseq_seq_len(&c[3]) == 4, "slen(%zu)", bseq_seq_len(&c[3]));
-		ut_assert(bseq_comment_len(&c[3]) == ((i & 0x02) != 0 ? 15 : 0), "clen(%zu)", bseq_comment_len(&c[3]));
-		ut_assert(strcmp(bseq_name(&c[3]), "test3") == 0, "name(%s)", bseq_name(&c[3]));
-		ut_assert(strcmp((char const *)bseq_seq(&c[3]), "\x0\x1\x2\x3") == 0, "seq(%s)", bseq_seq(&c[3]));
-		ut_assert(strcmp((char const *)bseq_qual(&c[3]), "") == 0, "qual(%s)", bseq_qual(&c[3]));
-		ut_assert(strcmp((char const *)bseq_comment(&c[3]), (i & 0x02) != 0 ? "comment comment" : "") == 0, "tag(%s)", bseq_comment(&c[3]));
+		c++;
+		ut_assert(bseq_name_len(c) == 5, "nlen(%zu)", bseq_name_len(c));
+		ut_assert(bseq_seq_len(c) == 4, "slen(%zu)", bseq_seq_len(c));
+		ut_assert(bseq_qual_len(c) == 0, "qlen(%zu)", bseq_qual_len(c));
+		ut_assert(bseq_is_qual_set(c) == 0, "is_qual(%u)", bseq_is_qual_set(c));
+		ut_assert(bseq_comment_len(c) == ((i & 0x02) != 0 ? 15 : 0), "clen(%zu)", bseq_comment_len(c));
+		ut_assert(strcmp(bseq_name(c), "test3") == 0, "name(%s)", bseq_name(c));
+		ut_assert(strcmp((char const *)bseq_seq(c), "\x0\x1\x2\x3") == 0, "seq(%s)", bseq_seq(c));
+		ut_assert(strcmp((char const *)bseq_qual(c), "") == 0, "qual(%s)", bseq_qual(c));
+		ut_assert(strcmp((char const *)bseq_comment(c), (i & 0x02) != 0 ? "comment comment" : "") == 0, "tag(%s)", bseq_comment(c));
 
 		bseq_bin_free(s);
 		bseq_close_t const e = bseq_close(b);
@@ -764,149 +782,194 @@ unittest( .name = "bseq.fastq" ) {
 	char const *filename = "./bseq.unittest.tmp";
 	char const *content =
 		"@test0\nAAAA\n+test0\nNNNN\n"
-		"@ test1\nATAT\nCGCG\n+ test1\n12+3\n+123\r\n"
-		"@  test2\n\nAAAA\n+  test2\n\n\n12@3\n\n"
-		"@test3  comment comment   \nACGT\n\n+ test3\n@123";
+		"@ test1\nATAT\nCGCG\n+ test1\n12+3\r\n+123\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n"
+		"@  test2      \n\nAAAA\n+  test2\n\n\n12\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n@3\n\n"
+		"@test3  comment comment   \nACGT\n\n+ test3\r\n@\r\n1\r\n2\r\n3\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n";
 
 	FILE *fp = fopen(filename, "w");
 	ut_assert(fp != NULL);
 	fwrite(content, 1, strlen(content), fp);
 	fclose(fp);
 
-	bseq_conf_t const conf = {
-		.batch_size   = BSEQ_BATCH_SIZE,
-		.head_margin  = 64,
-		.keep_qual    = 1,
-		.keep_comment = 1,
-		.conv_table = {
-			[A] = 0x00,
-			[C] = 0x01,
-			[G] = 0x02,
-			[T] = 0x03
-		}
-	};
-	bseq_file_t *b = bseq_open(&conf, filename);
-	ut_assert(b != NULL);
+	for(size_t i = 0; i < 4; i++) {
+		debug("i(%zu)", i);
+		bseq_conf_t const conf = {
+			.batch_size   = BSEQ_BATCH_SIZE,
+			.head_margin  = 64,
+			.keep_qual    = (i & 0x01) != 0,
+			.keep_comment = (i & 0x02) != 0,
+			.conv_table = {
+				[A] = 0x00,
+				[C] = 0x01,
+				[G] = 0x02,
+				[T] = 0x03
+			}
+		};
+		bseq_file_t *b = bseq_open(&conf, filename);
+		ut_assert(b != NULL);
 
-	bseq_batch_t *s = bseq_read(b);
+		bseq_batch_t *s = bseq_read(b);
 
-	ut_assert(s != NULL);
-	ut_assert(s->cnt == 4, "cnt(%u)", s->cnt);
-	ut_assert(s->bin.base != NULL);
-	ut_assert(s->bin.size > 0, "size(%lu)", s->bin.size);
+		ut_assert(s != NULL);
+		ut_assert(s->cnt == 4, "cnt(%u)", s->cnt);
+		ut_assert(s->bin.base != NULL);
+		ut_assert(s->bin.size > 0, "size(%lu)", s->bin.size);
 
-	bseq_meta_t const *c = bseq_meta_ptr(s);
+		bseq_meta_t const *c = bseq_meta_ptr(s);
+		ut_assert(bseq_name_len(c) == 5, "nlen(%zu)", bseq_name_len(c));
+		ut_assert(bseq_seq_len(c) == 4, "slen(%zu)", bseq_seq_len(c));
+		ut_assert(bseq_qual_len(c) == ((i & 0x01) != 0 ? 4 : 0), "qlen(%zu)", bseq_qual_len(c));
+		ut_assert(bseq_is_qual_set(c) == ((i & 0x01) != 0), "is_qual(%u)", bseq_is_qual_set(c));
+		ut_assert(bseq_comment_len(c) == 0, "clen(%zu)", bseq_comment_len(c));
+		ut_assert(strcmp(bseq_name(c), "test0") == 0, "name(%s)", bseq_name(c));
+		ut_assert(strcmp((char const *)bseq_seq(c), "\x0\x0\x0\x0") == 0, "seq(%s)", bseq_seq(c));
+		ut_assert(strcmp((char const *)bseq_qual(c), (i & 0x01) != 0 ? "NNNN" : "") == 0, "qual(%s)", bseq_qual(c));
+		ut_assert(strcmp((char const *)bseq_comment(c), "") == 0, "tag(%s)", bseq_comment(c));
 
-	ut_assert(bseq_name_len(&c[0]) == 5, "nlen(%zu)", bseq_name_len(&c[0]));
-	ut_assert(bseq_seq_len(&c[0]) == 4, "slen(%zu)", bseq_seq_len(&c[0]));
-	ut_assert(bseq_comment_len(&c[0]) == 0, "clen(%zu)", bseq_comment_len(&c[0]));
-	ut_assert(strcmp(bseq_name(&c[0]), "test0") == 0, "name(%s)", bseq_name(&c[0]));
-	ut_assert(strcmp((char const *)bseq_seq(&c[0]), "\x0\x0\x0\x0") == 0, "seq(%s)", bseq_seq(&c[0]));
-	ut_assert(strcmp((char const *)bseq_qual(&c[0]), "NNNN") == 0, "qual(%s)", bseq_qual(&c[0]));
-	ut_assert(strcmp((char const *)bseq_comment(&c[0]), "") == 0, "tag(%s)", bseq_comment(&c[0]));
+		c++;
+		ut_assert(bseq_name_len(c) == 5, "nlen(%zu)", bseq_name_len(c));
+		ut_assert(bseq_seq_len(c) == 8, "slen(%zu)", bseq_seq_len(c));
+		ut_assert(bseq_qual_len(c) == ((i & 0x01) != 0 ? 8 : 0), "qlen(%zu)", bseq_qual_len(c));
+		ut_assert(bseq_is_qual_set(c) == ((i & 0x01) != 0), "is_qual(%u)", bseq_is_qual_set(c));
+		ut_assert(bseq_comment_len(c) == 0, "clen(%zu)", bseq_comment_len(c));
+		ut_assert(strcmp(bseq_name(c), "test1") == 0, "name(%s)", bseq_name(c));
+		ut_assert(strcmp((char const *)bseq_seq(c), "\x0\x3\x0\x3\x1\x2\x1\x2") == 0, "seq(%s)", bseq_seq(c));
+		ut_assert(strcmp((char const *)bseq_qual(c), (i & 0x01) != 0 ? "12+3+123" : "") == 0, "qual(%s)", bseq_qual(c));
+		ut_assert(strcmp((char const *)bseq_comment(c), "") == 0, "tag(%s)", bseq_comment(c));
 
-	ut_assert(bseq_name_len(&c[1]) == 5, "nlen(%zu)", bseq_name_len(&c[1]));
-	ut_assert(bseq_seq_len(&c[1]) == 8, "slen(%zu)", bseq_seq_len(&c[1]));
-	ut_assert(bseq_comment_len(&c[1]) == 0, "clen(%zu)", bseq_comment_len(&c[1]));
-	ut_assert(strcmp(bseq_name(&c[1]), "test1") == 0, "name(%s)", bseq_name(&c[1]));
-	ut_assert(strcmp((char const *)bseq_seq(&c[1]), "\x0\x3\x0\x3\x1\x2\x1\x2") == 0, "seq(%s)", bseq_seq(&c[1]));
-	ut_assert(strcmp((char const *)bseq_qual(&c[1]), "12+3+123") == 0, "qual(%s)", bseq_qual(&c[1]));
-	ut_assert(strcmp((char const *)bseq_comment(&c[1]), "") == 0, "tag(%s)", bseq_comment(&c[1]));
+		c++;
+		ut_assert(bseq_name_len(c) == 5, "nlen(%zu)", bseq_name_len(c));
+		ut_assert(bseq_seq_len(c) == 4, "slen(%zu)", bseq_seq_len(c));
+		ut_assert(bseq_qual_len(c) == ((i & 0x01) != 0 ? 4 : 0), "qlen(%zu)", bseq_qual_len(c));
+		ut_assert(bseq_is_qual_set(c) == ((i & 0x01) != 0), "is_qual(%u)", bseq_is_qual_set(c));
+		ut_assert(bseq_comment_len(c) == 0, "clen(%zu)", bseq_comment_len(c));
+		ut_assert(strcmp(bseq_name(c), "test2") == 0, "name(%s)", bseq_name(c));
+		ut_assert(strcmp((char const *)bseq_seq(c), "\x0\x0\x0\x0") == 0, "seq(%s)", bseq_seq(c));
+		ut_assert(strcmp((char const *)bseq_qual(c), (i & 0x01) != 0 ? "12@3" : "") == 0, "qual(%s)", bseq_qual(c));
+		ut_assert(strcmp((char const *)bseq_comment(c), "") == 0, "tag(%s)", bseq_comment(c));
 
-	ut_assert(bseq_name_len(&c[2]) == 5, "nlen(%zu)", bseq_name_len(&c[2]));
-	ut_assert(bseq_seq_len(&c[2]) == 4, "slen(%zu)", bseq_seq_len(&c[2]));
-	ut_assert(bseq_comment_len(&c[2]) == 0, "clen(%zu)", bseq_comment_len(&c[2]));
-	ut_assert(strcmp(bseq_name(&c[2]), "test2") == 0, "name(%s)", bseq_name(&c[2]));
-	ut_assert(strcmp((char const *)bseq_seq(&c[2]), "\x0\x0\x0\x0") == 0, "seq(%s)", bseq_seq(&c[2]));
-	ut_assert(strcmp((char const *)bseq_qual(&c[2]), "12@3") == 0, "qual(%s)", bseq_qual(&c[2]));
-	ut_assert(strcmp((char const *)bseq_comment(&c[2]), "") == 0, "tag(%s)", bseq_comment(&c[2]));
+		c++;
+		ut_assert(bseq_name_len(c) == 5, "nlen(%zu)", bseq_name_len(c));
+		ut_assert(bseq_seq_len(c) == 4, "slen(%zu)", bseq_seq_len(c));
+		ut_assert(bseq_qual_len(c) == ((i & 0x01) != 0 ? 4 : 0), "qlen(%zu)", bseq_qual_len(c));
+		ut_assert(bseq_is_qual_set(c) == ((i & 0x01) != 0), "is_qual(%u)", bseq_is_qual_set(c));
+		ut_assert(bseq_comment_len(c) == ((i & 0x02) != 0 ? 16 : 0), "clen(%zu)", bseq_comment_len(c));
+		ut_assert(strcmp(bseq_name(c), "test3") == 0, "name(%s)", bseq_name(c));
+		ut_assert(strcmp((char const *)bseq_seq(c), "\x0\x1\x2\x3") == 0, "seq(%s)", bseq_seq(c));
+		ut_assert(strcmp((char const *)bseq_qual(c), (i & 0x01) != 0 ? "@123" : "") == 0, "qual(%s)", bseq_qual(c));
+		ut_assert(strcmp((char const *)bseq_comment(c), (i & 0x02) != 0 ? " comment comment" : "") == 0, "tag(%s)", bseq_comment(c));
 
-	ut_assert(bseq_name_len(&c[3]) == 5, "nlen(%zu)", bseq_name_len(&c[3]));
-	ut_assert(bseq_seq_len(&c[3]) == 4, "slen(%zu)", bseq_seq_len(&c[3]));
-	ut_assert(bseq_comment_len(&c[3]) == 16, "clen(%zu)", bseq_comment_len(&c[3]));
-	ut_assert(strcmp(bseq_name(&c[3]), "test3") == 0, "name(%s)", bseq_name(&c[3]));
-	ut_assert(strcmp((char const *)bseq_seq(&c[3]), "\x0\x1\x2\x3") == 0, "seq(%s)", bseq_seq(&c[3]));
-	ut_assert(strcmp((char const *)bseq_qual(&c[3]), "@123") == 0, "qual(%s)", bseq_qual(&c[3]));
-	ut_assert(strcmp((char const *)bseq_comment(&c[3]), " comment comment") == 0, "tag(%s)", bseq_comment(&c[3]));
-
-	bseq_close_t const e = bseq_close(b);
-	ut_assert(e.cnt == 4);
-	ut_assert(e.status == 0);
+		bseq_close_t const e = bseq_close(b);
+		ut_assert(e.cnt == 4);
+		ut_assert(e.status == 0);
+	}
 	remove(filename);
 }
 
-unittest( .name = "bseq.fastq.skip" ) {
+typedef struct {
+	char *seq;
+	size_t len;
+} bseq_unittest_seq_t;
+
+static _force_inline
+uint8_t bseq_unittest_random_char(void)
+{
+	switch(rand() % 4) {
+		case 0:  return('A');
+		case 1:  return('C');
+		case 2:  return('G');
+		case 3:  return('T');
+		default: return('A');
+	}
+}
+
+static _force_inline
+bseq_unittest_seq_t bseq_unittest_rand_seq(size_t len)
+{
+	char *seq = malloc(sizeof(char) * (len + 1));
+	for(size_t i = 0; i < len; i++) {
+		seq[i] = bseq_unittest_random_char();
+	}
+	seq[len] = '\0';
+
+	return((bseq_unittest_seq_t){
+		.seq = seq,
+		.len = len
+	});
+}
+
+unittest( .name = "bseq.fasta.large" ) {
 	char const *filename = "./bseq.unittest.tmp";
-	char const *content =
-		"@test0\nAAAA\n+test0\nNNNN\n"
-		"@ test1\nATAT\nCGCG\n+ test1\n12+3\n+123\n"
-		"@  test2\n\nAAAA\n+  test2\n\n\n12@3\n\n"
-		"@test3  comment comment   \nACGT\n\n+ test3\n@123";
+
+	size_t const cnt = 20, len = 1024;
+	bseq_unittest_seq_t *arr = malloc(sizeof(bseq_unittest_seq_t) * cnt);
 
 	FILE *fp = fopen(filename, "w");
 	ut_assert(fp != NULL);
-	fwrite(content, 1, strlen(content), fp);
+
+	for(size_t i = 0; i < cnt; i++) {
+		arr[i] = bseq_unittest_rand_seq(len + (rand() % len));
+		fprintf(fp, "> %06zu comment comes here  \n%s\n", i, arr[i].seq);
+	}
 	fclose(fp);
 
-	bseq_conf_t const conf = {
-		.batch_size   = BSEQ_BATCH_SIZE,
-		.head_margin  = 64,
-		.keep_qual    = 0,
-		.keep_comment = 0,
-		.conv_table = {
-			[A] = 0x00,
-			[C] = 0x01,
-			[G] = 0x02,
-			[T] = 0x03
+	for(size_t i = 0; i < 4; i++) {
+		kvec_t(bseq_batch_t *) batch;
+		kvec_t(bseq_meta_t) meta;
+
+		kv_init(batch);
+		kv_init(meta);
+
+		bseq_conf_t const conf = {
+			.batch_size   = 256,
+			.head_margin  = 64,
+			.keep_qual    = (i & 0x01) != 0,
+			.keep_comment = (i & 0x02) != 0,
+			.conv_table = {
+				[A] = 'A',
+				[C] = 'C',
+				[G] = 'G',
+				[T] = 'T'
+			}
+		};
+		bseq_file_t *b = bseq_open(&conf, filename);
+		bseq_batch_t *s = NULL;
+		while((s = bseq_read(b)) != NULL) {
+			kv_push(bseq_batch_t, batch, s);
+
+			bseq_meta_t *m = bseq_meta_ptr(s);
+			for(size_t j = 0; j < bseq_meta_cnt(s); j++) {
+				kv_push(bseq_meta_t, meta, m[j]);
+			}
 		}
-	};
-	bseq_file_t *b = bseq_open(&conf, filename);
-	ut_assert(b != NULL);
 
-	bseq_batch_t *s = bseq_read(b);
+		bseq_close_t const e = bseq_close(b);
+		ut_assert(e.cnt == cnt, "cnt(%zu, %zu)", e.cnt, cnt);
+		ut_assert(e.status == 0);
 
-	ut_assert(s != NULL);
-	ut_assert(s->cnt == 4, "cnt(%u)", s->cnt);
-	ut_assert(s->bin.base != NULL);
-	ut_assert(s->bin.size > 0, "size(%lu)", s->bin.size);
+		ut_assert(kv_cnt(meta) == cnt, "cnt(%zu, %zu)", kv_cnt(meta), cnt);
+		for(size_t j = 0; j < kv_cnt(meta); j++) {
+			char buf[256] = { 0 };
+			sprintf(buf, "%06zu", j);
 
-	bseq_meta_t const *c = bseq_meta_ptr(s);
+			bseq_meta_t const *c = &kv_ptr(meta)[j];
+			ut_assert(bseq_name_len(c) == 6, "nlen(%zu)", bseq_name_len(c));
+			ut_assert(bseq_seq_len(c)  == arr[j].len, "slen(%zu, %zu), seq(\n%s\n%s\n)", bseq_seq_len(c), arr[j].len, bseq_seq(c), arr[j].seq);
+			ut_assert(bseq_qual_len(c) == 0, "qlen(%zu)", bseq_qual_len(c));
+			ut_assert(bseq_is_qual_set(c) == 0, "is_qual(%u)", bseq_is_qual_set(c));
+			ut_assert(bseq_comment_len(c) == ((i & 0x02) != 0 ? 18 : 0), "clen(%zu)", bseq_comment_len(c));
+			ut_assert(strcmp(bseq_name(c), buf) == 0, "name(%s)", bseq_name(c));
+			ut_assert(strcmp((char const *)bseq_seq(c), arr[j].seq) == 0, "seq(%s)", bseq_seq(c));
+			ut_assert(strcmp((char const *)bseq_qual(c), "") == 0, "qual(%s)", bseq_qual(c));
+			ut_assert(strcmp((char const *)bseq_comment(c), (i & 0x02) != 0 ? "comment comes here" : "") == 0, "tag(%s)", bseq_comment(c));
+		}
 
-	ut_assert(bseq_name_len(&c[0]) == 5, "nlen(%zu)", bseq_name_len(&c[0]));
-	ut_assert(bseq_seq_len(&c[0]) == 4, "slen(%zu)", bseq_seq_len(&c[0]));
-	ut_assert(bseq_comment_len(&c[0]) == 0, "clen(%zu)", bseq_comment_len(&c[0]));
-	ut_assert(strcmp((char const *)bseq_name(&c[0]), "test0") == 0, "name(%s)", bseq_name(&c[0]));
-	ut_assert(strcmp((char const *)bseq_seq(&c[0]), "\x0\x0\x0\x0") == 0, "seq(%s)", bseq_seq(&c[0]));
-	ut_assert(strcmp((char const *)bseq_qual(&c[0]), "") == 0, "qual(%s)", bseq_qual(&c[0]));
-	ut_assert(strcmp((char const *)bseq_comment(&c[0]), "") == 0, "tag(%s)", bseq_comment(&c[0]));
-
-	ut_assert(bseq_name_len(&c[1]) == 5, "nlen(%zu)", bseq_name_len(&c[1]));
-	ut_assert(bseq_seq_len(&c[1]) == 8, "slen(%zu)", bseq_seq_len(&c[1]));
-	ut_assert(bseq_comment_len(&c[1]) == 0, "clen(%zu)", bseq_comment_len(&c[1]));
-	ut_assert(strcmp((char const *)bseq_name(&c[1]), "test1") == 0, "name(%s)", bseq_name(&c[1]));
-	ut_assert(strcmp((char const *)bseq_seq(&c[1]), "\x0\x3\x0\x3\x1\x2\x1\x2") == 0, "seq(%s)", bseq_seq(&c[1]));
-	ut_assert(strcmp((char const *)bseq_qual(&c[1]), "") == 0, "qual(%s)", bseq_qual(&c[1]));
-	ut_assert(strcmp((char const *)bseq_comment(&c[1]), "") == 0, "tag(%s)", bseq_comment(&c[1]));
-
-	ut_assert(bseq_name_len(&c[2]) == 5, "nlen(%zu)", bseq_name_len(&c[2]));
-	ut_assert(bseq_seq_len(&c[2]) == 4, "slen(%zu)", bseq_seq_len(&c[2]));
-	ut_assert(bseq_comment_len(&c[2]) == 0, "clen(%zu)", bseq_comment_len(&c[2]));
-	ut_assert(strcmp((char const *)bseq_name(&c[2]), "test2") == 0, "name(%s)", bseq_name(&c[2]));
-	ut_assert(strcmp((char const *)bseq_seq(&c[2]), "\x0\x0\x0\x0") == 0, "seq(%s)", bseq_seq(&c[2]));
-	ut_assert(strcmp((char const *)bseq_qual(&c[2]), "") == 0, "qual(%s)", bseq_qual(&c[2]));
-	ut_assert(strcmp((char const *)bseq_comment(&c[2]), "") == 0, "tag(%s)", bseq_comment(&c[2]));
-
-	ut_assert(bseq_name_len(&c[3]) == 5, "nlen(%zu)", bseq_name_len(&c[3]));
-	ut_assert(bseq_seq_len(&c[3]) == 4, "slen(%zu)", bseq_seq_len(&c[3]));
-	ut_assert(bseq_comment_len(&c[3]) == 0, "clen(%zu)", bseq_comment_len(&c[3]));
-	ut_assert(strcmp((char const *)bseq_name(&c[3]), "test3") == 0, "name(%s)", bseq_name(&c[3]));
-	ut_assert(strcmp((char const *)bseq_seq(&c[3]), "\x0\x1\x2\x3") == 0, "seq(%s)", bseq_seq(&c[3]));
-	ut_assert(strcmp((char const *)bseq_qual(&c[3]), "") == 0, "qual(%s)", bseq_qual(&c[3]));
-	ut_assert(strcmp((char const *)bseq_comment(&c[3]), "") == 0, "tag(%s)", bseq_comment(&c[3]));
-
-	bseq_close_t const e = bseq_close(b);
-	ut_assert(e.cnt == 4);
-	ut_assert(e.status == 0);
+		for(size_t j = 0; j < kv_cnt(batch); j++) {
+			bseq_bin_free(kv_ptr(batch)[j]);
+		}
+		kv_destroy(batch);
+		kv_destroy(meta);
+	}
 	remove(filename);
 }
 
