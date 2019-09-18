@@ -117,11 +117,15 @@ void bseq_buf_init(bseq_file_t *fp, size_t batch_size)
 {
 	size_t const malloc_size = _roundup(sizeof(uint8_t) * batch_size + 2 * BSEQ_MGN, ARCH_HUGEPAGE_SIZE);
 	uint8_t *ptr = aligned_malloc(malloc_size);
-	_memset_blk_u(ptr, 0, BSEQ_MGN);		/* clear head margin so that parsing will not depend on uninitialized values */
+	_memset_blk_u(ptr, '\n', BSEQ_MGN);		/* clear head margin so that parsing will not depend on uninitialized values */
 
 	/* save */
 	fp->batch_size = batch_size;
 	fp->buf = ptr + BSEQ_MGN;
+
+	/* make sure p >= t for the initial state */
+	fp->p = fp->buf;
+	fp->t = NULL;
 	return;
 }
 
@@ -136,10 +140,11 @@ static _force_inline
 size_t bseq_fetch_block(bseq_file_t *fp)
 {
 	/* read a block */
+	uint64_t const back = fp->p == fp->t;		/* '\n' remains at the last byte of the buffer */
 	size_t const bytes = rbread_bulk(&fp->rb, fp->buf, fp->batch_size);		/* always bypass internal buffer; up to batch_size */
 
 	/* save pointers */
-	fp->p = fp->buf;
+	fp->p = fp->buf - back;
 	fp->t = fp->buf + bytes;
 
 	/* add padding */
@@ -148,7 +153,7 @@ size_t bseq_fetch_block(bseq_file_t *fp)
 	/* update EOF */
 	fp->is_eof = MAX2(fp->is_eof, rbeof(&fp->rb));
 
-	debug("bytes, state(%u), len(%zu), is_eof(%u), rb(%u, %zu, %zu)", fp->state, bytes, fp->is_eof, fp->rb.eof, fp->rb.head, fp->rb.tail);
+	debug("bytes, state(%u), len(%zu), is_eof(%u), rb(%u, %zu, %zu), next(%x, %x, %x, %x)", fp->state, bytes, fp->is_eof, fp->rb.eof, fp->rb.head, fp->rb.tail, fp->p[0], fp->p[1], fp->p[2], fp->p[3]);
 	return(bytes);
 }
 
@@ -258,6 +263,7 @@ size_t bseq_readline(
 
 	/* fixup last byte for the next readline */
 	w->q[w->n] = '\0';				/* mark empty; invariant condition */
+	debug("p(%p), t(%p), n(%lu), next(%x, %x, %x, %x)", w->p, w->t, w->n, w->p[-1], w->p[0], w->p[1], w->p[2]);
 	return(bytes);
 }
 
@@ -901,7 +907,7 @@ bseq_unittest_seq_t bseq_unittest_rand_seq(size_t len)
 unittest( .name = "bseq.fasta.large" ) {
 	char const *filename = "./bseq.unittest.tmp";
 
-	size_t const cnt = 20, len = 1024;
+	size_t const cnt = 2048, len = 1024;
 	bseq_unittest_seq_t *arr = malloc(sizeof(bseq_unittest_seq_t) * cnt);
 
 	FILE *fp = fopen(filename, "w");
@@ -921,7 +927,7 @@ unittest( .name = "bseq.fasta.large" ) {
 		kv_init(meta);
 
 		bseq_conf_t const conf = {
-			.batch_size   = 256,
+			.batch_size   = 1024,
 			.head_margin  = 64,
 			.keep_qual    = (i & 0x01) != 0,
 			.keep_comment = (i & 0x02) != 0,

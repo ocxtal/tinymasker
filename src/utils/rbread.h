@@ -9,6 +9,9 @@
 
 /* include global header *before* we include individual dependencies */
 #include "common.h"
+#include "arch.h"
+#include "wmalloc.h"
+
 
 #if !defined(RB_USE_ZLIB) && !defined(RB_DONTUSE_ZLIB)
 #  define RB_USE_ZLIB
@@ -32,7 +35,14 @@
 #endif
 
 
+#if 1
 #define RB_BUF_SIZE				( 2ULL * 1024 * 1024 )
+#define RB_BUF_ALIGN_SIZE		( ARCH_HUGEPAGE_SIZE )
+#else
+#define RB_BUF_SIZE				( 1024 )
+#define RB_BUF_ALIGN_SIZE		( 1024 )
+#endif
+
 
 /**
  * @struct rbread_s
@@ -74,7 +84,7 @@ typedef struct rbread_s {
 		uint64_t _pad;
 	} s;
 } rbread_t;
-#define rbeof(_rb)				( (_rb)->eof >= 2 )
+#define rbeof(_rb)				( (_rb)->eof >= 3 )
 
 
 /**
@@ -106,8 +116,9 @@ typedef struct rbread_s {
 #ifdef RB_USE_ZLIB
 _rb_reader(gzip, z, uint8_t, {
 	switch(inflate(&rb->s.z, Z_NO_FLUSH)) {
-		default: rb->eof = 2;		/* input buffer starved */
+		default:
 		case Z_STREAM_END: inflateReset(&rb->s.z);
+		if(rb->eof == 1) { rb->eof = 2; }
 		case Z_OK: break;
 	}
 });
@@ -116,8 +127,10 @@ _rb_reader(gzip, z, uint8_t, {
 #ifdef RB_USE_BZLIB
 _rb_reader(bz2, b, char, {
 	switch(BZ2_bzDecompress(&rb->s.b)) {
-		default: rb->eof = 2;		/* input buffer starved */
-		case BZ_STREAM_END: case BZ_OK: break;
+		default:
+		case BZ_STREAM_END:
+		if(rb->eof == 1) { rb->eof = 2; }
+		case BZ_OK: break;
 	}
 });
 #endif
@@ -125,8 +138,10 @@ _rb_reader(bz2, b, char, {
 #ifdef RB_USE_LZMA
 _rb_reader(xz, x, uint8_t, {
 	switch(lzma_code(&rb->s.x, rb->eof == 1 ? LZMA_FINISH : LZMA_RUN)) {
-		default: rb->eof = 2;		/* input buffer starved */
-		case LZMA_STREAM_END: case LZMA_OK: break;
+		default:
+		case LZMA_STREAM_END:
+		if(rb->eof == 1) { rb->eof = 2; }
+		case LZMA_OK: break;
 	}
 });
 #endif
@@ -150,6 +165,7 @@ rb_reader_res_t rb_read_transparent(rbread_t *rb, void *dst, size_t len)
 static inline
 size_t rbread_bulk(rbread_t *rb, void *dst, size_t len)
 {
+	/* output buffer must be larger than (or equal to) bulk_size */
 	if(rb->eof > 2) { return(0); }	/* if output buffer starved */
 	size_t rem = len;
 	uint8_t *p = dst;
@@ -306,11 +322,9 @@ int rbopen_bulk_static(rbread_t *rb, char const *fn, size_t bulk_size)
 	if(rb->fp == NULL) { goto _rbopen_fail; }
 
 	/* calculate buffer size */
-	size_t const buffer_size = _roundup(2 * bulk_size, ARCH_HUGEPAGE_SIZE);
+	size_t const buffer_size = _roundup(2 * bulk_size, RB_BUF_ALIGN_SIZE);
 	rb->buf_size  = buffer_size;
 	rb->bulk_size = bulk_size;
-
-	debug("size(%zu, %zu)", rb->buf_size, rb->bulk_size);
 
 	/* read the first chunk */
 	uint8_t *buf = aligned_malloc(buffer_size);
