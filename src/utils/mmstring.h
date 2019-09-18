@@ -194,6 +194,24 @@ void mm_bin_destroy_static(mm_bin_t *bin)
 }
 
 static _force_inline
+mm_bin_t *mm_bin_init(void)
+{
+	mm_bin_t *bin = malloc(sizeof(mm_bin_t));
+	mm_bin_init_static(bin);
+	return(bin);
+}
+
+static _force_inline
+void mm_bin_destroy(mm_bin_t *bin)
+{
+	if(bin == NULL) { return; }
+	mm_bin_destroy_static(bin);
+	free(bin);
+	return;
+}
+
+
+static _force_inline
 mm_bin_blk_t *mm_bin_allocate(mm_bin_t *bin, size_t len)
 {
 	size_t const msize = kv_size(bin->blk);

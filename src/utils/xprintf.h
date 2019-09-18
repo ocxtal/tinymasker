@@ -3,6 +3,7 @@
  *
  * printf with additional formatters
  * original file is available at https://github.com/mpaland/printf
+ * modified by Hajime Suzuki
  */
 
 #ifndef _XPRINTF_H_INCLUDED
@@ -107,15 +108,18 @@
 
 
 // callback formatter
-typedef char* (*fmt_fct_type)(void* arg);
+typedef char* (*xp_formatter_t)(void* arg);
+
+// callback printer
+typedef void (*xp_putc_t)(char character, void* buffer_or_context);
 
 // output function type
-typedef void (*out_fct_type)(char character, void* buffer, size_t idx, size_t maxlen);
+typedef void (*xp_write_t)(char character, void* buffer, size_t idx, size_t maxlen);
 
 
 // wrapper (used as buffer) for output function type
 typedef struct {
-  void  (*fct)(char character, void* arg);
+  xp_putc_t fct;
   void* arg;
 } out_fct_wrap_type;
 
@@ -187,7 +191,7 @@ static unsigned int _atoi(const char** str)
 
 
 // internal itoa format
-static size_t _ntoa_format(out_fct_type out, char* buffer, size_t idx, size_t maxlen, char* buf, size_t len, bool negative, unsigned int base, unsigned int prec, unsigned int width, unsigned int flags)
+static size_t _ntoa_format(xp_write_t out, char* buffer, size_t idx, size_t maxlen, char* buf, size_t len, bool negative, unsigned int base, unsigned int prec, unsigned int width, unsigned int flags)
 {
   const size_t start_idx = idx;
 
@@ -262,7 +266,7 @@ static size_t _ntoa_format(out_fct_type out, char* buffer, size_t idx, size_t ma
 
 
 // internal itoa for 'long' type
-static size_t _ntoa_long(out_fct_type out, char* buffer, size_t idx, size_t maxlen, unsigned long value, bool negative, unsigned long base, unsigned int prec, unsigned int width, unsigned int flags)
+static size_t _ntoa_long(xp_write_t out, char* buffer, size_t idx, size_t maxlen, unsigned long value, bool negative, unsigned long base, unsigned int prec, unsigned int width, unsigned int flags)
 {
   char buf[PRINTF_NTOA_BUFFER_SIZE];
   size_t len = 0U;
@@ -287,7 +291,7 @@ static size_t _ntoa_long(out_fct_type out, char* buffer, size_t idx, size_t maxl
 
 // internal itoa for 'long long' type
 #if defined(PRINTF_SUPPORT_LONG_LONG)
-static size_t _ntoa_long_long(out_fct_type out, char* buffer, size_t idx, size_t maxlen, unsigned long long value, bool negative, unsigned long long base, unsigned int prec, unsigned int width, unsigned int flags)
+static size_t _ntoa_long_long(xp_write_t out, char* buffer, size_t idx, size_t maxlen, unsigned long long value, bool negative, unsigned long long base, unsigned int prec, unsigned int width, unsigned int flags)
 {
   char buf[PRINTF_NTOA_BUFFER_SIZE];
   size_t len = 0U;
@@ -312,7 +316,7 @@ static size_t _ntoa_long_long(out_fct_type out, char* buffer, size_t idx, size_t
 
 
 #if defined(PRINTF_SUPPORT_FLOAT)
-static size_t _ftoa(out_fct_type out, char* buffer, size_t idx, size_t maxlen, double value, unsigned int prec, unsigned int width, unsigned int flags)
+static size_t _ftoa(xp_write_t out, char* buffer, size_t idx, size_t maxlen, double value, unsigned int prec, unsigned int width, unsigned int flags)
 {
   const size_t start_idx = idx;
 
@@ -459,7 +463,7 @@ static size_t _ftoa(out_fct_type out, char* buffer, size_t idx, size_t maxlen, d
 #endif  // PRINTF_SUPPORT_FLOAT
 
 
-static size_t _stoa(out_fct_type out, char* buffer, size_t idx, size_t maxlen, const char* p, unsigned int prec, unsigned int width, unsigned int flags)
+static size_t _stoa(xp_write_t out, char* buffer, size_t idx, size_t maxlen, const char* p, unsigned int prec, unsigned int width, unsigned int flags)
 {
   unsigned int l = _strnlen_s(p, prec ? prec : (size_t)-1);
 
@@ -488,7 +492,7 @@ static size_t _stoa(out_fct_type out, char* buffer, size_t idx, size_t maxlen, c
 
 
 // internal vsnprintf
-static int _vsnprintf(out_fct_type out, char* buffer, const size_t maxlen, const char* format, va_list va)
+static size_t _vsnprintf(xp_write_t out, char* buffer, const size_t maxlen, const char* format, va_list va)
 {
   unsigned int flags, width, precision, n;
   size_t idx = 0U;
@@ -702,11 +706,12 @@ static int _vsnprintf(out_fct_type out, char* buffer, const size_t maxlen, const
       }
 
       // add support for (formatter, pointer) fields
-      case 'r' : {
-        fmt_fct_type fn = va_arg(va, fmt_fct_type);
+      case 'r' :
+      case 'R' : {
+        xp_formatter_t fn = va_arg(va, xp_formatter_t);
         char* p = fn(va_arg(va, void*));
         idx = _stoa(out, buffer, idx, maxlen, p, precision, width, flags);
-        free(p);
+        if(*format == 'r') free(p);
         format++;
         break;
       }
@@ -750,26 +755,26 @@ static int _vsnprintf(out_fct_type out, char* buffer, const size_t maxlen, const
   out((char)0, buffer, idx < maxlen ? idx : maxlen - 1U, maxlen);
 
   // return written chars without terminating \0
-  return (int)idx;
+  return idx;
 }
 
 
 ///////////////////////////////////////////////////////////////////////////////
 static
-int xprintf(const char* format, ...)
+size_t xprintf(const char* format, ...)
 {
   va_list va;
   va_start(va, format);
-  const int ret = _vsnprintf(_out_char, (void*)stdout, (size_t)-1, format, va);
+  const size_t ret = _vsnprintf(_out_char, (void*)stdout, (size_t)-1, format, va);
   va_end(va);
   return ret;
 }
 static
-int xfprintf(FILE* fp, const char* format, ...)
+size_t xfprintf(FILE* fp, const char* format, ...)
 {
   va_list va;
   va_start(va, format);
-  const int ret = _vsnprintf(_out_char, (void*)fp, (size_t)-1, format, va);
+  const size_t ret = _vsnprintf(_out_char, (void*)fp, (size_t)-1, format, va);
   va_end(va);
   return ret;
 }
@@ -781,7 +786,7 @@ char* xbprintf(const char* format, ...)
   va_start(va, format);
   va_copy(copy, va);
 
-  const int ret = _vsnprintf(_out_null, NULL, (size_t)-1, format, va);
+  const size_t ret = _vsnprintf(_out_null, NULL, (size_t)-1, format, va);
   char *buffer = malloc(ret + 2);
   _vsnprintf(_out_buffer, buffer, ret + 1, format, copy);
 
@@ -791,42 +796,49 @@ char* xbprintf(const char* format, ...)
 }
 
 static
-int xsprintf(char* buffer, const char* format, ...)
+size_t xsprintf(char* buffer, const char* format, ...)
 {
   va_list va;
   va_start(va, format);
-  const int ret = _vsnprintf(_out_buffer, buffer, (size_t)-1, format, va);
+  const size_t ret = _vsnprintf(_out_buffer, buffer, (size_t)-1, format, va);
   va_end(va);
   return ret;
 }
 
 static
-int xsnprintf(char* buffer, size_t count, const char* format, ...)
+size_t xsnprintf(char* buffer, size_t count, const char* format, ...)
 {
   va_list va;
   va_start(va, format);
-  const int ret = _vsnprintf(_out_buffer, buffer, count, format, va);
+  const size_t ret = _vsnprintf(_out_buffer, buffer, count, format, va);
   va_end(va);
   return ret;
 }
 
 static
-int xvsnprintf(char* buffer, size_t count, const char* format, va_list va)
+size_t xvsnprintf(char* buffer, size_t count, const char* format, va_list va)
 {
   return _vsnprintf(_out_buffer, buffer, count, format, va);
 }
 
 static
-int xfctprintf(void (*out)(char character, void* arg), void* arg, const char* format, ...)
+size_t xfctprintf(xp_putc_t out, void* arg, const char* format, ...)
 {
   va_list va;
   va_start(va, format);
   const out_fct_wrap_type out_fct_wrap = { out, arg };
-  const int ret = _vsnprintf(_out_fct, (char*)(uintptr_t)&out_fct_wrap, (size_t)-1, format, va);
+  const size_t ret = _vsnprintf(_out_fct, (char*)(uintptr_t)&out_fct_wrap, (size_t)-1, format, va);
   va_end(va);
   return ret;
 }
 
+static
+size_t xvfctprintf(xp_putc_t out, void* arg, const char* format, va_list va)
+{
+  const out_fct_wrap_type out_fct_wrap = { out, arg };
+  const size_t ret = _vsnprintf(_out_fct, (char*)(uintptr_t)&out_fct_wrap, (size_t)-1, format, va);
+  return ret;
+}
 
 #endif /* _XPRINTF_H_INCLUDED */
 /**

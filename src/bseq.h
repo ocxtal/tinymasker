@@ -847,14 +847,23 @@ unittest( .name = "bseq.fastq.skip" ) {
 
 
 /* printer */
+
+/* custom printer for comment field */
+typedef void (*bseq_print_attr_t)(bseq_dump_t *self, bseq_meta_t const *meta);
+
+/* context */
 typedef struct {
 	struct {
 		uint8_t *p, *t;		/* margined */
 		size_t size;
 	} buf;
 
-	/* print qual / small conv table */
-	uint32_t qual, fast;
+	/* configurations */
+	uint32_t comment;		/* print the original comment */
+	uint32_t fast;			/* use fast converter (enabled when the conversion table is small) */
+	uint32_t qual;			/* print qual */
+
+	bseq_print_attr_t callback;		/* custom comment formatter */
 
 	/* conversion table for entire ASCII space */
 	uint8_t mask[16];
@@ -888,7 +897,7 @@ void bseq_dump_destroy_buf(bseq_dump_t *self)
 }
 
 static _force_inline
-uint8_t *bseq_dump_allocate_buf(bseq_dump_t *self, size_t len)
+uint8_t *bseq_dump_reserve_buf(bseq_dump_t *self, size_t len)
 {
 	if(_unlikely(self->buf.p + len > self->buf.t + BSEQ_MGN)) {
 		uint8_t *p = self->buf.t - self->buf.size;
@@ -909,96 +918,6 @@ uint8_t *bseq_dump_allocate_buf(bseq_dump_t *self, size_t len)
 	return(q);
 }
 
-static _force_inline
-size_t bseq_dump_putsn(bseq_dump_t *self, char const *str, size_t len)
-{
-	uint8_t const *p = (uint8_t const *)str, *t = p + len;
-	while(p < t) {
-		/* allcoate buffer */
-		size_t const l = MIN2(t - p, 64);
-		uint8_t *q = bseq_dump_allocate_buf(self, l);
-
-		/* copy */
-		v32i8_t const v1 = _loadu_v32i8(p);
-		v32i8_t	const v2 = _loadu_v32i8(p + 32);
-		_storeu_v32i8(q,      v1);
-		_storeu_v32i8(q + 32, v2);
-
-		/* forward pointer */
-		p += 64;
-	}
-	return(len);
-}
-
-static _force_inline
-size_t bseq_dump_puts(bseq_dump_t *self, char const *str)
-{
-	size_t const len = mm_strlen(str);
-	return(bseq_dump_putsn(self, str, len));
-}
-
-static _force_inline
-size_t bseq_dump_core_fast(bseq_dump_t *self, uint8_t const *seq, size_t slen)
-{
-	v32i8_t const conv = _loadu_v32i8(self->conv);
-	uint8_t const *p = (uint8_t const *)str, *t = p + len;
-
-	while(p < t) {
-		/* allcoate buffer */
-		size_t const l = MIN2(t - p, 64);
-		uint8_t *q = bseq_dump_allocate_buf(self, l);
-
-		/* convert and save */
-		v32i8_t const v1 = _loadu_v32i8(p);
-		v32i8_t const v2 = _loadu_v32i8(p + 32);
-		v32i8_t const w1 = _shuf_v32i8(conv, v1);
-		v32i8_t const w2 = _shuf_v32i8(conv, v2);
-		_storeu_v32i8(q,      w1);
-		_storeu_v32i8(q + 32, w2);
-
-		/* forward pointer */
-		p += 64;
-	}
-	return(slen);
-}
-
-static _force_inline
-size_t bseq_dump_core_slow(bseq_dump_t *self, uint8_t const *seq, size_t slen)
-{
-	return(slen);
-}
-
-static _force_inline
-size_t bseq_dump_header(bseq_dump_t *self, bseq_meta_t const *meta)
-{
-	return(len);
-}
-
-static _force_inline
-size_t bseq_dump_seq(bseq_dump_t *self, uint8_t const *conv, uint64_t fast, bseq_meta_t const *meta, uint64_t qual)
-{
-	size_t acc = 0;
-
-	/* header */
-	acc += printf("%c%.*s%.*s%.*s\n%.*s\n",
-		qual ? '@' : '>',
-		(int)bseq_name_len(meta), bseq_name(meta),
-		(int)(bseq_comment_len(meta) != 0), " ",
-		(int)bseq_comment_len(meta), bseq_comment(meta)
-	);
-
-	/* body */
-	acc += (fast ? bseq_dump_core_fast : bseq_dump_core_slow)(
-		conv,
-		bseq_seq(meta),
-		bseq_seq_len(meta)
-	);
-	if(qual == 0) { return(acc); }
-
-	/* qual */
-	printf("\n\n");
-	return(acc);
-}
 
 static _force_inline
 void bseq_dump_load_conv(uint8_t *conv, uint8_t const *table)
@@ -1024,24 +943,202 @@ uint64_t bseq_dump_is_fast(uint8_t const *table)
 }
 
 static _force_inline
-size_t bseq_dump(bseq_dump_t *self, bseq_batch_t const *batch)
+uint64_t bseq_dump_init_static(bseq_dump_t *self, bseq_conf_t const *conf, bseq_print_attr_t callback)
 {
-	/* init conversion table */
-	uint8_t conv[256] __attribute__(( aligned(16) ));
-	bseq_dump_load_conv(conv, conf->conv_table);
+	memset(self, 0, sizeof(bseq_dump_t));
 
+	/* init buffer */
+	bseq_dump_init_buf(self, conf->batch_size);
+
+	/* init conversion table */
+	bseq_dump_load_conv(self->conv, conf->conv_table);
+
+	/* configurations */
+	self->comment = conf->keep_comment;
+	self->qual = conf->keep_qual;
+	self->fast = bseq_dump_is_fast(conf->conv_table);
+	self->callback = callback;
+	return(0);
+}
+
+static _force_inline
+void bseq_dump_destroy_static(bseq_dump_t *self)
+{
+	bseq_dump_destroy_buf(self);
+	return;
+}
+
+
+
+static _force_inline
+size_t bseq_dump_putchar(bseq_dump_t *self, char c)
+{
+	uint8_t *q = bseq_dump_reserve_buf(self, l);
+	*q = c;
+	return(1);
+}
+
+static _force_inline
+size_t bseq_dump_putsn(bseq_dump_t *self, char const *str, size_t len)
+{
+	uint8_t const *p = (uint8_t const *)str, *t = p + len;
+	while(p < t) {
+		/* allcoate buffer */
+		size_t const l = MIN2(t - p, 64);
+		uint8_t *q = bseq_dump_reserve_buf(self, l);
+
+		/* copy */
+		v32i8_t const v1 = _loadu_v32i8(p);
+		v32i8_t	const v2 = _loadu_v32i8(p + 32);
+		_storeu_v32i8(q,      v1);
+		_storeu_v32i8(q + 32, v2);
+
+		/* forward pointer */
+		p += 64;
+	}
+	return(len);
+}
+
+static _force_inline
+size_t bseq_dump_puts(bseq_dump_t *self, char const *str)
+{
+	size_t const len = mm_strlen(str);
+	return(bseq_dump_putsn(self, str, len));
+}
+
+static _force_inline
+void bseq_dump_putchar_wrap(char c, bseq_dump_t *self)
+{
+	bseq_dump_putchar(self, c);
+	return;
+}
+
+static _force_inline
+size_t bseq_dump_printf(bseq_dump_t *self, char const *format, ...)
+{
+	va_list va;
+	va_start(va, format);
+	size_t const cnt = xvfctprintf((xp_putc_t)bseq_dump_putchar_wrap, (void *)self, format, va);
+	va_end(va);
+	return(cnt);
+}
+
+static _force_inline
+size_t bseq_dump_header(bseq_dump_t *self, bseq_meta_t const *meta, uint8_t token)
+{
+	size_t bytes = 0;
+
+	/* base name */
+	bytes += bseq_dump_putchar(self, token);
+	bytes += bseq_dump_putsn(self,
+		bseq_name(meta),
+		bseq_name_len(meta)
+	);
+
+	/* preserved comment */
+	if(self->comment & (bseq_comment_len(meta) > 0)) {
+		bytes += bseq_dump_putchar(self, ' ');
+		bytes += bseq_dump_putsn(self,
+			bseq_comment(meta),
+			bseq_comment_len(meta)
+		);
+	}
+
+	/* custom comment */
+	if(self->callback) {
+		bytes += bseq_dump_putchar(self, ' ');
+		bytes += self->callback(self, meta);
+	}
+
+	/* done */
+	bytes += bseq_dump_putchar(self, '\n');
+	return(bytes);
+}
+
+
+static _force_inline
+size_t bseq_dump_core_fast(bseq_dump_t *self, uint8_t const *seq, size_t slen)
+{
+	v32i8_t const conv = _loadu_v32i8(self->conv);
+	uint8_t const *p = (uint8_t const *)str, *t = p + len;
+
+	while(p < t) {
+		/* allcoate buffer */
+		size_t const l = MIN2(t - p, 64);
+		uint8_t *q = bseq_dump_reserve_buf(self, l);
+
+		/* convert and save */
+		v32i8_t const v1 = _loadu_v32i8(p);
+		v32i8_t const v2 = _loadu_v32i8(p + 32);
+		v32i8_t const w1 = _shuf_v32i8(conv, v1);
+		v32i8_t const w2 = _shuf_v32i8(conv, v2);
+		_storeu_v32i8(q,      w1);
+		_storeu_v32i8(q + 32, w2);
+
+		/* forward pointer */
+		p += 64;
+	}
+	return(slen);
+}
+
+static _force_inline
+size_t bseq_dump_core_slow(bseq_dump_t *self, uint8_t const *seq, size_t slen)
+{
+	uint8_t const *conv = self->conv;
+	uint8_t const *p = (uint8_t const *)str, *t = p + len;
+
+	/* really slow... */
+	while(p < t) {
+		uint8_t const c = *p++;
+		uint8_t const x = conv[c];
+
+		uint8_t *q = bseq_dump_reserve_buf(self, 1);
+		*q = x;
+	}
+	return(slen);
+}
+
+static _force_inline
+size_t bseq_dump_seq(bseq_dump_t *self, bseq_meta_t const *meta)
+{
+	size_t bytes = 0;
+
+	/* determine record type first */
+	uint64_t const qual = self->qual & bseq_is_qual_set(meta);
+	uint8_t const token = qual ? '@' : '>';
+
+	/* header */
+	bytes += bseq_dump_header(self, meta, token);
+
+	/* body */
+	bytes += (self->fast ? bseq_dump_core_fast : bseq_dump_core_slow)(self,
+		bseq_seq(meta),
+		bseq_seq_len(meta)
+	);
+	if(qual == 0) { return(bytes); }
+
+	/* qual */
+	bytes += bseq_dump_putchar(self, '+');
+	bytes += bseq_dump_putchar(self, '\n');
+	bytes += bseq_dump_putsn(self,
+		bseq_qual(meta),
+		bseq_qual_len(meta)
+	);
+	bytes += bseq_dump_putchar(self, '\n');
+	return(bytes);
+}
+
+static _force_inline
+size_t bseq_dump_batch(bseq_dump_t *self, bseq_batch_t const *batch)
+{
 	/* load seq array */
 	bseq_meta_t const *seq = bseq_meta_ptr(batch);
 	size_t const scnt = bseq_meta_cnt(batch);
 
-	/* configurations */
-	uint64_t const is_fast = bseq_dump_is_fast(conf->conv_table);
-	uint64_t const is_qual_set = bseq_is_qual_set(seq);
-
 	/* dump all */
 	size_t bytes = 0;
 	for(size_t i = 0; i < scnt; i++) {
-		bytes += bseq_dump_seq(conv, is_fast, &meta[i], is_qual_set);
+		bytes += bseq_dump_seq(self, &meta[i]);
 	}
 	return(bytes);
 }
