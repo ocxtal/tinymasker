@@ -186,7 +186,7 @@ static int tm_conf_preset(tm_conf_t *conf, char const *arg)
 	#undef _n
 
 	struct tm_conf_preset_s const *const *q = presets;
-	split_foreach(arg, 0, ".:", {		/* traverse preset param tree along with parsing */
+	mm_split_foreach(arg, 0, ".:", {	/* traverse preset param tree along with parsing */
 		while(*q != NULL && strncmp(p, (*q)->key, l) != 0) { q++; }
 		if(*q == NULL) {				/* terminate if not matched, not loaded from file */
 			int ret = opt_load_conf(&conf->opt, conf, p);

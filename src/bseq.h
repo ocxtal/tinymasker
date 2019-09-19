@@ -297,9 +297,9 @@ void bseq_fixup_name(bseq_work_t *w, bseq_file_t *fp)
 		q += len;
 		if(m) {
 			ZCNT_RESULT size_t u = _tzc_u32(m);
-			size_t const v = u, w = MIN2(v, nlen);	/* clip split position at the tail of name-comment section */
-			q += w - len;
-			debug("p(%zu), q(%zu), t(%zu), len(%zu)", p, q, t, w);
+			size_t const v = u, x = MIN2(v, nlen);	/* clip split position at the tail of name-comment section */
+			q += x - len;
+			debug("p(%zu), q(%zu), t(%zu), len(%zu)", p, q, t, x);
 			break;
 		}
 	}
@@ -952,7 +952,7 @@ unittest( .name = "bseq.fasta.large" ) {
 		128, 256, 801, 1000, 1024, 12345, 1ULL * 1024 * 1024, 10000000, 12345678, 16ULL * 1024 * 1024, 0
 	};
 
-	for(size_t b = 0; batches[b] != 0; b++) {
+	for(size_t k = 0; batches[k] != 0; k++) {
 		for(size_t i = 0; i < 4; i++) {
 			kvec_t(bseq_batch_t *) batch;
 			kvec_t(bseq_meta_t) meta;
@@ -961,7 +961,7 @@ unittest( .name = "bseq.fasta.large" ) {
 			kv_init(meta);
 
 			bseq_conf_t const conf = {
-				.batch_size   = batches[b],
+				.batch_size   = batches[k],
 				.head_margin  = 64,
 				.keep_qual    = (i & 0x01) != 0,
 				.keep_comment = (i & 0x02) != 0,
@@ -1071,14 +1071,14 @@ uint8_t *bseq_dump_reserve_buf(bseq_dump_t *self, size_t len)
 {
 	if(_unlikely(self->buf.p + len > self->buf.t + BSEQ_MGN)) {
 		uint8_t *p = self->buf.t - self->buf.size;
-		uint8_t const len = MIN2(self->buf.p - p, self->buf.size);
+		uint8_t const dump_size = MIN2((size_t)(self->buf.p - p), self->buf.size);
 
 		/* until everything is dumped */
 		size_t sum = 0;
-		while((sum += fwrite(p + sum, 1, len - sum, stdout)) < len) {}
+		while((sum += fwrite(p + sum, 1, dump_size - sum, stdout)) < dump_size) {}
 
 		/* copy remaining (if there is) and reset pointer */
-		_memcpy_blk_uu(p, p + len, BSEQ_MGN);
+		_memcpy_blk_uu(p, p + dump_size, BSEQ_MGN);
 		self->buf.p = p;
 	}
 
