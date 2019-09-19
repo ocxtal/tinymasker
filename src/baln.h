@@ -219,15 +219,15 @@ baln_paf_parse_t baln_paf_parse_opt(baln_aln_t *aln, char const *line, size_t ll
 {
 	/* needs modified if collide */
 	#define HASH_SIZE			( 16 )
-	#define _key(_str)			( (uint16_t)((_str)[0]) | (((uint16_t)((_str)[1]))<<8) )
-	#define _hash(_k)			( (3 * (_k) + ((_k)>>8)) & (HASH_SIZE - 1) )
-	#define _elem(_str, _fp)	[_hash(_key(_str))] = { .key = _key(_str), .fp = (_fp) }
+	#define _key(_a, _b)		( (uint16_t)(_a) | ((uint16_t)(_b)<<8) )
+	#define _hash(_a, _b)		( (3 * (_a) + (_b)) & (HASH_SIZE - 1) )
+	#define _elem(_a, _b, _fp)	[_hash(_a, _b)] = { .key = _key(_a, _b), .fp = (_fp) }
 
 	static struct { uint16_t key; baln_paf_callback_t fp; } const parser[] = {
-		_elem("AS", baln_paf_parse_score),
-		_elem("XS", baln_paf_parse_score),
-		_elem("XI", NULL),
-		_elem("CG", baln_paf_parse_cigar)
+		_elem('A', 'S', baln_paf_parse_score),
+		_elem('X', 'S', baln_paf_parse_score),
+		_elem('X', 'I', NULL),
+		_elem('C', 'G', baln_paf_parse_cigar)
 	};
 
 	/* delimiters */
@@ -236,8 +236,8 @@ baln_paf_parse_t baln_paf_parse_opt(baln_aln_t *aln, char const *line, size_t ll
 	};
 
 	mm_split_foreach(line, llen, delim, {
-		uint16_t const key = _key(p);
-		size_t const hash  = _hash(key);
+		uint16_t const key = _key(p[0], p[1]);
+		size_t const hash  = _hash(p[0], p[1]);
 
 		/* skip unknown record */
 		if(parser[hash].fp == NULL || parser[hash].key != key) { continue; }
