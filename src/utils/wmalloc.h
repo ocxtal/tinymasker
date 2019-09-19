@@ -135,6 +135,8 @@ static _force_inline
 void wm_madvice(wm_aligned_malloc_hint_t hint, void *ptr, char const *fn)
 {
 	#if defined(__linux__) && defined(MADV_HUGEPAGE)
+		_unused(fn);
+
 		if(hint.use_madvise != 0) {
 			int ret = posix_madvise(ptr, hint.adjusted_size, MADV_HUGEPAGE);
 
