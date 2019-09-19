@@ -567,7 +567,7 @@ bseq_close_t bseq_close(bseq_file_t *fp)
 {
 	if(fp == NULL) { return((bseq_close_t){ .cnt = 0, .status = 0 }); }
 
-	size_t const scnt = fp->scnt;
+	size_t const scnt     = fp->scnt;
 	uint64_t const status = bseq_is_broken(fp);
 
 	rbclose_static(&fp->rb);
@@ -640,31 +640,43 @@ void bseq_load_conv(uint8_t *q, uint8_t const *p)
 }
 
 static _force_inline
-bseq_file_t *bseq_open(bseq_conf_t const *conf, char const *fn)	/* file path; "-" to use stdin */
+void bseq_load_conf(bseq_file_t *fp, bseq_conf_t const *conf)
 {
-	/* create instance */
-	bseq_file_t *fp = (bseq_file_t *)calloc(1, sizeof(bseq_file_t));
+	bseq_conf_t const def = { 0 };
+	bseq_conf_t const *c = conf == NULL ? &def : conf;
+	size_t const batch_size = c->batch_size == 0 ? BSEQ_BATCH_SIZE : c->batch_size;
+
+	/* copy flags */
 	*fp = (bseq_file_t){
-		.keep_qual    = conf->keep_qual,
-		.keep_comment = conf->keep_comment,
-		.head_margin  = _roundup(conf->head_margin, sizeof(bseq_batch_t))
+		.batch_size   = batch_size,
+		.keep_qual    = c->keep_qual,
+		.keep_comment = c->keep_comment,
+		.head_margin  = _roundup(c->head_margin, sizeof(bseq_batch_t))
 	};
 
+	/* build conversion table */
+	bseq_load_conv(fp->conv, c->conv_table);
+	return;
+}
+
+static _force_inline
+bseq_file_t *bseq_open(bseq_conf_t const *conf, char const *fn)	/* file path; "-" to use stdin */
+{
 	/* exclude trivial failure */
 	if(fn == NULL || fn[0] == '\0') {
 		error("empty file path `'.");
 		goto _bseq_open_fail;
 	}
 
+	/* create instance */
+	bseq_file_t *fp = (bseq_file_t *)calloc(1, sizeof(bseq_file_t));
+	bseq_load_conf(fp, conf);
+
 	/* open stream */
-	size_t const batch_size = conf->batch_size == 0 ? BSEQ_BATCH_SIZE : conf->batch_size;
-	if(rbopen_bulk_static(&fp->rb, fn, batch_size) != 0) {
+	if(rbopen_bulk_static(&fp->rb, fn, fp->batch_size) != 0) {
 		error("failed to open file `%s'.", fn);
 		goto _bseq_open_fail;
 	}
-
-	/* build conversion table */
-	bseq_load_conv(fp->conv, conf->conv_table);
 
 	/* init buffer; buffer size shoule be the same to the rb internal; fetch the first block */
 	bseq_buf_init(fp, batch_size);
