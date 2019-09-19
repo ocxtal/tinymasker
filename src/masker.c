@@ -20,16 +20,18 @@ unittest_config( .name = "masker" );
 
 
 #include "dozeu.h"
+#include "baln.h"
+#include "bseq.h"		/* FASTA/Q parser */
 #include "dbg.h"
 #include "index.h"		/* index wrapper */
 #include "align.h"
-#include "bseq.h"		/* FASTA/Q parser */
 
 
 /* forward declarations */
 #include "masker.h"
 
 
+#if 0
 /* printer */
 typedef struct {
 	struct {
@@ -215,6 +217,7 @@ void tm_print_aln(tm_print_t *self, tm_idx_sketch_t const **si, bseq_meta_t cons
 	printf("\n");
 	return;
 }
+#endif
 
 
 /* sanity checker for sequences read from file */
@@ -281,7 +284,7 @@ typedef struct {
 struct tm_mtscan_s {
 	tm_idx_t const *mi;
 	bseq_file_t *fp;
-	tm_print_t *printer;
+	// tm_print_t *printer;
 	pt_t *pt;
 
 	/* counters */
@@ -292,13 +295,13 @@ struct tm_mtscan_s {
 };
 
 // static _force_inline
-tm_mtscan_t *tm_mtscan_init(tm_idx_t const *mi, tm_print_t *printer, pt_t *pt)
+tm_mtscan_t *tm_mtscan_init(tm_idx_t const *mi/*, tm_print_t *printer*/, pt_t *pt)
 {
 	size_t const size = sizeof(tm_mtscan_t) + pt_nth(pt) * sizeof(tm_scan_t *);
 	tm_mtscan_t *self = malloc(size);
 	*self = (tm_mtscan_t){
 		.mi = mi,
-		.printer = printer,
+		// .printer = printer,
 		.pt = pt
 	};
 
@@ -364,7 +367,7 @@ void *tm_mtscan_worker(uint32_t tid, tm_mtscan_t *self, tm_mtscan_batch_t *batch
 			error("invalid character found in `%.*s'. skipped.", (int)bseq_name_len(seq), bseq_name(seq));
 			continue;
 		}
-		seq->u.ptr = tm_scan_all(scan, self->mi, bseq_seq(seq), bseq_seq_len(seq));
+		seq->u.ptr = tm_scan_all(scan, self->mi, bseq_name(seq), bseq_seq(seq), bseq_seq_len(seq));
 
 		/* print info */
 		debugblock({
@@ -379,20 +382,24 @@ void *tm_mtscan_worker(uint32_t tid, tm_mtscan_t *self, tm_mtscan_batch_t *batch
 static _force_inline
 void tm_mtscan_drain_core(tm_mtscan_t *self, tm_mtscan_batch_t *batch)
 {
-	bseq_meta_t const *meta = bseq_meta_ptr(&batch->seq_bin);					/* query */
-	tm_idx_sketch_t const **si = (tm_idx_sketch_t const **)self->mi->sketch.arr;		/* ref */
+	_unused(self);
 
+	bseq_meta_t const *meta = bseq_meta_ptr(&batch->seq_bin);					/* query */
 	for(size_t i = 0; i < bseq_meta_cnt(&batch->seq_bin); i++) {
 		bseq_meta_t const *seq = &meta[i];
-		tm_alnv_t const *v = seq->u.ptr;
+		baln_alnv_t const *v = seq->u.ptr;
 		debug("v(%p), cnt(%zu)", v, v != NULL ? v->cnt : 0);
 
 		if(v == NULL) { continue; }
 
+		baln_dump_alnv(v);
+
+		#if 0
 		for(size_t j = 0; j < v->cnt; j++) {
 			debug("idx(%zu)", j);
 			tm_print_aln(self->printer, si, seq, &v->arr[j]);
 		}
+		#endif
 	}
 
 	dz_arena_destroy(batch->mem);

@@ -13,6 +13,10 @@
 #include "utils/utils.h"		/* include all */
 
 
+/* memory management */
+#define BALN_BATCH_SIZE				( 2ULL * 1024 * 1024 )
+
+
 /* general alignment and alignment array */
 typedef struct {
 	size_t r, q;			/* we might need more bits because sequences can be longer */
@@ -69,11 +73,11 @@ typedef struct {
 #define baln_paf_ofs(_idx)		( 4 * (_idx) - 20 + ((_idx) < 4 ? 22 : 0) )
 
 _static_assert(offsetof(baln_aln_t, len.q)  == sizeof(uint32_t) * baln_paf_ofs(1));	/* 6 */
-_static_assert(offsetof(baln_aln_t, spos.q) == sizeof(uint32_t) * baln_paf_ofs(2));	/* 10 */
-_static_assert(offsetof(baln_aln_t, epos.q) == sizeof(uint32_t) * baln_paf_ofs(3));	/* 14 */
+_static_assert(offsetof(baln_aln_t, pos.q)  == sizeof(uint32_t) * baln_paf_ofs(2));	/* 10 */
+_static_assert(offsetof(baln_aln_t, span.q) == sizeof(uint32_t) * baln_paf_ofs(3));	/* 14 */
 _static_assert(offsetof(baln_aln_t, len.r)  == sizeof(uint32_t) * baln_paf_ofs(6));	/* 4 */
-_static_assert(offsetof(baln_aln_t, spos.r) == sizeof(uint32_t) * baln_paf_ofs(7));	/* 8 */
-_static_assert(offsetof(baln_aln_t, epos.r) == sizeof(uint32_t) * baln_paf_ofs(8));	/* 12 */
+_static_assert(offsetof(baln_aln_t, pos.r)  == sizeof(uint32_t) * baln_paf_ofs(7));	/* 8 */
+_static_assert(offsetof(baln_aln_t, span.r) == sizeof(uint32_t) * baln_paf_ofs(8));	/* 12 */
 
 
 /* internal context */
@@ -106,13 +110,15 @@ uint64_t baln_paf_parse_name(baln_aln_t *aln, size_t field, char const *str, siz
 	if((x + y) != 1 || slen == 0) { return(1); }
 
 	char const **dst = &aln->name.r;
-	dst[field == 0] = mm_bin_strdup(bin, str, slen);
+	dst[field == 0] = mm_bin_strdup(bin->bin, str, slen);
 	return(0);
 }
 
 static
 uint64_t baln_paf_parse_int(baln_aln_t *aln, size_t field, char const *str, size_t slen, baln_bin_t *bin)
 {
+	_unused(bin);
+
 	int64_t const n  = mm_atoi(str, slen);
 	size_t const ofs = baln_paf_ofs(field);
 
@@ -128,6 +134,9 @@ uint64_t baln_paf_parse_int(baln_aln_t *aln, size_t field, char const *str, size
 static
 uint64_t baln_paf_parse_dir(baln_aln_t *aln, size_t field, char const *str, size_t slen, baln_bin_t *bin)
 {
+	_unused(field);
+	_unused(bin);
+
 	/* either x or y is 1 (exclusive) */
 	uint64_t const x = str[0] == '-';
 	uint64_t const y = str[0] == '+';
@@ -184,12 +193,24 @@ baln_paf_parse_t baln_paf_parse_body(baln_aln_t *aln, char const *line, size_t l
 static
 uint64_t baln_paf_parse_score(baln_aln_t *aln, size_t field, char const *str, size_t slen, baln_bin_t *bin)
 {
+	_unused(aln);
+	_unused(field);
+	_unused(str);
+	_unused(slen);
+	_unused(bin);
+
 	return(0);
 }
 
 static
 uint64_t baln_paf_parse_cigar(baln_aln_t *aln, size_t field, char const *str, size_t slen, baln_bin_t *bin)
 {
+	_unused(aln);
+	_unused(field);
+	_unused(str);
+	_unused(slen);
+	_unused(bin);
+
 	return(0);
 }
 
@@ -200,7 +221,7 @@ baln_paf_parse_t baln_paf_parse_opt(baln_aln_t *aln, char const *line, size_t ll
 	#define HASH_SIZE			( 16 )
 	#define _key(_str)			( (uint16_t)((_str)[0]) | (((uint16_t)((_str)[1]))<<8) )
 	#define _hash(_k)			( (3 * (_k) + ((_k)>>8)) & (HASH_SIZE - 1) )
-	#define _elem(_str, _fp)	[_hash(_key(_str))] = { .key = _key(_str) .fp = (_fp) }
+	#define _elem(_str, _fp)	[_hash(_key(_str))] = { .key = _key(_str), .fp = (_fp) }
 
 	static struct { uint16_t key; baln_paf_callback_t fp; } const parser[] = {
 		_elem("AS", baln_paf_parse_score),
@@ -243,6 +264,22 @@ baln_paf_parse_t baln_paf_parse_opt(baln_aln_t *aln, char const *line, size_t ll
 }
 
 static _force_inline
+void baln_paf_fixup_pos(baln_aln_t *aln)
+{
+	v2i64_t const spos = _loadu_v2i64(&aln->pos);
+	v2i64_t const epos = _loadu_v2i64(&aln->span);
+	v2i64_t const ones = _set_v2i64(1);
+
+	/* inclusive -> exclusive end pos */
+	v2i64_t const x = _add_v2i64(epos, ones);
+
+	/* epos -> span */
+	v2i64_t const y = _sub_v2i64(x, spos);
+	_storeu_v2i64(&aln->span, y);
+	return;
+}
+
+static _force_inline
 uint64_t baln_paf_parse(baln_aln_t *aln, char const *line, size_t llen, baln_bin_t *bin)
 {
 	/* working buffer and context */
@@ -260,11 +297,12 @@ uint64_t baln_paf_parse(baln_aln_t *aln, char const *line, size_t llen, baln_bin
 	w = baln_paf_parse_opt(aln, w.ptr, w.len, bin);
 	if(w.ptr == NULL) { return(1); }
 	if(w.len != 0) {
-		error("unknown error on parsing PAF record `%.*s'.", line, llen);
+		error("unknown error on parsing PAF record `%.*s'.", (int)llen, line);
 		return(1);
 	}
 
 	/* done without error */
+	baln_paf_fixup_pos(aln);
 	return(0);
 }
 
@@ -276,9 +314,8 @@ uint64_t baln_paf_parse(baln_aln_t *aln, char const *line, size_t llen, baln_bin
 typedef void (*baln_free_t)(void *ptr);
 
 static
-void baln_free(void *ctx, void *ptr)
+void baln_free(void *ptr)
 {
-	_unused(ctx);
 	free(ptr);
 	return;
 }
@@ -294,6 +331,9 @@ typedef struct {
 	baln_aln_t arr[];
 } baln_alnv_t;
 
+#define baln_alnv_ptr(_x)		( (_x)->arr )
+#define baln_alnv_cnt(_x)		( (_x)->cnt )
+
 static _force_inline
 void baln_alnv_destroy(baln_alnv_t *alnv)
 {
@@ -301,7 +341,7 @@ void baln_alnv_destroy(baln_alnv_t *alnv)
 		alnv->free.bin(alnv->bin);
 	}
 
-	if(alnv->free == NULL) { return; }
+	if(alnv->free.body == NULL) { return; }
 	alnv->free.body(alnv);
 	return;
 }
@@ -324,7 +364,7 @@ void baln_builder_init(baln_builder_t *self)
 static _force_inline
 void baln_builder_push(baln_builder_t *self, baln_aln_t const *aln)
 {
-	kvm_push(self->buf, *aln);
+	kvm_push(baln_aln_t, self->buf, *aln);
 	return;
 }
 
@@ -355,9 +395,9 @@ typedef struct {
 static _force_inline
 void baln_cbin_init(baln_cbin_t *self)
 {
-	self->bin = mm_bin_init();
-	self->ptr = NULL;
-	self->len = 0;
+	self->bin       = mm_bin_init();
+	self->cache.ptr = NULL;
+	self->cache.len = 0;
 	return;
 }
 
@@ -404,8 +444,11 @@ typedef struct {
 } baln_conf_t;
 
 typedef struct {
-	size_t cnt;			/* paf record count */
-	uint64_t status;	/* nonzero if broken */
+	size_t parsed;	/* paf record count */
+	uint64_t status;
+
+	/* stream */
+	rb_readline_t line;
 	rbread_t rb;
 } baln_file_t;
 
@@ -413,6 +456,13 @@ typedef struct {
 	size_t cnt;
 	uint64_t status;
 } baln_close_t;
+
+static _force_inline
+uint64_t baln_fetch_line(baln_file_t *fp)
+{
+	fp->line = rbreadline_intl(&fp->rb);
+	return(fp->line.ptr != NULL);
+}
 
 static _force_inline
 baln_file_t *baln_open(baln_conf_t const *conf, char const *fn)
@@ -426,9 +476,15 @@ baln_file_t *baln_open(baln_conf_t const *conf, char const *fn)
 		error("failed to open file `%s'.", fn);
 		goto _baln_open_fail;
 	}
+
+	if(!baln_fetch_line(fp)) {
+		error("no valid record found in `%s'.", fn);
+		goto _baln_open_fail;
+	}
 	return(fp);
 
 _baln_open_fail:;
+	rbclose_static(&fp->rb);
 	free(fp);
 	return(NULL);
 }
@@ -439,7 +495,7 @@ baln_close_t baln_close(baln_file_t *fp)
 	baln_close_t c = { 0 };
 	if(fp == NULL) { return(c); }
 
-	c.cnt    = fp->cnt;
+	c.cnt    = fp->parsed;
 	c.status = fp->status;
 
 	rbclose_static(&fp->rb);
@@ -476,130 +532,154 @@ baln_alnv_t *baln_read(baln_file_t *fp)
 	baln_cbin_t bin;
 	baln_cbin_init(&bin);
 	baln_bin_t b = {
-		.bin    = &bin,
-		.strdup = baln_cbin_strdup
+		.bin    = (void *)&bin,
+		.strdup = (baln_bin_strdup_t)baln_cbin_strdup
 	};
 
 	/* init alignment bin */
 	baln_builder_t alnv;
 	baln_builder_init(&alnv);
 
-	rb_readline_t r = fp->prev;
-	while(r.ptr != NULL) {
-		if(baln_read_is_split(&bin, r.ptr, r.len)) { break; }
-
-		fp->cnt++;
+	while(fp->line.ptr != NULL) {
+		rb_readline_t const r = fp->line;
+		if(baln_read_is_split(&bin, (char const *)r.ptr, r.len)) { break; }
 
 		/* parse; using cached bin */
-		baln_aln_t w = { 0 };
-		if(baln_paf_parse(&w, r.ptr, r.len, &b)) {
-			error("at line %zu.", fp->cnt);
+		baln_aln_t w = { { 0 } };
+		if(baln_paf_parse(&w, (char const *)r.ptr, r.len, &b)) {
+			fp->status = 1;
+			error("at line %zu.", fp->parsed);
 			break;
 		}
 
 		/* push */
+		fp->parsed++;
 		baln_builder_push(&alnv, &w);
 
 		/* fetch next */
-		r = rbreadline(&fp->rb);
+		if(!baln_fetch_line(fp)) { break; }
 	}
 
 	return(baln_builder_finalize(&alnv,
 		(void *)baln_cbin_finalize(&bin),
-		(baln_free_t)mm_bin_free
+		(baln_free_t)mm_bin_destroy
 	));
 }
 
 
+#if 0
 static _force_inline
-tm_alnv_t *baln_paf_to_alnv(char const *str, size_t slen)
+size_t baln_dump_cigar_forward(uint8_t const *path, size_t len)
 {
-	/* delimiters */
-	static uint8_t const delim[16] __attribute__(( aligned(16) )) = {
-		'\v', '\r', '\n', '\0'		/* space and tab skipped */
-	};
+	debug("path(%p), len(%zu)", path, len);
 
-	/* init margined array */
-	baln_builder_t alnv;			/* alignment bin */
-	baln_builder_init(&alnv);
+	uint8_t const *p = path, *t = &path[len];
+	v16i8_t v = _set_v16i8(*p);
+	_print_v16i8(v);
 
-	mm_bin_t *bin = mm_bin_init();	/* string bin */
+	size_t acc = 0;
+	while(p < t) {
+		uint8_t const *q = p + 1;
+		while(q < t) {
+			v16i8_t const w = _loadu_v16i8(q);
+			v16i8_t const eq = _eq_v16i8(v, w);
+			_print_v16i8(w);
+			_print_v16i8(eq);
 
-	mm_split_foreach(str, slen, delim, {
-		baln_aln_t aln;				/* working buffer; cleared inside */
+			uint64_t const mask = ((v16_masku_t){ .mask = _mask_v16i8(eq) }).all;
+			ZCNT_RESULT size_t raw = _tzc_u64(~mask);
+			size_t const cnt = MIN2(raw, (size_t)(t - q));
+			debug("cnt(%zu)", cnt);
 
-		if(baln_paf_to_aln(&aln, p, l, bin)) {
-			error("at line %zu.", i);
-			break;
+			q += cnt;
+			if(cnt < 16) { break; }
 		}
-		baln_builder_push(&alnv, &aln);
-	});
+		acc += (size_t)printf("%zu%c", (size_t)(q - p), *p);
 
-	/* create header */
-	tm_alnv_t *alnv = kvm_base_ptr(arr);
-	alnv->size = kvm_cnt(arr);
-	return(alnv);
+		p = q;
+		v = _set_v16i8(*p);
+	}
+	return(acc);
+}
+#endif
+
+static _force_inline
+size_t baln_dump_cigar_reverse(uint8_t const *path, size_t len)
+{
+	debug("path(%p), len(%zu), %s", path, len, path);
+
+	uint8_t const *p = &path[len], *t = path;
+
+	size_t acc = 0;
+	while(p > t) {
+		uint8_t const *q = p;
+		uint8_t const ch = p[-1];
+		v16i8_t const v = _set_v16i8(ch);
+		// _print_v16i8(v);
+
+		while(q > t) {
+			v16i8_t const w = _loadu_v16i8(q - 16);
+			v16i8_t const eq = _eq_v16i8(v, w);
+			// _print_v16i8(w);
+			// _print_v16i8(eq);
+
+			uint64_t const mask = ((v16_masku_t){ .mask = _mask_v16i8(eq) }).all;
+			uint64_t const shifted = mask<<48;
+			ZCNT_RESULT size_t raw = _lzc_u64(~shifted);
+			size_t const cnt = MIN2(raw, (size_t)(q - t));
+			// debug("cnt(%zu)", cnt);
+
+			q -= cnt;
+			if(cnt < 16) { break; }
+		}
+
+		acc += (size_t)printf("%zu%c", (size_t)(p - q), ch);
+		p = q;
+	}
+	return(acc);
 }
 
 static _force_inline
-size_t baln_aln_to_paf(baln_aln_t const *aln)
+size_t baln_dump_aln(baln_aln_t const *a)
 {
-	return;
-}
-
-
-
-static _force_inline
-void tm_print_aln(tm_print_t *self, tm_idx_sketch_t const **si, bseq_meta_t const *query, baln_aln_t const *aln)
-{
-	/* load reference sequence object */
-	tm_idx_sketch_t const *ref = si[aln->attr.rid];
-
-	/* compose alignment coordinate object */
-	tm_print_seq_t const seq[2] = {
-		tm_print_compose_query(query, aln),			/* query side won't change except for alignment span */
-		tm_print_compose_ref(ref, aln)				/* reference side needs reloaded every time */
-	};
-
-	/* leftside and rightside; query comes first if flip == 0 */
-	size_t const flip = self->flip & 0x01;
-	tm_print_seq_t const *l = &seq[flip];
-	tm_print_seq_t const *r = &seq[flip ^ 0x01];
-	tm_aln_stat_t const stat = tm_aln_calc_stat(aln, flip);
+	size_t acc = 0;
 
 	/*
-	 * in PAF
+	 * PAF
 	 * qname, qlen, qstart (0-based), qend (0-based, inclusive), strand,
 	 * rname, rlen, rstart (0-based), rend (0-based, inclusive), #matches, block len, mapq
 	 *
 	 * we use size_t for (seq len, pos, span) for future compatibility.
 	 */
-	printf(
-		/* query */ "%.*s\t%zu\t%zu\t%zu\t"
+	acc += (size_t)printf(
+		/* query */ "%s\t%zu\t%zu\t%zu\t"
 		/* dir   */ "%c\t"
-		/* ref   */ "%.*s\t%zu\t%zu\t%zu\t"
-		/* stats */ "*\t%u\t255\tAS:i:%u\tXS:i:%u\tXI:f:%0.4f\tCG:Z:",	/* and cigar */
-		(int)l->name.len, l->name.ptr, l->seq.len, l->seq.spos, l->seq.epos,
-		aln->pos.dir ? '-' : '+',
-		(int)r->name.len, r->name.ptr, r->seq.len, r->seq.spos, r->seq.epos,
-		aln->span.r,
-		(uint32_t)aln->score.patched,		/* patched score */
-		(uint32_t)aln->score.raw,			/* raw score (with bonus) */
-		(double)stat.identity
+		/* ref   */ "%s\t%zu\t%zu\t%zu\t"
+		/* stats */ "*\t%zu\t255\tAS:i:%u\tXS:i:%u\tXI:f:%0.4f\tCG:Z:",	/* and cigar */
+		a->name.q, a->len.q, a->pos.q, a->pos.q + a->span.q - 1,
+		a->dir ? '+' : '-',
+		a->name.r, a->len.r, a->pos.r, a->pos.r + a->span.r - 1,
+		a->span.r,
+		(uint32_t)a->score.patched,		/* patched score */
+		(uint32_t)a->score.raw,			/* raw score (with bonus) */
+		(double)a->identity
 	);
-	tm_print_cigar_reverse(self, aln->path.ptr, aln->path.len);
-	printf("\n");
-	return;
+	acc += baln_dump_cigar_reverse(a->path.ptr, a->path.len);
+	acc += (size_t)printf("\n");
+	return(acc);
 }
 
-
-
-// static _force_inline
-uint64_t baln_paf_seq(bseq_seq_t *seq, baln_aln_t const **aln, size_t cnt)
+static _force_inline
+size_t baln_dump_alnv(baln_alnv_t const *alnv)
 {
-	/* we expect aln be sorted by qpos */
+	baln_aln_t const *p = baln_alnv_ptr(alnv);
+	size_t const cnt    = baln_alnv_cnt(alnv);
 
-	return(0);
+	size_t acc = 0;
+	for(size_t i = 0; i < cnt; i++) {
+		acc += baln_dump_aln(&p[i]);
+	}
+	return(acc);
 }
 
 #endif		/* _BALN_H_INCLUDED */

@@ -20,6 +20,7 @@ unittest_config( .name = "main" );
 
 
 #include "dozeu.h"
+#include "baln.h"
 #include "dbg.h"		/* de Bruijn hash */
 #include "index.h"		/* index wrapper */
 #include "align.h"
@@ -50,7 +51,7 @@ typedef struct {
 	/* scan-and-mask params */
 	char const *profile;
 	tm_idx_conf_t fallback;			/* tm_conf_t: tm_idx_conf_t */
-	tm_print_conf_t print;
+	// tm_print_conf_t print;
 
 	/* option parser */
 	FILE *log;
@@ -163,8 +164,9 @@ static int tm_conf_use_raw(tm_conf_t *conf, char const *arg) {
 	return(0);
 }
 static int tm_conf_flip(tm_conf_t *conf, char const *arg) {
+	_unused(conf);
 	_unused(arg);
-	conf->print.flip = 1;
+	// conf->print.flip = 1;
 	return(0);
 }
 
@@ -551,7 +553,7 @@ typedef struct {
 	size_t fcnt;				/* fetched count */
 
 	pt_t *pt;
-	tm_print_t *printer;
+	// tm_print_t *printer;
 
 	char const *ref;			/* reference filename */
 	char const *const *query;	/* query filename */
@@ -574,7 +576,7 @@ int main_scan_tbuf_destroy_static(main_scan_tbuf_t *w)
 }
 
 static _force_inline
-int main_scan_tbuf_init_static(main_scan_tbuf_t *w, tm_conf_t *conf, char const *const *parg, size_t pcnt, tm_print_t *printer, pt_t *pt)
+int main_scan_tbuf_init_static(main_scan_tbuf_t *w, tm_conf_t *conf, char const *const *parg, size_t pcnt/*, tm_print_t *printer*/, pt_t *pt)
 {
 	/* save args */
 	*w = (main_scan_tbuf_t){
@@ -582,7 +584,7 @@ int main_scan_tbuf_init_static(main_scan_tbuf_t *w, tm_conf_t *conf, char const 
 		.fcnt = 0,
 
 		.pt = pt,
-		.printer = printer,
+		// .printer = printer,
 
 		/* inputs */
 		.ref = parg[0],
@@ -668,7 +670,7 @@ int main_scan_foreach_idx(main_scan_tbuf_t *w)
 		}
 
 		/* instanciate multithreading context for this index chunk */
-		tm_mtscan_t *mt = tm_mtscan_init(mi, w->printer, w->pt);
+		tm_mtscan_t *mt = tm_mtscan_init(mi/*, w->printer*/, w->pt);
 		if(mt == NULL) {
 			return(main_scan_error(w->conf, ERROR_INTERNAL, NULL));
 		}
@@ -686,7 +688,7 @@ int main_scan_foreach_idx(main_scan_tbuf_t *w)
 
 /* for each index filename */
 static _force_inline
-int main_scan_intl(tm_conf_t *conf, tm_print_t *printer, pt_t *pt)
+int main_scan(tm_conf_t *conf/*, tm_print_t *printer*/, pt_t *pt)
 {
 	char const *const *parg = (char const *const *)opt_parg(&conf->opt);
 	size_t const pcnt = opt_parg_cnt(&conf->opt);
@@ -698,7 +700,7 @@ int main_scan_intl(tm_conf_t *conf, tm_print_t *printer, pt_t *pt)
 
 	/* instanciate thread-local working buffers */
 	main_scan_tbuf_t w;
-	int const init_error_code = main_scan_tbuf_init_static(&w, conf, parg, pcnt, printer, pt);
+	int const init_error_code = main_scan_tbuf_init_static(&w, conf, parg, pcnt/*, printer*/, pt);
 	if(init_error_code != 0) {
 		return(init_error_code);
 	}
@@ -716,20 +718,22 @@ int main_scan_intl(tm_conf_t *conf, tm_print_t *printer, pt_t *pt)
 	return(scan_error_code);
 }
 
+#if 0
 /* printer */
 static _force_inline
 int main_scan(tm_conf_t *conf, pt_t *pt)
 {
 	/* instanciate alignment formatter */
-	tm_print_t printer;
-	tm_print_init_static(&printer, &conf->print, conf->args);
+	// tm_print_t printer;
+	// tm_print_init_static(&printer, &conf->print, conf->args);
 
 	/* dispatch */
-	int const error_code = main_scan_intl(conf, &printer, pt);
+	int const error_code = main_scan_intl(conf/*, &printer*/, pt);
 
-	tm_print_destory_static(&printer);
+	// tm_print_destory_static(&printer);
 	return(error_code);
 }
+#endif
 
 /* create worker threads for indexing and mapping */
 static _force_inline

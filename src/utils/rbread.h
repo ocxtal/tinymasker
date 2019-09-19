@@ -436,6 +436,7 @@ void rbclose_static(rbread_t *rb)
 
 	/* transparent */
 	rb_ptr_destroy(rb);
+	memset(rb, 0, sizeof(rbread_t));
 	return;
 }
 static inline

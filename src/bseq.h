@@ -665,7 +665,7 @@ bseq_file_t *bseq_open(bseq_conf_t const *conf, char const *fn)	/* file path; "-
 	/* exclude trivial failure */
 	if(fn == NULL || fn[0] == '\0') {
 		error("empty file path `'.");
-		goto _bseq_open_fail;
+		return(NULL);
 	}
 
 	/* create instance */
@@ -679,7 +679,7 @@ bseq_file_t *bseq_open(bseq_conf_t const *conf, char const *fn)	/* file path; "-
 	}
 
 	/* init buffer; buffer size shoule be the same to the rb internal; fetch the first block */
-	bseq_buf_init(fp, batch_size);
+	bseq_buf_init(fp, fp->batch_size);
 	if(bseq_fetch_block(fp) == 0) {
 		fp->is_eof = 2;		/* empty file; we can't read any sequence but it is not an error on opening file */
 		return(fp);

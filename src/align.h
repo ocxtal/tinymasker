@@ -12,7 +12,7 @@
 #ifndef _DZ_H_INCLUDED
 #  error "#include \"dozeu.h\" must be before #include \"align.h\""
 #endif
-#ifndef __H_INCLUDED
+#ifndef _BALN_H_INCLUDED
 #  error "#include \"baln.h\" must be before #include \"align.h\""
 #endif
 #ifndef _INDEX_H_INCLUDED
@@ -29,7 +29,7 @@ void tm_scan_start_batch(tm_scan_t *self, dz_arena_t *mem);
 
 
 /* alignment calc */
-baln_alnv_t *tm_scan_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *seq, size_t slen);
+baln_alnv_t *tm_scan_all(tm_scan_t *self, tm_idx_t const *idx, char const *name, uint8_t const *seq, size_t slen);
 
 
 #if 0

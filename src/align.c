@@ -21,6 +21,7 @@ unittest_config( .name = "align" );
 
 /* others */
 #include "dozeu.h"
+#include "baln.h"
 #include "dbg.h"
 #include "index.h"
 
@@ -127,16 +128,10 @@ typedef struct {
 	/* scores */
 	tm_score_t score;
 
-	/* alignment path */
-	struct {
-		uint8_t const *ptr;
-		size_t len;
-	} path;
-
 	/* everything else in dz_alignment_t */
 	dz_alignment_t const *aln;
 } tm_aln_t;
-_static_assert(sizeof(tm_aln_t) == 64);
+_static_assert(sizeof(tm_aln_t) == 48);
 
 
 
@@ -307,7 +302,11 @@ char *tm_aln_to_str(tm_aln_t const *p)
 
 /* alignment utils */
 
-// static _force_inline
+typedef struct {
+	double identity;
+} tm_aln_stat_t;
+
+static _force_inline
 tm_aln_stat_t tm_aln_calc_stat(tm_aln_t const *aln, uint64_t flip)
 {
 	/* match / ref_length */
@@ -1580,7 +1579,7 @@ tm_aln_t tm_extend_compose_aln(tm_scan_t const *self, tm_chain_t const *chain, t
 
 	/* calc pos and span */
 	tm_pair_t const span = tm_aln_span(aln);
-	tm_pos_t const spos = tm_sub_pos(epos, span);		/* convert to head position */
+	tm_pos_t const spos  = tm_sub_pos(epos, span);		/* convert to head position */
 	// tm_pos_t const pos  = tm_canon_pos(spos, span);		/* spos.r < epos.r whichever direction is */
 
 	// xfprintf(stderr, "compose, chain(%p), %r, aln(%p), %r\n", chain, tm_chain_to_str, chain, aln, tm_pos_to_str, &spos);
@@ -1598,68 +1597,12 @@ tm_aln_t tm_extend_compose_aln(tm_scan_t const *self, tm_chain_t const *chain, t
 			.max_weight = chain->attr.sep.weight + TM_WEIGHT_MARGIN		/* x8 */
 		},
 
-		/* path and others */
-		.path = {
-			.ptr = aln->path,
-			.len = aln->path_length
-		},
-		.aln  = aln			/* save original */
+		/* save original */
+		.aln  = aln
 	};
 	return(a);
 }
 
-static _force_inline
-size_t tm_extend_finalize_pack(tm_aln_t *dst, tm_aln_t const *src)
-{
-	/* sort by qpos: traverse tree */
-	tm_aln_t const all = {
-		.pos  = { .q = 0 },
-		.span = { .q = INT32_MAX },
-		// .qmax = INT32_MAX
-	};
-
-	rbt_iter_t it;
-	rbt_init_iter_isct_aln(&it);
-
-	tm_aln_t *q = dst;
-	while(1) {
-		tm_aln_t const *p = rbt_fetch_isct_aln(&it, src, &all);
-		if(p == NULL) { break; }
-
-		debug("bid(%zu), %r", q - dst, tm_aln_to_str, p);
-		*q++ = *p;
-	}
-	size_t const saved = q - dst;
-	return(saved);
-}
-
-static _force_inline
-tm_alnv_t *tm_extend_finalize(tm_scan_t *self)
-{
-	/* results */
-	tm_aln_t const *src = kv_ptr(self->extend.arr);
-	size_t const cnt = kv_cnt(self->extend.arr) - 1;
-
-	/* allocate dst array */
-	tm_alnv_t *dst = dz_arena_malloc(self->extend.trace,
-		  sizeof(tm_alnv_t)			/* header */
-		+ sizeof(tm_aln_t) * cnt	/* payload */
-	);
-	debug("src(%p), cnt(%zu), dst(%p)", src, cnt, dst);
-
-	debugblock({
-		rbt_print_aln(src, cnt, tm_aln_to_str);
-		for(size_t i = 1; i < kv_cnt(self->extend.arr); i++) {
-			tm_aln_t const *p = &src[i];
-			debug("bid(%zu), %r", i, tm_aln_to_str, p);
-		}
-	});
-
-	/* pack; cnt returned */
-	dst->cnt = tm_extend_finalize_pack(dst->arr, src);
-	debug("cnt(%zu, %zu)", cnt, dst->cnt);
-	return(dst);
-}
 
 
 
@@ -2178,9 +2121,101 @@ size_t tm_extend_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *query,
 }
 
 
+
+
 /* evaluate all; query sequence must be encoded in 2bit at [3:2] and shorter than 2Gbp */
+static _force_inline
+void tm_scan_convert_aln(tm_idx_sketch_t const *si, char const *qname, size_t qlen, baln_aln_t *dst, tm_aln_t const *src)
+{
+	char const *rname = (char const *)tm_idx_ref_name_ptr(si);
+	size_t const rlen = tm_idx_ref_seq_len(si);
+
+	tm_pair_t const span = src->span;
+	tm_pos_t const spos = src->pos;
+	tm_pos_t const pos = tm_canon_pos(spos, span);
+	tm_aln_stat_t const stat = tm_aln_calc_stat(src, 0);
+
+	*dst = (baln_aln_t){
+		.name = { .r = rname,  .q = qname },
+		.len  = { .r = rlen,   .q = qlen },
+		.pos  = { .r = pos.r,  .q = pos.q },
+		.span = { .r = span.r, .q = span.q },
+
+		.dir  = pos.dir,
+		.identity = stat.identity,
+		.score = {
+			.raw     = src->score.raw,
+			.patched = src->score.patched
+		},
+		.path = {
+			.ptr = src->aln->path,
+			.len = src->aln->path_length
+		}
+	};
+	return;
+}
+
+static _force_inline
+size_t tm_scan_pack_aln(tm_idx_t const *idx, char const *qname, uint8_t const *query, size_t qlen, baln_aln_t *dst, tm_aln_t const *src)
+{
+	_unused(query);
+	tm_idx_sketch_t const **si = (tm_idx_sketch_t const **)idx->sketch.arr;
+
+	/* sort by qpos: traverse tree */
+	tm_aln_t const all = {
+		.pos  = { .q = 0 },
+		.span = { .q = INT32_MAX },
+		// .qmax = INT32_MAX
+	};
+
+	rbt_iter_t it;
+	rbt_init_iter_isct_aln(&it);
+
+	baln_aln_t *q = dst;
+	while(1) {
+		tm_aln_t const *p = rbt_fetch_isct_aln(&it, src, &all);
+		if(p == NULL) { break; }
+
+		debug("bid(%zu), %r", q - dst, tm_aln_to_str, p);
+		tm_scan_convert_aln(si[p->attr.rid], qname, qlen, q++, p);
+	}
+	size_t const saved = q - dst;
+	return(saved);
+}
+
+static _force_inline
+baln_alnv_t *tm_scan_finalize(tm_scan_t *self, tm_idx_t const *idx, char const *sname, uint8_t const *seq, size_t slen)
+{
+	/* results */
+	tm_aln_t const *src = kv_ptr(self->extend.arr);
+	size_t const cnt = kv_cnt(self->extend.arr) - 1;
+
+	/* allocate dst array */
+	baln_alnv_t *dst = dz_arena_malloc(self->extend.trace,
+		  sizeof(baln_alnv_t)		/* header */
+		+ sizeof(baln_aln_t) * cnt	/* payload */
+	);
+	debug("src(%p), cnt(%zu), dst(%p)", src, cnt, dst);
+
+	debugblock({
+		rbt_print_aln(src, cnt, tm_aln_to_str);
+		for(size_t i = 1; i < kv_cnt(self->extend.arr); i++) {
+			tm_aln_t const *p = &src[i];
+			debug("bid(%zu), %r", i, tm_aln_to_str, p);
+		}
+	});
+
+	/* pack; cnt returned */
+	dst->cnt = tm_scan_pack_aln(idx, sname, seq, slen, dst->arr, src);
+	dst->bin = NULL;
+	dst->free.body = NULL;
+	dst->free.bin  = NULL;
+	debug("cnt(%zu, %zu)", cnt, dst->cnt);
+	return(dst);
+}
+
 // static _force_inline
-tm_alnv_t *tm_scan_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *seq, size_t slen)
+baln_alnv_t *tm_scan_all(tm_scan_t *self, tm_idx_t const *idx, char const *sname, uint8_t const *seq, size_t slen)
 {
 	tm_scan_clear(self);
 
@@ -2200,7 +2235,7 @@ tm_alnv_t *tm_scan_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *seq,
 	}
 
 	/* copy alignment to dst buffer */
-	return(tm_extend_finalize(self));
+	return(tm_scan_finalize(self, idx, sname, seq, slen));
 }
 
 
