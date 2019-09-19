@@ -48,6 +48,11 @@ typedef struct {
 	/* index dump mode if not NULL */
 	char const *idxdump;
 
+	/* patch mode if not NULL */
+	char const *pafmask;
+
+	/* cluster mode? */
+
 	/* scan-and-mask params */
 	char const *profile;
 	tm_idx_conf_t fallback;			/* tm_conf_t: tm_idx_conf_t */
