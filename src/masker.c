@@ -371,8 +371,8 @@ void *tm_mtscan_worker(uint32_t tid, tm_mtscan_t *self, tm_mtscan_batch_t *batch
 
 		/* print info */
 		debugblock({
-			fprintf(stderr, "done, tid(%u), i(%zu), cnt(%zu)\n", tid, i, seq->u.ptr != NULL ? ((tm_alnv_t const *)seq->u.ptr)->cnt : 0);
-			tm_alnv_t const *v = seq->u.ptr;
+			fprintf(stderr, "done, tid(%u), i(%zu), cnt(%zu)\n", tid, i, seq->u.ptr != NULL ? ((baln_alnv_t const *)seq->u.ptr)->cnt : 0);
+			baln_alnv_t const *v = seq->u.ptr;
 			debug("v(%p), cnt(%zu)", v, v != NULL ? v->cnt : 0);
 		});
 	}
