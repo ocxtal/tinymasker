@@ -4,6 +4,10 @@
  * @brief SIMD-parallel FASTA/Q parser (<- minialign.c <- bseq.h in minimap but everything has changed)
  */
 
+#ifndef _BSEQ_H_INCLUDED
+#define _BSEQ_H_INCLUDED
+
+
 /* include all */
 #include "utils/utils.h"
 
@@ -1079,6 +1083,16 @@ void bseq_dump_destroy_buf(bseq_dump_t *self)
 }
 
 static _force_inline
+void bseq_dump_flush_buf(bseq_dump_t *self, size_t len)
+{
+	uint8_t const *p = self->buf.t - self->buf.size;
+
+	size_t sum = 0;
+	while((sum += fwrite(p + sum, 1, len - sum, stdout)) < len) {}
+	return;
+}
+
+static _force_inline
 uint8_t *bseq_dump_reserve_buf(bseq_dump_t *self, size_t len)
 {
 	if(_unlikely(self->buf.p + len > self->buf.t + BSEQ_MGN)) {
@@ -1086,8 +1100,7 @@ uint8_t *bseq_dump_reserve_buf(bseq_dump_t *self, size_t len)
 		uint8_t const dump_size = MIN2((size_t)(self->buf.p - p), self->buf.size);
 
 		/* until everything is dumped */
-		size_t sum = 0;
-		while((sum += fwrite(p + sum, 1, dump_size - sum, stdout)) < dump_size) {}
+		bseq_dump_flush_buf(self, dump_size);
 
 		/* copy remaining (if there is) and reset pointer */
 		_memcpy_blk_uu(p, p + dump_size, BSEQ_MGN);
@@ -1147,6 +1160,10 @@ uint64_t bseq_dump_init_static(bseq_dump_t *self, bseq_conf_t const *conf, bseq_
 static _force_inline
 void bseq_dump_destroy_static(bseq_dump_t *self)
 {
+	uint8_t const *p = self->buf.t - self->buf.size;
+	uint8_t const dump_size = self->buf.p - p;
+	bseq_dump_flush_buf(self, dump_size);
+
 	bseq_dump_destroy_buf(self);
 	return;
 }
@@ -1242,13 +1259,16 @@ size_t bseq_dump_header(bseq_dump_t *self, bseq_meta_t const *meta, uint8_t toke
 static _force_inline
 size_t bseq_dump_core_fast(bseq_dump_t *self, uint8_t const *seq, size_t slen)
 {
-	v32i8_t const conv = _loadu_v32i8(self->conv);
+	v32i8_t const conv = _from_v16i8_v32i8(_loadu_v16i8(self->conv));
 	uint8_t const *p = (uint8_t const *)seq, *t = p + slen;
 
+	debug("dump seq, p(%p), t(%p), slen(%zu)", p, t, slen);
 	while(p < t) {
 		/* allcoate buffer */
 		size_t const l = MIN2(t - p, 64);
 		uint8_t *q = bseq_dump_reserve_buf(self, l);
+
+		debug("l(%zu), q(%p)", l, q);
 
 		/* convert and save */
 		v32i8_t const v1 = _loadu_v32i8(p);
@@ -1292,12 +1312,15 @@ size_t bseq_dump_seq(bseq_dump_t *self, bseq_meta_t const *meta)
 
 	/* header */
 	bytes += bseq_dump_header(self, meta, token);
+	debug("bytes(%zu)", bytes);
 
 	/* body */
 	bytes += (self->fast ? bseq_dump_core_fast : bseq_dump_core_slow)(self,
 		bseq_seq(meta),
 		bseq_seq_len(meta)
 	);
+	bytes += bseq_dump_putchar(self, '\n');
+	debug("bytes(%zu)", bytes);
 	if(qual == 0) { return(bytes); }
 
 	/* qual */
@@ -1327,6 +1350,7 @@ size_t bseq_dump_batch(bseq_dump_t *self, bseq_batch_t const *batch)
 }
 
 
+#endif		/* _BSEQ_H_INCLUDED */
 /**
  * end of bseq.h
  */

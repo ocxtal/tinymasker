@@ -134,7 +134,7 @@ static void opt_parse_line(opt_t *o, void *opaque, char const *arg)
 	kvec_t(char) str = { 0 };
 	kvec_t(char const *) ptr = { 0 };
 	mm_split_foreach(arg, 0, " \t\r\n", {
-		kv_push(char const *, ptr, (char const *)kv_size(str));
+		kv_push(char const *, ptr, (char const *)kv_cnt(str));
 		kv_pushm(char, str, p, l);
 		kv_push(char, str, '\0');
 	});

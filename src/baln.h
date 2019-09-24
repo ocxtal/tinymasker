@@ -70,14 +70,14 @@ typedef struct {
 
 
 /* paf integer field index -> baln_aln_t field offset mapping */
-#define baln_paf_ofs(_idx)		( 4 * (_idx) - 20 + ((_idx) < 4 ? 22 : 0) )
+#define baln_paf_ofs(_idx)		( 2 * (_idx) - 10 + ((_idx) < 4 ? 11 : 0) )
 
-_static_assert(offsetof(baln_aln_t, len.q)  == sizeof(uint32_t) * baln_paf_ofs(1));	/* 6 */
-_static_assert(offsetof(baln_aln_t, pos.q)  == sizeof(uint32_t) * baln_paf_ofs(2));	/* 10 */
-_static_assert(offsetof(baln_aln_t, span.q) == sizeof(uint32_t) * baln_paf_ofs(3));	/* 14 */
-_static_assert(offsetof(baln_aln_t, len.r)  == sizeof(uint32_t) * baln_paf_ofs(6));	/* 4 */
-_static_assert(offsetof(baln_aln_t, pos.r)  == sizeof(uint32_t) * baln_paf_ofs(7));	/* 8 */
-_static_assert(offsetof(baln_aln_t, span.r) == sizeof(uint32_t) * baln_paf_ofs(8));	/* 12 */
+_static_assert(offsetof(baln_aln_t, len.q)  == sizeof(size_t) * baln_paf_ofs(1));	/* 3 */
+_static_assert(offsetof(baln_aln_t, pos.q)  == sizeof(size_t) * baln_paf_ofs(2));	/* 5 */
+_static_assert(offsetof(baln_aln_t, span.q) == sizeof(size_t) * baln_paf_ofs(3));	/* 7 */
+_static_assert(offsetof(baln_aln_t, len.r)  == sizeof(size_t) * baln_paf_ofs(6));	/* 2 */
+_static_assert(offsetof(baln_aln_t, pos.r)  == sizeof(size_t) * baln_paf_ofs(7));	/* 4 */
+_static_assert(offsetof(baln_aln_t, span.r) == sizeof(size_t) * baln_paf_ofs(8));	/* 6 */
 
 
 /* internal context */
@@ -105,12 +105,15 @@ uint64_t baln_paf_parse_nop(baln_aln_t *aln, size_t field, char const *str, size
 static
 uint64_t baln_paf_parse_name(baln_aln_t *aln, size_t field, char const *str, size_t slen, baln_bin_t *bin)
 {
+	debug("save str(%.*s)", (int)slen, str);
+
 	uint64_t const x = field == 0;
 	uint64_t const y = field == 5;
 	if((x + y) != 1 || slen == 0) { return(1); }
 
 	char const **dst = &aln->name.r;
-	dst[field == 0] = mm_bin_strdup(bin->bin, str, slen);
+	dst[field == 0] = bin->strdup(bin->bin, str, slen);
+	debug("name(%s)", dst[field == 0]);
 	return(0);
 }
 
@@ -118,6 +121,8 @@ static
 uint64_t baln_paf_parse_int(baln_aln_t *aln, size_t field, char const *str, size_t slen, baln_bin_t *bin)
 {
 	_unused(bin);
+
+	debug("parse str(%.*s) to int", (int)slen, str);
 
 	int64_t const n  = mm_atoi(str, slen);
 	size_t const ofs = baln_paf_ofs(field);
@@ -128,12 +133,15 @@ uint64_t baln_paf_parse_int(baln_aln_t *aln, size_t field, char const *str, size
 	/* from paf field index to baln_aln_t field */
 	size_t *dst = &((size_t *)aln)[ofs];
 	_storeu_u64(dst, n);
+	debug("int(%lu)", n);
 	return(0);
 }
 
 static
 uint64_t baln_paf_parse_dir(baln_aln_t *aln, size_t field, char const *str, size_t slen, baln_bin_t *bin)
 {
+	debug("parse str(%.*s) to dir", (int)slen, str);
+
 	_unused(field);
 	_unused(bin);
 
@@ -146,6 +154,7 @@ uint64_t baln_paf_parse_dir(baln_aln_t *aln, size_t field, char const *str, size
 
 	/* save dir */
 	aln->dir = x;
+	debug("dir(%lu)", x);
 	return(0);
 }
 
@@ -161,7 +170,7 @@ baln_paf_parse_t baln_paf_parse_body(baln_aln_t *aln, char const *line, size_t l
 		/* rname, rlen, rstart, rend */
 		baln_paf_parse_name, baln_paf_parse_int, baln_paf_parse_int, baln_paf_parse_int,
 		/* score and miscellaneous */
-		baln_paf_parse_nop, baln_paf_parse_int, baln_paf_parse_nop
+		baln_paf_parse_nop, baln_paf_parse_nop, baln_paf_parse_nop
 	};
 
 	/* delimiters */
@@ -193,6 +202,8 @@ baln_paf_parse_t baln_paf_parse_body(baln_aln_t *aln, char const *line, size_t l
 static
 uint64_t baln_paf_parse_score(baln_aln_t *aln, size_t field, char const *str, size_t slen, baln_bin_t *bin)
 {
+	debug("parse str(%.*s) to score", (int)slen, str);
+
 	_unused(aln);
 	_unused(field);
 	_unused(str);
@@ -205,6 +216,8 @@ uint64_t baln_paf_parse_score(baln_aln_t *aln, size_t field, char const *str, si
 static
 uint64_t baln_paf_parse_cigar(baln_aln_t *aln, size_t field, char const *str, size_t slen, baln_bin_t *bin)
 {
+	debug("parse str(%.*s) to cigar", (int)slen, str);
+
 	_unused(aln);
 	_unused(field);
 	_unused(str);
@@ -254,8 +267,8 @@ baln_paf_parse_t baln_paf_parse_opt(baln_aln_t *aln, char const *line, size_t ll
 
 	/* llen == 0 if everything is done */
 	return((baln_paf_parse_t){
-		.ptr = line,
-		.len = llen
+		.ptr = &line[llen],
+		.len = 0
 	});
 
 	#undef HASH_SIZE
@@ -266,6 +279,8 @@ baln_paf_parse_t baln_paf_parse_opt(baln_aln_t *aln, char const *line, size_t ll
 static _force_inline
 void baln_paf_fixup_pos(baln_aln_t *aln)
 {
+	debug("fixup, spos(%lu, %lu), epos(%lu, %lu)", aln->pos.q, aln->pos.r, aln->span.q, aln->span.r);
+
 	v2i64_t const spos = _loadu_v2i64(&aln->pos);
 	v2i64_t const epos = _loadu_v2i64(&aln->span);
 	v2i64_t const ones = _set_v2i64(1);
@@ -276,6 +291,8 @@ void baln_paf_fixup_pos(baln_aln_t *aln)
 	/* epos -> span */
 	v2i64_t const y = _sub_v2i64(x, spos);
 	_storeu_v2i64(&aln->span, y);
+
+	debug("fixup, spos(%lu, %lu), span(%lu, %lu)", aln->pos.q, aln->pos.r, aln->span.q, aln->span.r);
 	return;
 }
 
@@ -367,15 +384,22 @@ static _force_inline
 void baln_builder_push(baln_builder_t *self, baln_aln_t const *aln)
 {
 	kvm_push(baln_aln_t, self->buf, *aln);
+	// debug("cnt(%zu)", kvm_cnt(self->buf));
 	return;
 }
 
 static _force_inline
 baln_alnv_t *baln_builder_finalize(baln_builder_t *self, void *bin, baln_free_t bin_free)
 {
-	baln_alnv_t *alnv = kvm_base_ptr(self->buf);
+	size_t const cnt = kvm_cnt(self->buf);
+	// debug("cnt(%zu)", cnt);
+	if(cnt == 0) {
+		bin_free(bin);
+		return(NULL);
+	}
 
-	alnv->cnt = kvm_cnt(self->buf);
+	baln_alnv_t *alnv = kvm_base_ptr(self->buf);
+	alnv->cnt = cnt;
 	alnv->bin = bin;
 	alnv->free.body = baln_free;
 	alnv->free.bin  = bin_free;
@@ -420,12 +444,15 @@ void baln_cbin_update(baln_cbin_t *self, char const *str, size_t len)
 static _force_inline
 uint64_t baln_cbin_is_dup(baln_cbin_t *self, char const *str, size_t len)
 {
+	debug("str(%.*s), cache(%.*s)", (int)len, str, (int)self->cache.len, self->cache.ptr);
+
 	if(self->cache.len != len) {
 		return(0);
 	}
 	if(mm_strncmp(self->cache.ptr, str, MIN2(self->cache.len, len)) != 0) {
 		return(0);
 	}
+	debug("matched");
 	return(1);
 }
 
@@ -462,8 +489,12 @@ typedef struct {
 static _force_inline
 uint64_t baln_fetch_line(baln_file_t *fp)
 {
-	fp->line = rbreadline_intl(&fp->rb);
-	return(fp->line.ptr != NULL);
+	do {
+		fp->line = rbreadline_intl(&fp->rb);
+		if(fp->line.ptr == NULL) { return(0); }
+	} while(fp->line.len == 0);
+	debug("line fetched, ptr(%p), str(%s)", fp->line.ptr, fp->line.ptr);
+	return(1);
 }
 
 static _force_inline
@@ -506,7 +537,7 @@ baln_close_t baln_close(baln_file_t *fp)
 }
 
 static _force_inline
-uint64_t baln_read_is_split(baln_cbin_t *bin, char const *line, size_t llen)
+uint64_t baln_read_is_split(baln_cbin_t *cbin, char const *line, size_t llen)
 {
 	/* delimiters */
 	static uint8_t const delim[16] __attribute__(( aligned(16) )) = {
@@ -516,12 +547,14 @@ uint64_t baln_read_is_split(baln_cbin_t *bin, char const *line, size_t llen)
 	/* compare first name, split if the names are different */
 	mm_split_foreach(line, llen, delim, {
 		/* regarded as complete match for the first element */
-		if(bin->cache.ptr != NULL) {
-			return(baln_cbin_is_dup(bin, p, l));
+		if(cbin->cache.ptr != NULL) {
+			debug("test dup");
+			return(!baln_cbin_is_dup(cbin, p, l));
 		}
 
-		char const *qname = mm_bin_strdup(bin->bin, p, l);
-		baln_cbin_update(bin, qname, l);
+		debug("non dup");
+		char const *qname = mm_bin_strdup(cbin->bin, p, l);
+		baln_cbin_update(cbin, qname, l);
 		return(0);
 	});
 	return(0);
@@ -531,10 +564,10 @@ static _force_inline
 baln_alnv_t *baln_read(baln_file_t *fp)
 {
 	/* init string bin */
-	baln_cbin_t bin;
-	baln_cbin_init(&bin);
+	baln_cbin_t cbin;
+	baln_cbin_init(&cbin);
 	baln_bin_t b = {
-		.bin    = (void *)&bin,
+		.bin    = (void *)&cbin,
 		.strdup = (baln_bin_strdup_t)baln_cbin_strdup
 	};
 
@@ -544,7 +577,10 @@ baln_alnv_t *baln_read(baln_file_t *fp)
 
 	while(fp->line.ptr != NULL) {
 		rb_readline_t const r = fp->line;
-		if(baln_read_is_split(&bin, (char const *)r.ptr, r.len)) { break; }
+		if(baln_read_is_split(&cbin, (char const *)r.ptr, r.len)) {
+			debug("split detected at line(%zu)", fp->parsed);
+			break;
+		}
 
 		/* parse; using cached bin */
 		baln_aln_t w = { { 0 } };
@@ -557,13 +593,15 @@ baln_alnv_t *baln_read(baln_file_t *fp)
 		/* push */
 		fp->parsed++;
 		baln_builder_push(&alnv, &w);
+		debug("parsed, cnt(%zu)", fp->parsed);
 
 		/* fetch next */
 		if(!baln_fetch_line(fp)) { break; }
 	}
 
+	debug("done");
 	return(baln_builder_finalize(&alnv,
-		(void *)baln_cbin_finalize(&bin),
+		(void *)baln_cbin_finalize(&cbin),
 		(baln_free_t)mm_bin_destroy
 	));
 }

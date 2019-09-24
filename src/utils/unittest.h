@@ -88,7 +88,7 @@
 #define utkv_destroy(v)   { free((v).a); (v).a = NULL; }
 // #define utkv_A(v, i)      ( (v).a[(i)] )
 #define utkv_pop(v)       ( (v).a[--(v).n] )
-#define utkv_size(v)      ( (v).n )
+#define utkv_cnt(v)       ( (v).n )
 #define utkv_max(v)       ( (v).m )
 
 #define utkv_clear(v)		( (v).n = 0 )
@@ -1049,8 +1049,8 @@ int ut_toposort_by_tag(
 	utkvec_t(int8_t) mark;
 	utkv_init(mark);
 	for(size_t i = 0; i < test_cnt; i++) {
-		// printf("incoming edge count %zu : %zu\n", i, utkv_size(utkv_at(dag, i)));
-		utkv_push(mark, utkv_size(utkv_at(dag, i)));
+		// printf("incoming edge count %zu : %zu\n", i, utkv_cnt(utkv_at(dag, i)));
+		utkv_push(mark, utkv_cnt(utkv_at(dag, i)));
 	}
 
 	/* sort */
@@ -1083,7 +1083,7 @@ int ut_toposort_by_tag(
 		for(size_t j = 0; j < test_cnt; j++) {
 			if(node_id == j) { continue; }
 
-			for(size_t k = 0; k < utkv_size(utkv_at(dag, j)); k++) {
+			for(size_t k = 0; k < utkv_cnt(utkv_at(dag, j)); k++) {
 				if(utkv_at(utkv_at(dag, j), k) == node_id) {
 					// printf("the node %zu had edge from %zu\n", j, node_id);
 					utkv_at(utkv_at(dag, j), k) = -1;
@@ -1094,7 +1094,7 @@ int ut_toposort_by_tag(
 		}
 	}
 
-	if(utkv_size(res) != test_cnt) {
+	if(utkv_cnt(res) != test_cnt) {
 		fprintf(stderr,
 			ut_color(UT_RED, "ERROR") ": detected circular dependency in the tests in `" ut_color(UT_MAGENTA, "%s") "'.\n",
 			sorted_test[0].file);
@@ -1154,8 +1154,8 @@ int ut_toposort_by_group(
 	utkvec_t(int8_t) mark;
 	utkv_init(mark);
 	for(size_t i = 0; i < file_cnt; i++) {
-		// printf("incoming edge count %zu : %zu\n", i, utkv_size(utkv_at(dag, i)));
-		utkv_push(mark, utkv_size(utkv_at(dag, i)));
+		// printf("incoming edge count %zu : %zu\n", i, utkv_cnt(utkv_at(dag, i)));
+		utkv_push(mark, utkv_cnt(utkv_at(dag, i)));
 	}
 
 	/* sort */
@@ -1195,7 +1195,7 @@ int ut_toposort_by_group(
 		for(size_t j = 0; j < file_cnt; j++) {
 			if(file_id == j) { continue; }
 
-			for(size_t k = 0; k < utkv_size(utkv_at(dag, j)); k++) {
+			for(size_t k = 0; k < utkv_cnt(utkv_at(dag, j)); k++) {
 				if(utkv_at(utkv_at(dag, j), k) == file_id) {
 					// printf("the node %zu had edge from %zu\n", j, file_id);
 					utkv_at(utkv_at(dag, j), k) = -1;
@@ -1206,7 +1206,7 @@ int ut_toposort_by_group(
 		}
 	}
 
-	if(utkv_size(config_buf) != file_cnt) {
+	if(utkv_cnt(config_buf) != file_cnt) {
 		fprintf(stderr, ut_color(UT_RED, "ERROR") ": detected circular dependency between groups.\n");
 		return(-1);
 	}

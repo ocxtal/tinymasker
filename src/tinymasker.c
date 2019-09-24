@@ -404,9 +404,9 @@ void tm_conf_print_help(tm_conf_t const *conf, FILE *lfp)
 			"\n"
 			"  mask and patch:\n"
 			"    $ tinymasker -t4 index.tmi reads.fa > mask.paf\n"
-			"    $ tinymasker -t4 -f mask.paf reads.fa > patched_reads.fa\n"
+			"    $ tinymasker -t4 -F mask.paf reads.fa > patched_reads.fa\n"
 			"   -- or --\n"
-			"    $ tinymasker -t4 -f repeats.fa reads.fa > patched_reads.fa\n"
+			"    $ tinymasker -t4 -F repeats.fa reads.fa > patched_reads.fa\n"
 			"");
 	_msg(2, "General options:");
 	_msg(2, "  -t INT       number of threads [%zu]", conf->nth);
@@ -806,6 +806,8 @@ int main_patch(tm_conf_t *conf, pt_t *pt)
 
 
 /* create worker threads for indexing and mapping */
+typedef int (*tm_main_t)(tm_conf_t *conf, pt_t *pt);
+
 static _force_inline
 int main_dispatch(tm_conf_t *conf)
 {
@@ -815,7 +817,12 @@ int main_dispatch(tm_conf_t *conf)
 	}
 
 	/* dispatch either index or scan */
-	int const error_code = (conf->idxdump ? main_index : main_scan)(conf, pt);
+	tm_main_t const fp = (
+		conf->idxdump ? main_index :
+		conf->pafload ? main_patch :
+		                main_scan
+	);
+	int const error_code = fp(conf, pt);
 
 	/* done */
 	pt_destroy(pt);

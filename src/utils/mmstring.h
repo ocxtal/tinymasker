@@ -173,6 +173,7 @@ typedef struct {
 	size_t size, used;
 	char *ptr;
 } mm_bin_blk_t;
+
 typedef struct {
 	kvec_t(mm_bin_blk_t) blk;
 } mm_bin_t;
@@ -180,7 +181,7 @@ typedef struct {
 static _force_inline
 void mm_bin_init_static(mm_bin_t *bin)
 {
-	kv_clear(bin->blk);
+	kv_init(bin->blk);
 	return;
 }
 
@@ -214,7 +215,7 @@ void mm_bin_destroy(mm_bin_t *bin)
 static _force_inline
 mm_bin_blk_t *mm_bin_allocate(mm_bin_t *bin, size_t len)
 {
-	size_t const msize = kv_size(bin->blk);
+	size_t const msize = kv_cnt(bin->blk);
 	mm_bin_blk_t const *tail = kv_tail(bin->blk);
 
 	if(msize == 0 || tail->size - tail->used < len + 1) {

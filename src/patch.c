@@ -35,12 +35,16 @@ typedef struct {
 static _force_inline
 uint64_t tm_patch_sort_aln(baln_aln_t const *aln, size_t cnt)
 {
+	_unused(aln);
+	_unused(cnt);
 	return(0);
 }
 
 static _force_inline
 uint64_t tm_patch_merge_aln(baln_aln_t const *aln, size_t cnt)
 {
+	_unused(aln);
+	_unused(cnt);
 	return(0);
 }
 
@@ -48,6 +52,10 @@ uint64_t tm_patch_merge_aln(baln_aln_t const *aln, size_t cnt)
 // static _force_inline
 uint64_t tm_patch_seq(bseq_meta_t *seq, baln_aln_t const *aln, size_t cnt)
 {
+	_unused(seq);
+	_unused(aln);
+	_unused(cnt);
+
 	/* we expect aln be sorted by qpos */
 
 	return(0);
@@ -66,7 +74,7 @@ uint64_t tm_patch_tbuf_init_static(tm_patch_tbuf_t *w, tm_patch_conf_t const *co
 	w->len.margin = tm_patch_unwrap(conf->margin_len);
 
 	/* sequence I/O */
-	w->bseq.conf = {
+	w->bseq.conf = (bseq_conf_t){
 		.batch_size  = TM_BATCH_SIZE,
 		.head_margin = 0,
 		.conv_table  = {
@@ -83,7 +91,7 @@ uint64_t tm_patch_tbuf_init_static(tm_patch_tbuf_t *w, tm_patch_conf_t const *co
 		.batch_size = TM_BATCH_SIZE
 	};
 	w->fp = baln_open(&baln_conf, aln_file);
-	return(w->fp != NULL);
+	return(w->fp == NULL);
 }
 
 // static _force_inline
@@ -111,11 +119,15 @@ typedef struct {
 static _force_inline
 uint64_t tm_patch_fetch_init(tm_patch_fetch_t *self, bseq_conf_t const *conf, char const *filename)
 {
+	/* clear all */
+	memset(self, 0, sizeof(tm_patch_fetch_t));
+
 	/* open query sequence file */
 	self->fp = bseq_open(conf, filename);
 	if(self->fp == NULL) { return(1); }
 
 	/* fetch first bin */
+	self->idx   = 0;
 	self->batch = bseq_read(self->fp);
 	if(self->batch == NULL) {
 		bseq_close(self->fp);
@@ -143,6 +155,7 @@ bseq_meta_t *tm_patch_fetch_seq(tm_patch_fetch_t *self, char const *qname)
 		bseq_meta_t *seq = bseq_meta_ptr(self->batch);
 		size_t const scnt = bseq_meta_cnt(self->batch);
 
+		debug("seq(%p), cnt(%zu), idx(%zu)", seq, scnt, self->idx);
 		while(self->idx < scnt) {
 			bseq_meta_t *s = &seq[self->idx];
 
@@ -150,7 +163,9 @@ bseq_meta_t *tm_patch_fetch_seq(tm_patch_fetch_t *self, char const *qname)
 			self->idx++;
 
 			/* if names match, return it */
+			debug("name(%s, %s)", bseq_name(s), qname);
 			if(mm_strcmp(bseq_name(s), qname) == 0) {
+				debug("found");
 				return(s);
 			}
 		}
@@ -158,6 +173,7 @@ bseq_meta_t *tm_patch_fetch_seq(tm_patch_fetch_t *self, char const *qname)
 		/* not found in this batch, try next */
 		bseq_free(self->batch);
 	} while((self->batch = bseq_read(self->fp)) != NULL);
+	debug("not found");
 
 	/* not found */
 	return(NULL);
@@ -169,7 +185,7 @@ uint64_t tm_patch_file(tm_patch_tbuf_t *w, char const *seq_file, pt_t *pt)
 	_unused(pt);
 
 	tm_patch_fetch_t fetch;
-	if(tm_patch_fetch_init(&fetch, w->bseq.conf, seq_file)) {
+	if(tm_patch_fetch_init(&fetch, &w->bseq.conf, seq_file)) {
 		return(1);
 	}
 
@@ -179,8 +195,12 @@ uint64_t tm_patch_file(tm_patch_tbuf_t *w, char const *seq_file, pt_t *pt)
 		baln_aln_t const *aln = baln_alnv_ptr(v);
 		size_t const acnt = baln_alnv_cnt(v);
 
+		for(size_t i = 0; i < acnt; i++) {
+			baln_dump_aln(&aln[i]);
+		}
+
 		/* get corresponding sequence for the alignment batch */
-		bseq_meta_t *seq = tm_patch_fetch_seq(&batch, fp, aln[0].name.q);
+		bseq_meta_t *seq = tm_patch_fetch_seq(&fetch, aln[0].name.q);
 		if(seq == NULL) { goto _tm_patch_file_error; }
 
 		/* patch and dump */
@@ -197,6 +217,7 @@ _tm_patch_file_error:;
 	/* done */
 	baln_alnv_destroy(v);
 	tm_patch_fetch_destroy(&fetch);
+	// fprintf(stderr, "error(%lu)\n", error);
 	return(error);
 }
 

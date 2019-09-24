@@ -38,7 +38,7 @@ typedef struct {
 		bseq_conf_t conf;
 	} bseq;
 
-	rbread_t *fp;
+	baln_file_t *fp;
 } tm_patch_tbuf_t;
 
 uint64_t tm_patch_tbuf_init_static(tm_patch_tbuf_t *w, tm_patch_conf_t const *conf, char const *aln_file);
