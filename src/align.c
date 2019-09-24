@@ -1726,9 +1726,11 @@ dz_trace_match_t tm_extend_get_match(int8_t const *score_matrix, dz_query_t cons
 {
 	uint8_t const *packed = dz_query_packed_array(query);
 	int8_t const score = score_matrix[ch * DZ_QUERY_MAT_SIZE / 2 + packed[qidx]];
+
+	// debug("rch(%x), qidx(%zx), c(%x, %x), match(%x)", ch, qidx, packed[qidx], tm_2bit_to_qch(packed[qidx]), tm_qrch_is_match(tm_2bit_to_qch(packed[qidx]), ch & 0x1e));
 	return((dz_trace_match_t){
 		.score = score,
-		.match = tm_qrch_is_match(tm_2bit_to_qch(packed[qidx]), ch)
+		.match = tm_qrch_is_match(tm_2bit_to_qch(packed[qidx]), ch & 0x1e)
 	});
 }
 
