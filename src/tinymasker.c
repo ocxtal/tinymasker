@@ -37,7 +37,8 @@ enum main_error_codes {
 	ERROR_LOAD_IDX = 3,
 
 	ERROR_OPEN_RSEQ = 4,
-	ERROR_OPEN_QSEQ = 5
+	ERROR_OPEN_QSEQ = 5,
+	ERROR_OPEN_PAF  = 6
 };
 
 typedef struct {
@@ -779,38 +780,26 @@ int main_patch_error(tm_conf_t const *conf, int error_code, char const *filename
 }
 
 static _force_inline
-int main_patch_intl(tm_conf_t *conf, rbread_t *fp, pt_t *pt)
-{
-	tm_patch_tbuf_t w;
-	tm_patch_tbuf_init_static(&w, conf->patch, fp);
-
-	kv_foreach(void *, opt_pargv(&conf->opt)) ({
-		if(tm_patch_file(&w, *p, pt) != 0) {
-			return(main_patch_error(conf, ERROR_OPEN_QSEQ, *p));
-		}
-	});
-
-	tm_patch_tbuf_destroy_static(&w);
-	return(0);
-}
-
-static _force_inline
 int main_patch(tm_conf_t *conf, pt_t *pt)
 {
 	if(opt_parg_cnt(&conf->opt) == 0) {
 		return(main_patch_error(conf, ERROR_NO_ARG, NULL));
 	}
 
-	/* open file in read-binary mode; (because it might be compressed) */
-	rbread_t *fp = rbopen(conf->pafload);
-	if(fp == NULL) {
+	/* initialize buffer; we expect all the alignments are packed in this file */
+	tm_patch_tbuf_t w;
+	if(tm_patch_tbuf_init_static(&w, &conf->patch, conf->pafload)) {
 		return(main_patch_error(conf, ERROR_OPEN_PAF, conf->pafload));
 	}
 
-	int error_code = main_patch_intl(conf, fp, pt);
-	rbclose(fp);
-	if(error_code) { return(error_code); }
+	/* for each query sequence file */
+	kv_foreach(void *, opt_pargv(&conf->opt), ({
+		if(tm_patch_file(&w, *p, pt) != 0) {
+			return(main_patch_error(conf, ERROR_OPEN_QSEQ, *p));
+		}
+	}));
 
+	tm_patch_tbuf_destroy_static(&w);
 	message(conf->log, "done.");
 	return(0);
 }

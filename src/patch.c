@@ -46,7 +46,7 @@ uint64_t tm_patch_merge_aln(baln_aln_t const *aln, size_t cnt)
 
 /* we need working buffer for this function?? */
 // static _force_inline
-uint64_t tm_patch_seq(bseq_seq_t *seq, baln_aln_t const *aln, size_t cnt)
+uint64_t tm_patch_seq(bseq_meta_t *seq, baln_aln_t const *aln, size_t cnt)
 {
 	/* we expect aln be sorted by qpos */
 
@@ -56,29 +56,14 @@ uint64_t tm_patch_seq(bseq_seq_t *seq, baln_aln_t const *aln, size_t cnt)
 
 
 
-/* working buffer */
-typedef struct {
-	struct {
-		size_t gap;
-		size_t margin;
-	} len;
-
-	struct {
-		bseq_dump_t dump;
-		bseq_conf_t conf;
-	} bseq;
-
-	rbread_t *fp;
-} tm_patch_tbuf_t;
-
 // static _force_inline
 uint64_t tm_patch_tbuf_init_static(tm_patch_tbuf_t *w, tm_patch_conf_t const *conf, char const *aln_file)
 {
 	memset(w, 0, sizeof(tm_patch_tbuf_t));
 
 	/* constants */
-	w->len.gap    = conf->max_gap_len;
-	w->len.margin = conf->margin_len;
+	w->len.gap    = tm_patch_unwrap(conf->max_gap_len);
+	w->len.margin = tm_patch_unwrap(conf->margin_len);
 
 	/* sequence I/O */
 	w->bseq.conf = {
