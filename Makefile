@@ -59,7 +59,6 @@ debug: $(SRCS_INTL)
 	$(CC) -o $(TARGET).t $(OFLAGS) $(CFLAGS) $(SRCS_INTL) -ltcmalloc $(LDFLAGS)
 
 clean:
-	echo $(LTOFLAGS)
 	$(RM) -f $(TARGET) $(TARGET).g $(TARGET).d $(TARGET).s $(TARGET).t $(OBJS_INTL)
 
 install:
