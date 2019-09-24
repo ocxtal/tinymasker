@@ -337,6 +337,8 @@ typedef struct {
 static _force_inline
 void baln_alnv_destroy(baln_alnv_t *alnv)
 {
+	if(alnv == NULL) { return; }
+
 	if(alnv->free.bin != NULL) {
 		alnv->free.bin(alnv->bin);
 	}

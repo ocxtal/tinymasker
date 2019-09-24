@@ -25,6 +25,7 @@ unittest_config( .name = "main" );
 #include "index.h"		/* index wrapper */
 #include "align.h"
 #include "masker.h"
+#include "patch.h"
 
 
 /* return codes */
@@ -49,9 +50,8 @@ typedef struct {
 	char const *idxdump;
 
 	/* patch mode if not NULL */
-	char const *pafmask;
-
-	/* cluster mode? */
+	char const *pafload;
+	tm_patch_conf_t patch;
 
 	/* scan-and-mask params */
 	char const *profile;
@@ -168,10 +168,29 @@ static int tm_conf_use_raw(tm_conf_t *conf, char const *arg) {
 	conf->fallback.use_raw_score = tm_idx_wrap(1);
 	return(0);
 }
+/*
 static int tm_conf_flip(tm_conf_t *conf, char const *arg) {
 	_unused(conf);
 	_unused(arg);
 	// conf->print.flip = 1;
+	return(0);
+}
+*/
+
+
+/* patch */
+static int tm_conf_pafload(tm_conf_t *conf, char const *arg) {
+	conf->pafload = mm_strdup(arg);
+	return(0);
+}
+
+static int tm_conf_patch_gap(tm_conf_t *conf, char const *arg) {
+	conf->patch.max_gap_len = tm_patch_wrap(mm_atoi(arg, 0));
+	return(0);
+}
+
+static int tm_conf_patch_margin(tm_conf_t *conf, char const *arg) {
+	conf->patch.margin_len = tm_patch_wrap(mm_atoi(arg, 0));
 	return(0);
 }
 
@@ -281,7 +300,7 @@ uint64_t tm_conf_init_static(tm_conf_t *conf, char const *const *argv, FILE *fp)
 			['t'] = { OPT_REQ,  _c(tm_conf_threads) },
 
 			/* mapping and output */
-			['F'] = { OPT_BOOL, _c(tm_conf_flip) },
+			// ['F'] = { OPT_BOOL, _c(tm_conf_flip) },
 
 			/* preset and configuration file */
 			['d'] = { OPT_REQ,  _c(tm_conf_idxdump) },
@@ -301,7 +320,12 @@ uint64_t tm_conf_init_static(tm_conf_t *conf, char const *const *argv, FILE *fp)
 			['m'] = { OPT_REQ,  _c(tm_conf_min_score) },
 			['R'] = { OPT_BOOL, _c(tm_conf_use_raw) },
 			['g'] = { OPT_REQ,  _c(tm_conf_max_gap) },
-			['l'] = { OPT_REQ,  _c(tm_conf_anc_bonus) }
+			['l'] = { OPT_REQ,  _c(tm_conf_anc_bonus) },
+
+			/* patch */
+			['F'] = { OPT_REQ,  _c(tm_conf_pafload) },
+			['G'] = { OPT_REQ,  _c(tm_conf_patch_gap) },
+			['M'] = { OPT_REQ,  _c(tm_conf_patch_margin) }
 		}
 		#undef _c
 	};
@@ -387,19 +411,11 @@ void tm_conf_print_help(tm_conf_t const *conf, FILE *lfp)
 	_msg(2, "  -t INT       number of threads [%zu]", conf->nth);
 	_msg(2, "  -v [INT]     show version number or set verbose level (when number passed)");
 	_msg(2, "");
-	_msg(3, "Mapping and output options:");
-	_msg(3, "  -F           flip reference and query in output PAF");
-	_msg(3, "");
 	_msg(2, "Indexing options:");
 	_msg(2, "  -d FILE      dump index to FILE (index construction mode)");
 	_msg(3, "  -x STR       load preset params for a specific setting []");
 	_msg(3, "  -z STR       custom profile configuration (in TOML format) []");
 	_msg(3, "  -L           ignore index construction failure (loose mode)");
-	_msg(2, "");
-	_msg(2, "Patching options:");
-	_msg(2, "  -f FILE      load alignments for patching; PAF, FASTA, or tmi index");
-	_msg(3, "  -G INT       connect gaps less than this length []");
-	_msg(3, "  -M INT       margin around masked regions []");
 	_msg(2, "");
 	_msg(2, "Indexing and mapping fallbacks:");
 	_msg(2, "  NOTE: ignored for prebuilt indices; only applicable when index is built");
@@ -415,6 +431,11 @@ void tm_conf_print_help(tm_conf_t const *conf, FILE *lfp)
 	_msg(2, "  -R           use raw score instead of complexity adjusted score [%s]", profile->extend.use_raw ? "yes" : "no");
 	_msg(3, "  -g INT       max gap length allowed (X-drop threshold) [%u]", profile->extend.vlim);
 	_msg(3, "  -l INT       full-length bonus per end [%u]", profile->extend.bonus);
+	_msg(2, "");
+	_msg(2, "Patching options:");
+	_msg(2, "  -F FILE      load alignments for patching; PAF, FASTA, or tmi index");
+	_msg(3, "  -G INT       connect gaps less than this length []");
+	_msg(3, "  -M INT       margin around masked regions []");
 	_msg(2, "");
 
 	if(_level(conf) <= 2) {
@@ -447,7 +468,7 @@ uint64_t tm_conf_is_overridden(tm_conf_t *conf)
 /* index construction */
 
 static _force_inline
-int main_index_error(tm_conf_t *conf, int error_code, char const *filename)
+int main_index_error(tm_conf_t const *conf, int error_code, char const *filename)
 {
 	_unused(conf);
 	switch(error_code) {
@@ -464,10 +485,6 @@ int main_index_error(tm_conf_t *conf, int error_code, char const *filename)
 static _force_inline
 int main_index_intl(tm_conf_t *conf, pg_t *pg, pt_t *pt)
 {
-	if(opt_parg_cnt(&conf->opt) == 0) {
-		return(main_index_error(conf, ERROR_NO_ARG, NULL));
-	}
-
 	/* iterate over index blocks */
 	kv_foreach(void *, opt_pargv(&conf->opt), ({
 		debug("p(%s)", *p);
@@ -495,6 +512,10 @@ int main_index_intl(tm_conf_t *conf, pg_t *pg, pt_t *pt)
 static _force_inline
 int main_index(tm_conf_t *conf, pt_t *pt)
 {
+	if(opt_parg_cnt(&conf->opt) == 0) {
+		return(main_index_error(conf, ERROR_NO_ARG, NULL));
+	}
+
 	/* add suffix if missing and if not /dev/xxx */
 	if(!mm_startswith(conf->idxdump, "/dev") && !mm_endswith(conf->idxdump, ".tmi")) {
 		message(conf->log, "index filename does not end with `.tmi' (added).");
@@ -528,7 +549,7 @@ int main_index(tm_conf_t *conf, pt_t *pt)
 /* scan-and-mask */
 
 static _force_inline
-int main_scan_error(tm_conf_t *conf, int error_code, char const *file)
+int main_scan_error(tm_conf_t const *conf, int error_code, char const *file)
 {
 	_unused(conf);
 	switch(error_code) {
@@ -739,6 +760,61 @@ int main_scan(tm_conf_t *conf, pt_t *pt)
 	return(error_code);
 }
 #endif
+
+
+/* patch */
+static _force_inline
+int main_patch_error(tm_conf_t const *conf, int error_code, char const *filename)
+{
+	_unused(conf);
+	switch(error_code) {
+	/* argument missing */
+	case ERROR_NO_ARG: error("argument is not enough. at least one reference file is required."); break;
+
+	/* opening files */
+	case ERROR_OPEN_PAF: error("failed to open alignment file `%s'. Please check file path and its format.", filename); break;
+	case ERROR_OPEN_QSEQ: error("failed to open sequence file `%s'. Please check file path and format.", filename); break;
+	}
+	return(error_code);
+}
+
+static _force_inline
+int main_patch_intl(tm_conf_t *conf, rbread_t *fp, pt_t *pt)
+{
+	tm_patch_tbuf_t w;
+	tm_patch_tbuf_init_static(&w, conf->patch, fp);
+
+	kv_foreach(void *, opt_pargv(&conf->opt)) ({
+		if(tm_patch_file(&w, *p, pt) != 0) {
+			return(main_patch_error(conf, ERROR_OPEN_QSEQ, *p));
+		}
+	});
+
+	tm_patch_tbuf_destroy_static(&w);
+	return(0);
+}
+
+static _force_inline
+int main_patch(tm_conf_t *conf, pt_t *pt)
+{
+	if(opt_parg_cnt(&conf->opt) == 0) {
+		return(main_patch_error(conf, ERROR_NO_ARG, NULL));
+	}
+
+	/* open file in read-binary mode; (because it might be compressed) */
+	rbread_t *fp = rbopen(conf->pafload);
+	if(fp == NULL) {
+		return(main_patch_error(conf, ERROR_OPEN_PAF, conf->pafload));
+	}
+
+	int error_code = main_patch_intl(conf, fp, pt);
+	rbclose(fp);
+	if(error_code) { return(error_code); }
+
+	message(conf->log, "done.");
+	return(0);
+}
+
 
 /* create worker threads for indexing and mapping */
 static _force_inline
