@@ -659,7 +659,7 @@ size_t baln_dump_aln(baln_aln_t const *a)
 		/* ref   */ "%s\t%zu\t%zu\t%zu\t"
 		/* stats */ "*\t%zu\t255\tAS:i:%u\tXS:i:%u\tXI:f:%0.4f\tCG:Z:",	/* and cigar */
 		a->name.q, a->len.q, a->pos.q, a->pos.q + a->span.q - 1,
-		a->dir ? '+' : '-',
+		a->dir ? '-' : '+',
 		a->name.r, a->len.r, a->pos.r, a->pos.r + a->span.r - 1,
 		a->span.r,
 		(uint32_t)a->score.patched,		/* patched score */
