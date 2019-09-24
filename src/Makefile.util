@@ -5,8 +5,8 @@
 ZLIB_CFLAGS   = $(shell bash -c "((printf '\#include <zlib.h>\n' | $(CC) -E - -H -o /dev/null 2>&1 | head -n1 | grep 'error' > /dev/null) && echo '-DRB_DONTUSE_ZLIB') || echo '-DRB_USE_ZLIB'")
 ZLIB_LDFLAGS  = $(shell bash -c " (printf '\#include <zlib.h>\n' | $(CC) -E - -H -o /dev/null 2>&1 | head -n1 | grep 'error' > /dev/null) || echo '-lz'")
 
-BZLIB_CFLAGS  = $(shell bash -c "((printf '\#include <bzlib.h\n>' | $(CC) -E - -H -o /dev/null 2>&1 | head -n1 | grep 'error' > /dev/null) && echo '-DRB_DONTUSE_BZLIB') || echo '-DRB_USE_BZLIB'")
-BZLIB_LDFLAGS = $(shell bash -c " (printf '\#include <bzlib.h\n>' | $(CC) -E - -H -o /dev/null 2>&1 | head -n1 | grep 'error' > /dev/null) || echo '-lbz2'")
+BZLIB_CFLAGS  = $(shell bash -c "((printf '\#include <bzlib.h>\n' | $(CC) -E - -H -o /dev/null 2>&1 | head -n1 | grep 'error' > /dev/null) && echo '-DRB_DONTUSE_BZLIB') || echo '-DRB_USE_BZLIB'")
+BZLIB_LDFLAGS = $(shell bash -c " (printf '\#include <bzlib.h>\n' | $(CC) -E - -H -o /dev/null 2>&1 | head -n1 | grep 'error' > /dev/null) || echo '-lbz2'")
 
 LZMA_CFLAGS   = $(shell bash -c "((printf '\#include <lzma.h>\n' | $(CC) -E - -H -o /dev/null 2>&1 | head -n1 | grep 'error' > /dev/null) && echo '-DRB_DONTUSE_LZMA') || echo '-DRB_USE_LZMA'")
 LZMA_LDFLAGS  = $(shell bash -c " (printf '\#include <lzma.h>\n' | $(CC) -E - -H -o /dev/null 2>&1 | head -n1 | grep 'error' > /dev/null) || echo '-llzma'")
