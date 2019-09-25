@@ -1651,69 +1651,69 @@ dz_static_assert(sizeof(dz_link_t) == 8);
 
 
 static __dz_vectorize
-void dz_link_init_root(dz_link_t *link)
+void dz_link_init_root(dz_link_t *lk)
 {
 	/*
-	 * link->rch = DZ_HEAD_RCH | DZ_ROOT_RCH;
-	 * link->adj = 0;
-	 * link->idx = 0;	// no incoming vector for the root
+	 * lk->rch = DZ_HEAD_RCH | DZ_ROOT_RCH;
+	 * lk->adj = 0;
+	 * lk->idx = 0;	// no incoming vector for the root
 	 */
 
-	dz_storeu_u64(link, DZ_HEAD_RCH | DZ_ROOT_RCH);
+	dz_storeu_u64(lk, DZ_HEAD_RCH | DZ_ROOT_RCH);
 	return;
 }
 
 static __dz_vectorize
-void dz_link_init_intl(dz_link_t *link)
+void dz_link_init_intl(dz_link_t *lk)
 {
 	/*
 	 * // still regarded as head
-	 * link->rch = DZ_HEAD_RCH | 0x01;		// to make the value different from head
-	 * link->adj = 0;
-	 * link->idx = 1;		// #incoming vectors == 1
+	 * lk->rch = DZ_HEAD_RCH | 0x01;		// to make the value different from head
+	 * lk->adj = 0;
+	 * lk->idx = 1;		// #incoming vectors == 1
 	 */
 
-	dz_storeu_u64(link, DZ_HEAD_RCH | 0x01 | (0x01ULL<<32));
+	dz_storeu_u64(lk, DZ_HEAD_RCH | 0x01 | (0x01ULL<<32));
 	return;
 }
 
 static __dz_vectorize
-void dz_link_init_head(dz_link_t *link, size_t fcnt)
+void dz_link_init_head(dz_link_t *lk, size_t fcnt)
 {
 	/*
-	 * link->rch = DZ_HEAD_RCH;
-	 * link->adj = 0;
-	 * link->idx = fcnt;	// save incoming vector count
+	 * lk->rch = DZ_HEAD_RCH;
+	 * lk->adj = 0;
+	 * lk->idx = fcnt;	// save incoming vector count
 	 */
 
-	dz_storeu_u64(link, DZ_HEAD_RCH | ((uint64_t)fcnt<<32));
+	dz_storeu_u64(lk, DZ_HEAD_RCH | ((uint64_t)fcnt<<32));
 	return;
 }
 
 static __dz_vectorize
-size_t dz_link_fcnt(dz_link_t const *link)
+size_t dz_link_fcnt(dz_link_t const *lk)
 {
-	return(link->idx);
+	return(lk->idx);
 }
 
 static __dz_vectorize
-uint64_t dz_link_is_root(dz_link_t const *link)
+uint64_t dz_link_is_root(dz_link_t const *lk)
 {
 	/* test for root tail */
-	return((link->rch & DZ_ROOT_RCH) != 0);
+	return((lk->rch & DZ_ROOT_RCH) != 0);
 }
 
 static __dz_vectorize
-uint64_t dz_link_is_intl(dz_link_t const *link)
+uint64_t dz_link_is_intl(dz_link_t const *lk)
 {
-	return(link->rch != DZ_HEAD_RCH);
+	return(lk->rch != DZ_HEAD_RCH);
 }
 
 static __dz_vectorize
-uint64_t dz_link_is_head(dz_link_t const *link)
+uint64_t dz_link_is_head(dz_link_t const *lk)
 {
 	/* root or head */
-	return((link->rch & DZ_HEAD_RCH) != 0);
+	return((lk->rch & DZ_HEAD_RCH) != 0);
 }
 
 
@@ -2413,21 +2413,21 @@ static __dz_vectorize
 dz_cvec_t dz_cvec_init_intl(dz_profile_t const *profile, uint16_t init)
 {
 	/* insertion penalties */
-	__m128i const iiv = _mm_load_si128((__m128i const *)profile->iiv);
-	__m128i const iev = _mm_load_si128((__m128i const *)profile->iev);
-	__m128i const div = _mm_load_si128((__m128i const *)profile->div);
-	__m128i const dev = _mm_load_si128((__m128i const *)profile->dev);
+	__m128i const ii = _mm_load_si128((__m128i const *)profile->iiv);
+	__m128i const ie = _mm_load_si128((__m128i const *)profile->iev);
+	__m128i const di = _mm_load_si128((__m128i const *)profile->div);
+	__m128i const de = _mm_load_si128((__m128i const *)profile->dev);
 
 	return((dz_cvec_t){
-		.iiv  = iiv,
-		.iev1 = iev,
-		.iev2 = _mm_add_epi16(iev, iev),
-		.iev4 = _mm_slli_epi16(iev, 2),
-		.iev8 = _mm_slli_epi16(iev, 3),
+		.iiv  = ii,
+		.iev1 = ie,
+		.iev2 = _mm_add_epi16(ie, ie),
+		.iev4 = _mm_slli_epi16(ie, 2),
+		.iev8 = _mm_slli_epi16(ie, 3),
 
 		/* deletion penalties */
-		.div  = div,
-		.dev  = dev,
+		.div  = di,
+		.dev  = de,
 
 		/* X-drop threshold */
 		.min  = dz_add_ofs(DZ_CELL_MIN),
@@ -2463,7 +2463,7 @@ dz_fetch_work_t dz_fetch_init(dz_fetcher_t *fetcher, dz_profile_t const *profile
 }
 
 static __dz_vectorize
-uint64_t dz_fetch_next(dz_fetch_work_t *f, dz_link_t *link)
+uint64_t dz_fetch_next(dz_fetch_work_t *f, dz_link_t *lk)
 {
 	/* we expect this function call is inlined */
 	dz_fill_fetch_t next = f->fetcher.fetch_next(f->fetcher.opaque, f->matrix, f->query);
@@ -2471,8 +2471,8 @@ uint64_t dz_fetch_next(dz_fetch_work_t *f, dz_link_t *link)
 	if(next.is_term) { return(1); }
 
 	/* FIXME: update adj?? */
-	link->rch = next.rch;
-	link->idx++;
+	lk->rch = next.rch;
+	lk->idx++;
 	return(0);
 }
 
@@ -2672,16 +2672,16 @@ typedef struct {
  * col (array of swgv) handling
  */
 static __dz_vectorize
-uint16_t *dz_col_finalize(dz_swgv_t *col, dz_range_t const *range, dz_link_t const *link)
+uint16_t *dz_col_finalize(dz_swgv_t *col, dz_range_t const *range, dz_link_t const *lk)
 {
 	dz_cap_t *cap = dz_cap_column(col, range->eblk);
 
 	/*
 	 * cap->range = *range;
-	 * cap->link  = *link;
+	 * cap->lk    = *lk;
 	 */
 	uint64_t const x = dz_loadu_u64(range);
-	uint64_t const y = dz_loadu_u64(link);
+	uint64_t const y = dz_loadu_u64(lk);
 
 	dz_storeu_u64(&cap->range, x);
 	dz_storeu_u64(&cap->link,  y);
