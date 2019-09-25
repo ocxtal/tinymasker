@@ -1,15 +1,15 @@
 
 # test zlib / bzlib / lzma availability
-#	if [[ echo "#include <$(1)>" | $(CC) -E - -H -o /dev/null 2>&1 | head -n1 | grep "error" ]] then echo $(3) ; else echo $(2) ; fi
+#	if [[ printf "#include <$(1)>" | $(CC) -E - -H -o /dev/null 2>&1 | head -n1 | grep "error" ]] then echo $(3) ; else echo $(2) ; fi
 
-ZLIB_CFLAGS   = $(shell bash -c "((echo '\#include <zlib.h>' | $(CC) -E - -H -o /dev/null 2>&1 | head -n1 | grep 'error' > /dev/null) && echo '-DRB_DONTUSE_ZLIB') || echo '-DRB_USE_ZLIB'")
-ZLIB_LDFLAGS  = $(shell bash -c " (echo '\#include <zlib.h>' | $(CC) -E - -H -o /dev/null 2>&1 | head -n1 | grep 'error' > /dev/null) || echo '-lz'")
+ZLIB_CFLAGS   = $(shell bash -c "((printf '\#include <zlib.h>\n' | $(CC) -E - -H -o /dev/null 2>&1 | head -n1 | grep 'error' > /dev/null) && echo '-DRB_DONTUSE_ZLIB') || echo '-DRB_USE_ZLIB'")
+ZLIB_LDFLAGS  = $(shell bash -c " (printf '\#include <zlib.h>\n' | $(CC) -E - -H -o /dev/null 2>&1 | head -n1 | grep 'error' > /dev/null) || echo '-lz'")
 
-BZLIB_CFLAGS  = $(shell bash -c "((echo '\#include <bzlib.h>' | $(CC) -E - -H -o /dev/null 2>&1 | head -n1 | grep 'error' > /dev/null) && echo '-DRB_DONTUSE_BZLIB') || echo '-DRB_USE_BZLIB'")
-BZLIB_LDFLAGS = $(shell bash -c " (echo '\#include <bzlib.h>' | $(CC) -E - -H -o /dev/null 2>&1 | head -n1 | grep 'error' > /dev/null) || echo '-lbz2'")
+BZLIB_CFLAGS  = $(shell bash -c "((printf '\#include <bzlib.h\n>' | $(CC) -E - -H -o /dev/null 2>&1 | head -n1 | grep 'error' > /dev/null) && echo '-DRB_DONTUSE_BZLIB') || echo '-DRB_USE_BZLIB'")
+BZLIB_LDFLAGS = $(shell bash -c " (printf '\#include <bzlib.h\n>' | $(CC) -E - -H -o /dev/null 2>&1 | head -n1 | grep 'error' > /dev/null) || echo '-lbz2'")
 
-LZMA_CFLAGS   = $(shell bash -c "((echo '\#include <lzma.h>' | $(CC) -E - -H -o /dev/null 2>&1 | head -n1 | grep 'error' > /dev/null) && echo '-DRB_DONTUSE_LZMA') || echo '-DRB_USE_LZMA'")
-LZMA_LDFLAGS  = $(shell bash -c " (echo '\#include <lzma.h>' | $(CC) -E - -H -o /dev/null 2>&1 | head -n1 | grep 'error' > /dev/null) || echo '-llzma'")
+LZMA_CFLAGS   = $(shell bash -c "((printf '\#include <lzma.h>\n' | $(CC) -E - -H -o /dev/null 2>&1 | head -n1 | grep 'error' > /dev/null) && echo '-DRB_DONTUSE_LZMA') || echo '-DRB_USE_LZMA'")
+LZMA_LDFLAGS  = $(shell bash -c " (printf '\#include <lzma.h>\n' | $(CC) -E - -H -o /dev/null 2>&1 | head -n1 | grep 'error' > /dev/null) || echo '-llzma'")
 
 UTIL_CFLAGS = $(ZLIB_CFLAGS) $(BZLIB_CFLAGS) $(LZMA_CFLAGS)
 UTIL_LDFLAGS = $(ZLIB_LDFLAGS) $(BZLIB_LDFLAGS) $(LZMA_LDFLAGS)
