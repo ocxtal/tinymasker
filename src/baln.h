@@ -65,7 +65,7 @@ typedef char const *(*baln_bin_strdup_t)(void *bin, char const *str, size_t len)
 
 typedef struct {
 	void *bin;					/* mm_bin_t* in mmstring.h */
-	baln_bin_strdup_t strdup;	/* mm_bin_strdup */
+	baln_bin_strdup_t dup;		/* mm_bin_strdup */
 } baln_bin_t;
 
 
@@ -112,7 +112,7 @@ uint64_t baln_paf_parse_name(baln_aln_t *aln, size_t field, char const *str, siz
 	if((x + y) != 1 || slen == 0) { return(1); }
 
 	char const **dst = &aln->name.r;
-	dst[field == 0] = bin->strdup(bin->bin, str, slen);
+	dst[field == 0] = bin->dup(bin->bin, str, slen);
 	debug("name(%s)", dst[field == 0]);
 	return(0);
 }
@@ -368,7 +368,7 @@ void baln_alnv_destroy(baln_alnv_t *alnv)
 
 typedef struct {
 	void *bin;
-	baln_bin_strdup_t strdup;
+	baln_bin_strdup_t dup;
 
 	kvecm_t(baln_aln_t) buf;
 } baln_builder_t;
@@ -567,8 +567,8 @@ baln_alnv_t *baln_read(baln_file_t *fp)
 	baln_cbin_t cbin;
 	baln_cbin_init(&cbin);
 	baln_bin_t b = {
-		.bin    = (void *)&cbin,
-		.strdup = (baln_bin_strdup_t)baln_cbin_strdup
+		.bin = (void *)&cbin,
+		.dup = (baln_bin_strdup_t)baln_cbin_strdup
 	};
 
 	/* init alignment bin */
