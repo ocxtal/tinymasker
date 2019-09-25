@@ -253,7 +253,7 @@ uint64_t rb_scan_newline(rbread_t *rb, size_t head)
 		if(_likely(mask == 0)) { continue; }
 
 		/* '\n' found */
-		ZCNT_RESULT size_t const idx = _tzcnt_u64(mask);
+		ZCNT_RESULT size_t const idx = _tzc_u64(mask);
 		rb->buf[i + idx] = '\0';
 		return(i + idx);
 	}
