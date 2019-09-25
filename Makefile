@@ -18,7 +18,7 @@ TARGET = tinymasker
 
 
 # compiler flags
-OFLAGS  = -O3
+OFLAGS  = -O3 -flto
 WFLAGS  = -Wall -Wextra -Wshadow
 NWFLAGS = $(shell bash -c "if [[ $(CC) = icc* ]]; then echo '-Wno-unused-function -diag-disable=11074,11076'; else echo '-Wno-unused-function -Wno-unused-label -Wno-constant-conversion -Wno-implicit-fallthrough -Wno-missing-field-initializers'; fi")
 LDFLAGS = -lm -lpthread $(UTIL_LDFLAGS)
