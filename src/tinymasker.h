@@ -36,6 +36,8 @@
 #define DZ_WRAPPED_API			( 0 )
 #define DZ_CIGAR_OP				0x44494d4d
 #define DZ_TRANSPOSE_MATRIX		( 1 )
+#define DZ_NONGRAPH
+#define DZ_OFFSET
 // #define DZ_FULL_LENGTH_BONUS	( 1 )				/* query-side bonus disabled */
 
 
