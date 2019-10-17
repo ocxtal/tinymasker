@@ -1706,7 +1706,7 @@ dz_fill_fetch_t tm_extend_fetch_next(tm_extend_fetcher_t *self, int8_t const *sc
 }
 
 static _force_inline
-__m128i tm_extend_get_profile(tm_extend_fetcher_t *self, int8_t const *score_matrix, dz_query_t const *query, size_t qidx)
+__m128i tm_extend_get_profile(tm_extend_fetcher_t const *self, int8_t const *score_matrix, dz_query_t const *query, size_t qidx)
 {
 	_unused(score_matrix);
 
