@@ -430,7 +430,7 @@ void tm_conf_print_help(tm_conf_t const *conf, FILE *lfp)
 	_msg(2, "  -q INT       gap-extension penalty [%u]", profile->extend.gev);
 	_msg(2, "  -m INT       minimum score threshold [%d]", profile->extend.min_score);
 	_msg(2, "  -R           use raw score instead of complexity adjusted score [%s]", profile->extend.use_raw ? "yes" : "no");
-	_msg(3, "  -g INT       max gap length allowed (X-drop threshold) [%u]", profile->extend.vlim);
+	_msg(3, "  -g INT       max gap length allowed (X-drop threshold) [%u]", profile->extend.glim);
 	_msg(3, "  -l INT       full-length bonus per end [%u]", profile->extend.bonus);
 	_msg(2, "");
 	_msg(2, "Patching options:");

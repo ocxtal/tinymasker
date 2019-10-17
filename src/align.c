@@ -460,7 +460,7 @@ tm_scan_t *tm_scan_init(void)
 
 	/* clear DP working space */
 	size_t const size = DZ_MEM_INIT_SIZE - _roundup(sizeof(dz_arena_t), DZ_MEM_ALIGN_SIZE);
-	self->extend.fill = dz_arena_init(size);
+	self->extend.fill = dz_arena_create(size);
 	self->extend.trace = NULL;
 	return(self);
 }
@@ -1722,8 +1722,11 @@ __m128i tm_extend_get_profile(tm_extend_fetcher_t *self, int8_t const *score_mat
 }
 
 static _force_inline
-dz_trace_match_t tm_extend_get_match(int8_t const *score_matrix, dz_query_t const *query, size_t qidx, uint32_t ch)
+dz_trace_match_t tm_extend_get_match(void const *unused, int8_t const *score_matrix, dz_query_t const *query, size_t qidx, dz_trace_link_t const *link)
 {
+	_unused(unused);
+
+	uint64_t const ch = link->rch;
 	uint8_t const *packed = dz_query_packed_array(query);
 	int8_t const score = score_matrix[ch * DZ_QUERY_MAT_SIZE / 2 + packed[qidx]];
 
@@ -1804,22 +1807,22 @@ dz_state_t const *tm_extend_wrap(dz_arena_t *mem, dz_profile_t const *profile, t
 
 	dz_fetcher_t fetcher = {
 		.opaque      = (void *)&w,
-		.fetch_next  = (dz_fill_fetch_next_t)tm_extend_fetch_next,
-		.get_profile = (dz_fill_get_profile_t)tm_extend_get_profile,		/* direct conversion */
+		.fetch_next  = (dz_fetch_next_t)tm_extend_fetch_next,
+		.get_profile = (dz_get_profile_t)tm_extend_get_profile,		/* direct conversion */
 		.get_bound   = NULL
 	};
 	return(dz_extend_core(mem, profile, q, &fetcher, (dz_state_t const **)&profile->root, 1));
 }
 
 static _force_inline
-tm_pos_t tm_calc_max_wrap(dz_query_t const *q, dz_state_t const *r, tm_pos_t rpos)
+tm_pos_t tm_calc_max_wrap(dz_profile_t const *profile, dz_query_t const *q, dz_state_t const *r, tm_pos_t rpos)
 {
 	if(r == NULL || r->max.cap == NULL) {
 		return(rpos);
 	}
 
 	/* get downward max */
-	dz_max_pos_t const s = dz_calc_max_pos_core(q, r);
+	dz_max_pos_t const s = dz_calc_max_pos_core(profile, q, r);
 
 	/* insert bonus */
 	tm_pos_t const pos = {
@@ -1894,7 +1897,7 @@ tm_extend_first_t tm_extend_first(tm_scan_t *self, tm_idx_profile_t const *pf, t
 	dz_state_t const *r = tm_extend_wrap(self->extend.fill,
 		pf->extend.dz, sk, qr, rpos
 	);
-	tm_pos_t const epos = tm_calc_max_wrap(qr, r, rpos);
+	tm_pos_t const epos = tm_calc_max_wrap(pf->extend.dz, qr, r, rpos);
 
 	debug("forward: rpos(%u, %u) --- score(%d) --> epos(%u, %u)", rpos.q, rpos.r, r != NULL ? r->max.score.abs : 0, epos.q, epos.r);
 	return((tm_extend_first_t){
@@ -1924,10 +1927,12 @@ dz_alignment_t const *tm_extend_second(tm_scan_t *self, tm_idx_profile_t const *
 	}
 
 	/* traceback */
+	dz_getter_t getter = {
+		.opaque    = NULL,
+		.get_match = tm_extend_get_match
+	};
 	dz_alignment_t const *aln = dz_trace_core(self->extend.trace,
-		pf->extend.dz, qf,
-		(dz_trace_get_match_t)tm_extend_get_match,
-		f
+		pf->extend.dz, qf, &getter, f
 	);
 	debug("reverse: spos(%u, %u) --- score(%d) --> epos(%u, %u), f(%p), aln(%p)", epos.q - aln->query_length, epos.r + (epos.dir ? aln->ref_length : -aln->ref_length), aln->score, epos.q, epos.r, f, aln);
 

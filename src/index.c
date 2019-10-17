@@ -435,8 +435,7 @@ void tm_idx_fill_default(tm_idx_profile_t *profile)
 	profile->extend.gev = 1;
 	profile->extend.gih = 5;
 	profile->extend.geh = 1;
-	profile->extend.vlim = 16;
-	profile->extend.hlim = 16;
+	profile->extend.glim = 16;
 	tm_idx_fill_score(profile, 2, -3);
 	return;
 }
@@ -485,8 +484,7 @@ void tm_idx_override_default(tm_idx_profile_t *profile, tm_idx_conf_t const *con
 		profile->extend.geh = tm_idx_unwrap(conf->gap_extend);
 	}
 	if(!tm_idx_is_default(conf->max_gap_len)) {
-		profile->extend.vlim = tm_idx_unwrap(conf->max_gap_len);
-		profile->extend.hlim = tm_idx_unwrap(conf->max_gap_len);
+		profile->extend.glim = tm_idx_unwrap(conf->max_gap_len);
 	}
 
 	/* anchoring bonus; score matrix refilled afterward */
@@ -663,12 +661,10 @@ uint64_t tm_idx_check_profile(tm_idx_profile_t const *profile)
 	}
 
 	/* max gap len */ {
-		uint32_t const vlim = profile->extend.vlim;
-		uint32_t const hlim = profile->extend.hlim;
-		// fprintf(stderr, "%u, %u\n", vlim, hlim);
+		uint32_t const glim = profile->extend.glim;
+		// fprintf(stderr, "%u\n", glim);
 
-		tm_idx_assert(vlim >= 1 && vlim <= 256, "max gap length (-g) must be >= 1 and <= 256.");
-		tm_idx_assert(hlim >= 1 && hlim <= 256, "max gap length (-g) must be >= 1 and <= 256.");
+		tm_idx_assert(glim >= 1 && glim <= 256, "max gap length (-g) must be >= 1 and <= 256.");
 	}
 
 	/* full-length bonus */ {
@@ -708,8 +704,9 @@ uint64_t tm_idx_finalize_profile(tm_idx_profile_t *profile)
 		.del_extend = profile->extend.geh,
 
 		/* fixed */
-		.max_ins_len = profile->extend.vlim,
-		.max_del_len = profile->extend.hlim,
+		// .max_ins_len = profile->extend.vlim,
+		// .max_del_len = profile->extend.hlim,
+		.max_gap_len = profile->extend.glim,
 		.full_length_bonus = profile->extend.bonus
 	};
 	// fprintf(stderr, "(%u, %u, %u, %u)\n", profile->extend.giv, profile->extend.gev, profile->extend.gih, profile->extend.geh);
@@ -1017,6 +1014,10 @@ static uint64_t tm_idx_set_filter(tm_idx_profile_t *profile, char const *str) {
 	}
 	return(0);
 }
+static uint64_t tm_idx_set_gap_max(tm_idx_profile_t *profile, char const *str) {
+	profile->extend.glim = mm_atoi(str, 0);
+	return(0);
+}
 static uint64_t tm_idx_set_ins_open(tm_idx_profile_t *profile, char const *str) {
 	profile->extend.giv = mm_atoi(str, 0);
 	return(0);
@@ -1025,20 +1026,12 @@ static uint64_t tm_idx_set_ins_extend(tm_idx_profile_t *profile, char const *str
 	profile->extend.gev = mm_atoi(str, 0);
 	return(0);
 }
-static uint64_t tm_idx_set_ins_max(tm_idx_profile_t *profile, char const *str) {
-	profile->extend.vlim = mm_atoi(str, 0);
-	return(0);
-}
 static uint64_t tm_idx_set_del_open(tm_idx_profile_t *profile, char const *str) {
 	profile->extend.gih = mm_atoi(str, 0);
 	return(0);
 }
 static uint64_t tm_idx_set_del_extend(tm_idx_profile_t *profile, char const *str) {
 	profile->extend.geh = mm_atoi(str, 0);
-	return(0);
-}
-static uint64_t tm_idx_set_del_max(tm_idx_profile_t *profile, char const *str) {
-	profile->extend.hlim = mm_atoi(str, 0);
 	return(0);
 }
 static uint64_t tm_idx_set_min_score(tm_idx_profile_t *profile, char const *str) {
@@ -1068,12 +1061,11 @@ uint64_t tm_idx_parse_key(tm_idx_profile_t *profile, toml_table_t const *table, 
 		{ "window_size",   6, (tm_idx_set_t)tm_idx_set_window,     (tm_idx_toml_in_t)toml_raw_in },
 		{ "min_seed_cnt",  8, (tm_idx_set_t)tm_idx_set_ccnt,       (tm_idx_toml_in_t)toml_raw_in },
 		{ "enable_filter", 6, (tm_idx_set_t)tm_idx_set_filter,     (tm_idx_toml_in_t)toml_raw_in },		/* disable filter if arg == "false" */
+		{ "gap_max_len",   7, (tm_idx_set_t)tm_idx_set_gap_max,    (tm_idx_toml_in_t)toml_raw_in },
 		{ "ins_open",      6, (tm_idx_set_t)tm_idx_set_ins_open,   (tm_idx_toml_in_t)toml_raw_in },
 		{ "ins_extend",    6, (tm_idx_set_t)tm_idx_set_ins_extend, (tm_idx_toml_in_t)toml_raw_in },
-		{ "ins_max_len",   7, (tm_idx_set_t)tm_idx_set_ins_max,    (tm_idx_toml_in_t)toml_raw_in },
 		{ "del_open",      6, (tm_idx_set_t)tm_idx_set_del_open,   (tm_idx_toml_in_t)toml_raw_in },
 		{ "del_extend",    6, (tm_idx_set_t)tm_idx_set_del_extend, (tm_idx_toml_in_t)toml_raw_in },
-		{ "del_max_len",   7, (tm_idx_set_t)tm_idx_set_del_max,    (tm_idx_toml_in_t)toml_raw_in },
 		{ "min_score",     6, (tm_idx_set_t)tm_idx_set_min_score,  (tm_idx_toml_in_t)toml_raw_in },
 		{ "score_matrix",  5, (tm_idx_set_t)tm_idx_parse_matrix,   (tm_idx_toml_in_t)toml_table_in },
 

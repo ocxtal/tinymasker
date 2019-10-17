@@ -340,7 +340,7 @@ void *tm_mtscan_source(uint32_t tid, tm_mtscan_t *self)
 	/* init working buffer */
 	tm_mtscan_batch_t *batch = _sub_offset(seq_bin, offsetof(tm_mtscan_batch_t, seq_bin));
 	batch->id  = self->icnt++;
-	batch->mem = dz_arena_init(DZ_MEM_INIT_SIZE);
+	batch->mem = dz_arena_create(DZ_MEM_INIT_SIZE);
 	return(batch);
 }
 

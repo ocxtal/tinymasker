@@ -91,7 +91,7 @@ typedef struct {
 		int32_t min_score;
 		uint16_t use_raw;
 		uint16_t bonus;				/* reference-side bonus; handled manually */
-		uint16_t vlim, hlim;		/* max_ins_len and max_del_len */
+		uint16_t glim, unused;		/* max_ins_len and max_del_len */
 		uint8_t giv, gev, gih, geh;
 		int8_t score_matrix[DZ_QUERY_MAT_SIZE * DZ_REF_MAT_SIZE];
 	} extend;
