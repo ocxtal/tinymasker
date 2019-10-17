@@ -12,6 +12,7 @@
 #  define UNITTEST				( 1 )
 #endif
 #define UNITTEST_UNIQUE_ID		1
+#define LOGGER_MAIN
 
 
 #include "utils/utils.h"		/* include all */

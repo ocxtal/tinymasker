@@ -41,7 +41,12 @@ double realtime(void)
 	return(tp.tv_sec + tp.tv_usec * 1e-6);
 }
 
-static double inittime = 0.0;
+#if defined(LOGGER_MAIN)
+double inittime = 0.0;
+#else
+extern double inittime;
+#endif
+
 
 #define logger_init()			{ inittime = realtime(); }
 #define logger_destroy() { \
