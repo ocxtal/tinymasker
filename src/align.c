@@ -923,13 +923,11 @@ size_t tm_chain_seed(tm_idx_profile_t const *profile, tm_seed_t *seed, size_t sc
 			s->u += chained;		/* mark chained */
 		}
 
-		/*
 		debugblock({
 			if((int32_t)_ext_v2i32(spos, 2) >= 0) {
 				debug("%r ---> %r, cnt(%d)", tm_seed_to_str, p, tm_seed_to_str, s, _ext_v2i32(spos, 2));
 			}
 		});
-		*/
 
 		v2i32_t const epos = (v2i32_t){ .v1 = _mm_cvtsi64_si128(ruv) };
 		if((int32_t)_ext_v2i32(spos, 2) < 0) { continue; }		/* skip if too short */
@@ -1283,6 +1281,8 @@ size_t tm_collect_all(tm_scan_t *self, tm_idx_t const *idx, uint8_t const *seq, 
 
 	/* collect chain for each reference sequence */
 	for(size_t i = 0; i < idx->sketch.cnt; i++) {
+		debug("i(%zu)", i);
+
 		/* collect seeds */
 		if(tm_seed_and_sort(si[i], pf[si[i]->h.pid], seq, slen, &self->seed.arr, &self->seed.sqiv) == 0) { continue; }
 
@@ -1483,7 +1483,8 @@ tm_extend_replace_t tm_extend_slice_bin(tm_scan_t *self, tm_aln_t const *new)
 	if(v == NULL) { return(notfound); }
 
 	/* position is compared at once on GP register */
-	uint64_t const x = _loadu_u64(&new->pos);	/* uncanonized spos so that it points the tail end of the second extension */
+	uint32_t const xrid = new->attr.rid;
+	uint64_t const xpos = _loadu_u64(&new->pos);	/* uncanonized spos so that it points the tail end of the second extension */
 
 	/* init iterator */
 	rbt_iter_t it;
@@ -1493,11 +1494,16 @@ tm_extend_replace_t tm_extend_slice_bin(tm_scan_t *self, tm_aln_t const *new)
 		tm_aln_t const *p = rbt_fetch_match_aln(&it, v, new);
 		if(p == NULL) { break; }
 
-		/* compare end pos, return iterator if matched */
-		uint64_t const y = _loadu_u64(&p->pos);
+		/*
+		 * query-side start position matched;
+		 * compare reference-side id and position
+		 * (FIXME? we don't have to compare end positions?)
+		 */
+		uint32_t const yrid = p->attr.rid;
+		uint64_t const ypos = _loadu_u64(&p->pos);
 
-		// xfprintf(stderr, "compare aln, bid(%zu), eq(%lu), %r, %r\n", p - v, x == y, tm_aln_to_str, p, tm_aln_to_str, new);
-		if(x == y) {		/* direction contained */
+		debug("compare aln, bid(%zu), eq(%lu, %lu), %r, %r", p - v, xrid == yrid, xpos == ypos, tm_aln_to_str, p, tm_aln_to_str, new);
+		if(xrid == yrid && xpos == ypos) {		/* direction contained */
 			/* alignment end position collides; take better one */
 			// xfprintf(stderr, "duplication found, patch bin, bid(%zu), replace(%lu), %r, %r\n", p - v, tm_extend_compare_aln(p, new) < 0, tm_aln_to_str, p, tm_aln_to_str, new);
 			return((tm_extend_replace_t){
@@ -1553,6 +1559,8 @@ uint64_t tm_extend_record(tm_scan_t *self, tm_aln_t const *aln)
 {
 	/* returns 1 if recorded */
 	tm_extend_replace_t const r = tm_extend_slice_bin(self, aln);
+
+	debug("collided(%lu), replaced(%lu)", r.collided, r.replaced);
 	if(r.collided) { return(r.replaced); }
 
 	/* allocate new bin */
