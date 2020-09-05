@@ -87,7 +87,7 @@ The calculated chains are converted into alignment paths by the X-drop DP algori
 
 ### Brief discussion on the algorithm and implementation
 
-Personally I think the de Bruijn index is a quite interesting data structure, but it's probably not very practical. This is because there are not many applications where quick short k-mer enumeration is extremely important. Short exact k-mer matches are more important in protein search, but there is another problem that it is difficult to implement efficient graph traversal as done in my implementation when the degree of graph (alphabet size) is large.
+Personally I think the de Bruijn index is a quite interesting data structure, but it's probably not very practical. This is because there are not many applications where quick short k-mer enumeration is extremely important. Short exact matches are more important in protein search, but there is another problem that it is difficult to implement as efficient graph traversal as done for DNA when the outgoing degree (alphabet size) is large.
 
 One possible exception is exhaustive detection of short repeat sequences from a reference sequence. The tinymasker was named after this potential application. I believe it's possible to integrate tinymasker or its derivative into repeat annotation tools such as RepeatMasker.
 
