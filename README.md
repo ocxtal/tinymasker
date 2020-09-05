@@ -63,9 +63,9 @@ The actual data structure of the de Bruijn index was carefully designed not to i
 
 #### Filtering redundant seeds out by determining continuity of matches
 
-I also added redundant seed filter, by making use of the property peculiar to de Bruijn graphs. Since we already know that (k - 1)-base prefix of the node continues to match wherever we jump over outgoing edges, we can make use of this nature for determining if a match at a certain reference position continues at the next column. That is, comparing the next reference base for that position to that on the query tells if the match at that position continues or not.
+I also added redundant seed filter, by making use of the property peculiar to de Bruijn graphs. Since we already know that (k - 1)-base prefix of the node continues to match wherever we jump over the outgoing edges, we can make use of this nature for determining if a match at a certain reference position continues at the next column. That is, comparing the next reference base for that position to that on the query tells if the match at that position continues or not.
 
-The concept was further optimized in the implementation. To encode the next reference bases implicitly in the position array, the positions are sorted by the next reference bases, and chunked according to it. To filter out redundant continuous matches, only the chunks for bases that don't match at the next column are copied to the seed bin. Further, the procedure is disabled once every 16 times so that we don't filter contiguous k-mers too much.
+The concept was further optimized in the implementation. To encode the next reference bases implicitly in the position array, the positions are sorted by the next reference bases, and chunked according to it. To filter out redundant continuous matches, only the chunks for bases that don't match at the next column are copied to the seed bin. In addition, the procedure is disabled once every 16 times so that we don't filter contiguous k-mers too much.
 
 #### Reducing the number of nodes
 
