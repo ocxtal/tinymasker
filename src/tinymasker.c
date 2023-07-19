@@ -441,7 +441,7 @@ void tm_conf_print_help(tm_conf_t const *conf, FILE *lfp)
 	_msg(2, "");
 
 	if(_level(conf) <= 2) {
-		_msg(1, "Some optinos are hidden. Type `tinymasker -hh' to show all.");
+		_msg(1, "Some options are hidden. Type `tinymasker -hh' to show all.");
 		_msg(1, "");
 	}
 
